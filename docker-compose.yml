@@ -1,0 +1,29 @@
+services:
+  broker:
+    build:
+      context: ./broker
+      dockerfile: Dockerfile
+    env_file:
+      - ./broker/.env
+    volumes:
+      - nats-data:/data
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    restart: unless-stopped
+
+  broker-init:
+    build:
+      context: ./broker
+      dockerfile: Dockerfile.init
+    env_file:
+      - ./broker/.env
+    environment:
+      NATS_URL: nats://broker:4222
+    depends_on:
+      - broker
+    profiles:
+      - tools
+
+volumes:
+  nats-data:
