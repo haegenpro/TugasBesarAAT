@@ -1,0 +1,80 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hazards}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme-postgres-password}
+    volumes:
+      - ./store/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-hazards}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  bmkg-mock:
+    build: ./bmkg-mock
+    ports: ["8081:8081"]
+    environment:
+      BMKG_PORT: 8081
+      BMKG_API_KEY: ${BMKG_API_KEY:-changeme-bmkg-key}
+      BMKG_DELAY_MS: ${BMKG_DELAY_MS:-100}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8081/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pvmbg-mock:
+    build: ./pvmbg-mock
+    ports: ["8082:8082"]
+    environment:
+      PVMBG_PORT: 8082
+      PVMBG_TOKEN: ${PVMBG_TOKEN:-changeme-pvmbg-token}
+      PVMBG_ADMIN_TOKEN: ${PVMBG_ADMIN_TOKEN:-changeme-pvmbg-admin-token}
+      PVMBG_MIN_DELAY_MS: ${PVMBG_MIN_DELAY_MS:-500}
+      PVMBG_MAX_DELAY_MS: ${PVMBG_MAX_DELAY_MS:-3000}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8082/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  aggregator:
+    build: ./aggregator
+    ports: ["8080:8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      bmkg-mock:
+        condition: service_healthy
+      pvmbg-mock:
+        condition: service_healthy
+    environment:
+      AGGREGATOR_PORT: 8080
+      POLL_INTERVAL: ${POLL_INTERVAL:-3}
+      BMKG_BASE_URL: http://bmkg-mock:8081
+      BMKG_API_KEY: ${BMKG_API_KEY:-changeme-bmkg-key}
+      PVMBG_BASE_URL: http://pvmbg-mock:8082
+      PVMBG_TOKEN: ${PVMBG_TOKEN:-changeme-pvmbg-token}
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme-postgres-password}@postgres:5432/${POSTGRES_DB:-hazards}?sslmode=disable
+      NATS_URL: nats://nats:4222
+      NATS_STREAM: ${NATS_STREAM:-HAZARDS}
+      NATS_SUBJECT: ${NATS_SUBJECT:-hazard.events}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
