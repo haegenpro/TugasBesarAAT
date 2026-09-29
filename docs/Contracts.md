@@ -106,7 +106,7 @@ Both examples forward the correlation ID per the logging conventions doc — thi
 | Replay/at-least-once support | Yes (native) | Yes (with manual ack) | Yes (JetStream persists + replays) |
 | Resource footprint | Heavy for a laptop-run demo | Medium | Light |
 
-**Decision: NATS + JetStream.** NATS has the lowest setup and resource footprint in the comparison above, while JetStream provides the durable stream, replay, and explicit-ack behavior required for at-least-once delivery. Use the `nats:2.10-alpine` image with JetStream enabled via `-js`, and the Go client `github.com/nats-io/nats.go`.
+**Decision: NATS + JetStream.** NATS has the lowest setup and resource footprint in the comparison above, while JetStream provides the durable stream, replay, and explicit-ack behavior required for at-least-once delivery. The broker image extends official `nats:2.15.0-alpine3.22`, mounts `broker/nats.conf` read-only to enable JetStream, and initializes the stream on each start. The separate `broker-init` service remains available for manual reinitialization. The Go client is `github.com/nats-io/nats.go`.
 
 **Subject name:** `hazard.events` (single subject; consumers filter by `hazard_type` client-side rather than using separate subjects per hazard type — keeps the fan-out story simple for P5's "add a consumer without touching the producer" requirement).
 

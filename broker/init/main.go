@@ -27,12 +27,12 @@ func loadConfig() (Config, error) {
 		return Config{}, err
 	}
 
-	streamName, err := requireEnv("NATS_STREAM_NAME")
+	streamName, err := requireEnv("NATS_STREAM")
 	if err != nil {
 		return Config{}, err
 	}
 
-	streamSubject, err := requireEnv("NATS_STREAM_SUBJECT")
+	streamSubject, err := requireEnv("NATS_SUBJECT")
 	if err != nil {
 		return Config{}, err
 	}
@@ -89,7 +89,43 @@ func ensureStream(parent context.Context, js jetstream.JetStream, cfg Config) er
 	return nil
 }
 
+// checkStream is a read-only health probe. It uses the configured NATS URL
+// and verifies the stream and subject that the initializer is responsible for.
+func checkStream(parent context.Context, cfg Config) error {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+
+	nc, err := nats.Connect(cfg.NATSURL, nats.Name("broker-health"), nats.Timeout(2*time.Second), nats.NoReconnect())
+	if err != nil {
+		return fmt.Errorf("connect to NATS: %w", err)
+	}
+	defer nc.Close()
+
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return fmt.Errorf("create JetStream client: %w", err)
+	}
+	stream, err := js.Stream(ctx, cfg.StreamName)
+	if err != nil {
+		return fmt.Errorf("find stream %q: %w", cfg.StreamName, err)
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect stream %q: %w", cfg.StreamName, err)
+	}
+	if info.Config.Storage != jetstream.FileStorage || info.Config.MaxAge != cfg.StreamMaxAge ||
+		len(info.Config.Subjects) != 1 || info.Config.Subjects[0] != cfg.StreamSubject {
+		return fmt.Errorf("stream %q has unexpected configuration", cfg.StreamName)
+	}
+	return nil
+}
+
 func main() {
+	checkOnly := len(os.Args) == 2 && os.Args[1] == "--check"
+	if len(os.Args) > 1 && !checkOnly {
+		log.Fatalf("unsupported arguments: %v", os.Args[1:])
+	}
+
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGINT,
@@ -100,6 +136,12 @@ func main() {
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("invalid configuration: %v", err)
+	}
+	if checkOnly {
+		if err := checkStream(ctx, cfg); err != nil {
+			log.Fatalf("broker unhealthy: %v", err)
+		}
+		return
 	}
 
 	log.Printf(

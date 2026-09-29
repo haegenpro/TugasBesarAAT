@@ -5,6 +5,7 @@ package publisher
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -30,8 +31,7 @@ type Publisher struct {
 	logger  *slog.Logger
 }
 
-// New connects to NATS, enables JetStream, and ensures a durable file-backed
-// stream exists for the given subject.
+// New connects to NATS and requires the broker initializer's stream to exist.
 func New(ctx context.Context, url, stream, subject string, logger *slog.Logger) (*Publisher, error) {
 	nc, err := nats.Connect(url, nats.Timeout(5*time.Second))
 	if err != nil {
@@ -43,15 +43,26 @@ func New(ctx context.Context, url, stream, subject string, logger *slog.Logger) 
 		return nil, err
 	}
 
-	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      stream,
-		Subjects:  []string{subject},
-		Storage:   jetstream.FileStorage,
-		Retention: jetstream.LimitsPolicy,
-	})
+	st, err := js.Stream(ctx, stream)
+	if err != nil {
+		nc.Close()
+		return nil, fmt.Errorf("JetStream stream %q is unavailable: %w", stream, err)
+	}
+	info, err := st.Info(ctx)
 	if err != nil {
 		nc.Close()
 		return nil, err
+	}
+	found := false
+	for _, configured := range info.Config.Subjects {
+		if configured == subject {
+			found = true
+			break
+		}
+	}
+	if !found {
+		nc.Close()
+		return nil, fmt.Errorf("JetStream stream %q does not contain subject %q", stream, subject)
 	}
 
 	return &Publisher{nc: nc, js: js, subject: subject, logger: logger}, nil
@@ -61,8 +72,12 @@ func (p *Publisher) Close() {
 	p.nc.Close()
 }
 
+func (p *Publisher) Connected() bool {
+	return p.nc.IsConnected()
+}
+
 // Publish sends the envelope and blocks until JetStream acknowledges the
-// durable write, satisfying the at-least-once delivery requirement.
+// durable write. The outbox retries when acknowledgement is missing.
 func (p *Publisher) Publish(ctx context.Context, event domain.HazardEvent, correlationID string) error {
 	env := Envelope{
 		EnvelopeVersion: 1,
@@ -76,7 +91,7 @@ func (p *Publisher) Publish(ctx context.Context, event domain.HazardEvent, corre
 	}
 
 	start := time.Now()
-	_, err = p.js.Publish(ctx, p.subject, data)
+	_, err = p.js.Publish(ctx, p.subject, data, jetstream.WithMsgID(event.HazardID))
 	latency := time.Since(start).Milliseconds()
 
 	success := err == nil

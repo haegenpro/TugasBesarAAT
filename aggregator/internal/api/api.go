@@ -17,10 +17,11 @@ import (
 type API struct {
 	Store  *store.Store
 	Status *poller.PVMBGStatus
+	Deps   *Dependencies
 }
 
-func New(s *store.Store, status *poller.PVMBGStatus) *API {
-	return &API{Store: s, Status: status}
+func New(s *store.Store, status *poller.PVMBGStatus, deps *Dependencies) *API {
+	return &API{Store: s, Status: status, Deps: deps}
 }
 
 type listResponse struct {
@@ -53,6 +54,10 @@ func (a *API) enrichStale(events []domain.HazardEvent) []domain.HazardEvent {
 }
 
 func (a *API) ListHazards(c *gin.Context) {
+	if !a.Deps.StoreReady() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "store unavailable"})
+		return
+	}
 	f := store.Filters{
 		HazardType: c.Query("hazard_type"),
 		Severity:   c.Query("severity"),
@@ -66,7 +71,8 @@ func (a *API) ListHazards(c *gin.Context) {
 
 	events, err := a.Store.Query(c.Request.Context(), f)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		a.Deps.SetStoreReady(false)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "store unavailable"})
 		return
 	}
 	events = a.enrichStale(events)
@@ -79,6 +85,10 @@ func (a *API) ListHazards(c *gin.Context) {
 }
 
 func (a *API) GetHazard(c *gin.Context) {
+	if !a.Deps.StoreReady() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "store unavailable"})
+		return
+	}
 	id := c.Param("id")
 	event, err := a.Store.GetByID(c.Request.Context(), id)
 	if err != nil {
@@ -86,7 +96,8 @@ func (a *API) GetHazard(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "hazard not found"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		a.Deps.SetStoreReady(false)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "store unavailable"})
 		return
 	}
 	enriched := a.enrichStale([]domain.HazardEvent{event})
@@ -95,4 +106,18 @@ func (a *API) GetHazard(c *gin.Context) {
 
 func Health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "aggregator"})
+}
+
+func (a *API) Ready(c *gin.Context) {
+	storeReady := a.Deps.StoreReady()
+	brokerReady := a.Deps.BrokerReady()
+	status := "ready"
+	code := http.StatusOK
+	if !storeReady {
+		status = "unavailable"
+		code = http.StatusServiceUnavailable
+	} else if !brokerReady {
+		status = "degraded"
+	}
+	c.JSON(code, gin.H{"status": status, "store": storeReady, "broker": brokerReady})
 }

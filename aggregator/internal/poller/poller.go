@@ -21,12 +21,7 @@ import (
 // interface so BMKG/PVMBG polling and dedup/concurrency behavior can be
 // tested with httptest servers and a fake, without a real Postgres.
 type HazardSaver interface {
-	SaveDedup(ctx context.Context, e domain.HazardEvent) (inserted bool, err error)
-}
-
-// EventPublisher is the subset of the Publisher the poller needs.
-type EventPublisher interface {
-	Publish(ctx context.Context, event domain.HazardEvent, correlationID string) error
+	SaveDedup(ctx context.Context, e domain.HazardEvent, correlationID string) (inserted bool, err error)
 }
 
 type Poller struct {
@@ -34,8 +29,8 @@ type Poller struct {
 	PVMBG    *clients.PVMBGClient
 	Store    HazardSaver
 	Lookup   volcano.Lookuper
-	Pub      EventPublisher
 	Status   *PVMBGStatus
+	Ready    func() bool
 	Interval time.Duration
 	Logger   *slog.Logger
 }
@@ -49,7 +44,9 @@ func (p *Poller) Run(ctx context.Context) {
 }
 
 func (p *Poller) loop(ctx context.Context, name string, fn func(context.Context)) {
-	fn(ctx) // poll immediately on startup, then on each tick
+	if p.Ready == nil || p.Ready() {
+		fn(ctx) // poll immediately on startup, then on each tick
+	}
 	ticker := time.NewTicker(p.Interval)
 	defer ticker.Stop()
 	for {
@@ -57,7 +54,9 @@ func (p *Poller) loop(ctx context.Context, name string, fn func(context.Context)
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			fn(ctx)
+			if p.Ready == nil || p.Ready() {
+				fn(ctx)
+			}
 		}
 	}
 }
@@ -79,7 +78,7 @@ func (p *Poller) PollBMKGOnce(ctx context.Context) {
 	inserted := 0
 	for _, ev := range events {
 		hazard := mapping.SeismicToHazard(ev, warnings)
-		p.saveAndPublish(ctx, hazard, cid, &inserted)
+		p.saveAndQueue(ctx, hazard, cid, &inserted)
 	}
 	p.Logger.Info("polled bmkg", "service", "aggregator", "correlation_id", cid,
 		"fetched", len(events), "new_hazards", inserted)
@@ -106,16 +105,16 @@ func (p *Poller) PollPVMBGOnce(ctx context.Context) {
 			p.Logger.Error("volcanic mapping failed", "service", "aggregator", "correlation_id", cid, "error", err.Error())
 			continue
 		}
-		p.saveAndPublish(ctx, hazard, cid, &inserted)
+		p.saveAndQueue(ctx, hazard, cid, &inserted)
 	}
 	p.Logger.Info("polled pvmbg", "service", "aggregator", "correlation_id", cid,
 		"fetched", len(reports), "new_hazards", inserted)
 }
 
-// saveAndPublish deduplicates on (source, source_ref_id) via the Store's
-// unique constraint; only a genuinely new insert is published to NATS.
-func (p *Poller) saveAndPublish(ctx context.Context, hazard domain.HazardEvent, cid string, inserted *int) {
-	wasInserted, err := p.Store.SaveDedup(ctx, hazard)
+// saveAndQueue deduplicates on (source, source_ref_id). The Store atomically
+// queues a new insert for the outbox dispatcher to publish.
+func (p *Poller) saveAndQueue(ctx context.Context, hazard domain.HazardEvent, cid string, inserted *int) {
+	wasInserted, err := p.Store.SaveDedup(ctx, hazard, cid)
 	if err != nil {
 		p.Logger.Error("store save failed", "service", "aggregator", "correlation_id", cid, "error", err.Error())
 		return
@@ -124,7 +123,4 @@ func (p *Poller) saveAndPublish(ctx context.Context, hazard domain.HazardEvent, 
 		return
 	}
 	*inserted++
-	if err := p.Pub.Publish(ctx, hazard, cid); err != nil {
-		p.Logger.Error("nats publish failed", "service", "aggregator", "correlation_id", cid, "error", err.Error())
-	}
 }

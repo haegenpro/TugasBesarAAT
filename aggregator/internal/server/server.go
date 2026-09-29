@@ -17,6 +17,7 @@ func New(logger *slog.Logger, a *api.API) *gin.Engine {
 	r.Use(middleware.JSONLogger(logger, "aggregator"))
 
 	r.GET("/health", api.Health)
+	r.GET("/ready", a.Ready)
 	r.GET("/internal/hazards", a.ListHazards)
 	r.GET("/internal/hazards/:id", a.GetHazard)
 

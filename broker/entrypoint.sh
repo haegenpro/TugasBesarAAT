@@ -1,16 +1,18 @@
 #!/bin/sh
-set -e
+set -eu
 
-nats-server -c /etc/nats/nats.conf &
-NATS_PID=$!
+rm -f /tmp/broker-ready
+nats-server --config /etc/nats/nats.conf &
+nats_pid=$!
 
 cleanup() {
-    kill -TERM "$NATS_PID" 2>/dev/null || true
-    wait "$NATS_PID" 2>/dev/null || true
+    kill -TERM "$nats_pid" 2>/dev/null || true
+    wait "$nats_pid" 2>/dev/null || true
 }
 
-trap cleanup INT TERM
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 
 /usr/local/bin/broker-init
-
-wait "$NATS_PID"
+touch /tmp/broker-ready
+wait "$nats_pid"

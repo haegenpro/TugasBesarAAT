@@ -37,21 +37,41 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.Pool.Ping(ctx)
 }
 
+// CheckSchema verifies the tables needed by the aggregator without changing
+// the database. Postgres creates them from store/init.sql on first boot.
+func (s *Store) CheckSchema(ctx context.Context) error {
+	for _, query := range []string{
+		`SELECT hazard_id, source, source_ref_id, attributes FROM hazard_events LIMIT 0`,
+		`SELECT volcano_id, area_name, latitude, longitude FROM volcano_reference LIMIT 0`,
+		`SELECT hazard_id, event_payload, correlation_id, queued_at FROM hazard_outbox LIMIT 0`,
+	} {
+		if _, err := s.Pool.Exec(ctx, query); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SaveDedup upserts a HazardEvent, deduplicating on (source, source_ref_id).
-// A genuinely new source record inserts a fresh row and returns
-// inserted=true — only that case should be published to NATS. A record
-// already seen on an earlier poll cycle updates its mutable fields in place
+// A genuinely new source record inserts a fresh row and outbox event and
+// returns inserted=true. A record seen on an earlier poll cycle updates its
+// mutable fields in place
 // (this is what lets a source's schema evolution, e.g. PVMBG's
 // confidence_level, reach already-ingested rows on the next poll with no
 // restart/migration) but keeps its original hazard_id and returns
-// inserted=false, so it is never re-published.
-func (s *Store) SaveDedup(ctx context.Context, e domain.HazardEvent) (inserted bool, err error) {
+// inserted=false, so it is never queued again.
+func (s *Store) SaveDedup(ctx context.Context, e domain.HazardEvent, correlationID string) (inserted bool, err error) {
 	attrsJSON, err := json.Marshal(e.Attributes)
 	if err != nil {
 		return false, err
 	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
 
-	row := s.Pool.QueryRow(ctx, `
+	row := tx.QueryRow(ctx, `
 		INSERT INTO hazard_events
 			(hazard_id, source, source_ref_id, hazard_type, severity, area_name,
 			 latitude, longitude, occurred_at, ingested_at, attributes)
@@ -71,7 +91,69 @@ func (s *Store) SaveDedup(ctx context.Context, e domain.HazardEvent) (inserted b
 	if err := row.Scan(&inserted); err != nil {
 		return false, err
 	}
+	if inserted {
+		payload, err := json.Marshal(e)
+		if err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO hazard_outbox (hazard_id, event_payload, correlation_id)
+			VALUES ($1, $2, $3)
+		`, e.HazardID, payload, correlationID); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
 	return inserted, nil
+}
+
+type OutboxEvent struct {
+	Hazard        domain.HazardEvent
+	CorrelationID string
+}
+
+// DeliverNext holds a row lock until publish is acknowledged. A failed publish
+// or interrupted transaction leaves the row pending for the next attempt.
+func (s *Store) DeliverNext(ctx context.Context, publish func(context.Context, OutboxEvent) error) (bool, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	var hazardID string
+	var payload []byte
+	var correlationID string
+	err = tx.QueryRow(ctx, `
+		SELECT hazard_id::text, event_payload, correlation_id
+		FROM hazard_outbox
+		ORDER BY queued_at, hazard_id
+		LIMIT 1
+		FOR UPDATE SKIP LOCKED
+	`).Scan(&hazardID, &payload, &correlationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	var hazard domain.HazardEvent
+	if err := json.Unmarshal(payload, &hazard); err != nil {
+		return true, err
+	}
+	if err := publish(ctx, OutboxEvent{Hazard: hazard, CorrelationID: correlationID}); err != nil {
+		return true, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM hazard_outbox WHERE hazard_id = $1`, hazardID); err != nil {
+		return true, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 func scanRow(row pgx.Row) (domain.HazardEvent, error) {

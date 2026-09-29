@@ -27,24 +27,14 @@ func main() {
 	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
-	dbCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	st, err := waitForStore(dbCtx, cfg.DatabaseURL, logger)
-	cancel()
+	st, err := store.New(ctx, cfg.DatabaseURL)
 	if err != nil {
-		logger.Error("failed to connect to canonical store", "service", "aggregator", "error", err.Error())
+		logger.Error("invalid canonical store configuration", "service", "aggregator", "error", err.Error())
 		os.Exit(1)
 	}
 	defer st.Close()
 
-	pubCtx, pubCancel := context.WithTimeout(ctx, 30*time.Second)
-	pub, err := waitForPublisher(pubCtx, cfg, logger)
-	pubCancel()
-	if err != nil {
-		logger.Error("failed to connect to NATS JetStream", "service", "aggregator", "error", err.Error())
-		os.Exit(1)
-	}
-	defer pub.Close()
-
+	deps := &api.Dependencies{}
 	bmkgClient := clients.NewBMKGClient(cfg.BMKGBaseURL, cfg.BMKGAPIKey, logger)
 	pvmbgClient := clients.NewPVMBGClient(cfg.PVMBGBaseURL, cfg.PVMBGToken, logger)
 	lookup := volcano.NewLookup(st.Pool)
@@ -55,17 +45,17 @@ func main() {
 		PVMBG:    pvmbgClient,
 		Store:    st,
 		Lookup:   lookup,
-		Pub:      pub,
 		Status:   status,
+		Ready:    deps.StoreReady,
 		Interval: cfg.PollInterval,
 		Logger:   logger,
 	}
-	pollCtx, pollCancel := context.WithCancel(ctx)
-	go p.Run(pollCtx)
 
-	a := api.New(st, status)
+	a := api.New(st, status, deps)
 	router := server.New(logger, a)
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: router}
+	go monitorStore(ctx, st, deps, p, logger)
+	go dispatchOutbox(ctx, st, cfg, deps, logger)
 
 	go func() {
 		logger.Info("starting aggregator", "service", "aggregator", "port", cfg.Port, "poll_interval_sec", cfg.PollInterval.Seconds())
@@ -77,7 +67,6 @@ func main() {
 
 	<-ctx.Done()
 	logger.Info("shutting down aggregator", "service", "aggregator")
-	pollCancel()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
@@ -86,49 +75,98 @@ func main() {
 	}
 }
 
-// waitForStore retries the initial connection/ping since compose's
-// depends_on/healthcheck ordering is not a hard guarantee that Postgres is
-// actually ready to accept connections yet.
-func waitForStore(ctx context.Context, url string, logger *slog.Logger) (*store.Store, error) {
-	var lastErr error
+// monitorStore keeps the API alive while Postgres is unavailable and starts
+// polling after the database and its initialized schema are ready.
+func monitorStore(ctx context.Context, st *store.Store, deps *api.Dependencies, p *poller.Poller, logger *slog.Logger) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	pollerStarted := false
+	schemaReady := false
 	for {
-		select {
-		case <-ctx.Done():
-			return nil, lastErr
-		default:
+		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := st.Ping(checkCtx)
+		if err == nil && !schemaReady {
+			err = st.CheckSchema(checkCtx)
+			if err == nil {
+				schemaReady = true
+			}
 		}
-		st, err := store.New(ctx, url)
+		cancel()
+		deps.SetStoreReady(err == nil)
 		if err == nil {
-			if pingErr := st.Ping(ctx); pingErr == nil {
-				return st, nil
-			} else {
-				lastErr = pingErr
-				st.Close()
+			if !pollerStarted {
+				go p.Run(ctx)
+				pollerStarted = true
+				logger.Info("canonical store ready; polling started", "service", "aggregator")
 			}
 		} else {
-			lastErr = err
+			schemaReady = false
+			if ctx.Err() == nil {
+				logger.Warn("canonical store unavailable; retrying", "service", "aggregator", "error", err.Error())
+			}
 		}
-		logger.Warn("canonical store not ready, retrying", "service", "aggregator", "error", lastErr.Error())
-		time.Sleep(1 * time.Second)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 
-// waitForPublisher retries the initial NATS JetStream connection for the
-// same reason.
-func waitForPublisher(ctx context.Context, cfg config.Config, logger *slog.Logger) (*publisher.Publisher, error) {
-	var lastErr error
+// dispatchOutbox retries both broker connection and pending publication.
+func dispatchOutbox(ctx context.Context, st *store.Store, cfg config.Config, deps *api.Dependencies, logger *slog.Logger) {
 	for {
-		select {
-		case <-ctx.Done():
-			return nil, lastErr
-		default:
+		if ctx.Err() != nil {
+			return
 		}
-		pub, err := publisher.New(ctx, cfg.NATSURL, cfg.NATSStream, cfg.NATSSubject, logger)
-		if err == nil {
-			return pub, nil
+		if !deps.StoreReady() {
+			if !sleepContext(ctx, 2*time.Second) {
+				return
+			}
+			continue
 		}
-		lastErr = err
-		logger.Warn("nats jetstream not ready, retrying", "service", "aggregator", "error", lastErr.Error())
-		time.Sleep(1 * time.Second)
+		connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		pub, err := publisher.New(connectCtx, cfg.NATSURL, cfg.NATSStream, cfg.NATSSubject, logger)
+		cancel()
+		if err != nil {
+			logger.Warn("nats jetstream unavailable; retrying", "service", "aggregator", "error", err.Error())
+			if !sleepContext(ctx, 2*time.Second) {
+				return
+			}
+			continue
+		}
+		deps.SetBrokerReady(true)
+		for ctx.Err() == nil && deps.StoreReady() && pub.Connected() {
+			attemptCtx, attemptCancel := context.WithTimeout(ctx, 10*time.Second)
+			found, err := st.DeliverNext(attemptCtx, func(callCtx context.Context, event store.OutboxEvent) error {
+				return pub.Publish(callCtx, event.Hazard, event.CorrelationID)
+			})
+			attemptCancel()
+			if err != nil {
+				if ctx.Err() == nil {
+					logger.Warn("outbox delivery failed; retrying", "service", "aggregator", "error", err.Error())
+				}
+				break
+			}
+			if !found && !sleepContext(ctx, time.Second) {
+				break
+			}
+		}
+		deps.SetBrokerReady(false)
+		pub.Close()
+		if !sleepContext(ctx, 2*time.Second) {
+			return
+		}
+	}
+}
+
+func sleepContext(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }

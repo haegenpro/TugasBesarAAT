@@ -6,10 +6,16 @@ services:
     env_file:
       - ./broker/.env
     volumes:
+      - ./broker/nats.conf:/etc/nats/nats.conf:ro
       - nats-data:/data
     ports:
       - "4222:4222"
       - "8222:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/broker-ready && broker-init --check"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
 
   broker-init:
@@ -18,32 +24,20 @@ services:
       dockerfile: Dockerfile.init
     env_file:
       - ./broker/.env
-    environment:
-      NATS_URL: nats://broker:4222
-    depends_on:
-      - broker
     profiles:
       - tools
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine3.24
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-hazards}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme-postgres-password}
     volumes:
       - ./store/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-hazards}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  nats:
-    image: nats:2.10-alpine
-    command: ["-js", "-m", "8222"]
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -79,15 +73,8 @@ services:
   aggregator:
     build: ./aggregator
     ports: ["8080:8080"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      nats:
-        condition: service_healthy
-      bmkg-mock:
-        condition: service_healthy
-      pvmbg-mock:
-        condition: service_healthy
+    env_file:
+      - ./broker/.env
     environment:
       AGGREGATOR_PORT: 8080
       POLL_INTERVAL: ${POLL_INTERVAL:-3}
@@ -96,9 +83,6 @@ services:
       PVMBG_BASE_URL: http://pvmbg-mock:8082
       PVMBG_TOKEN: ${PVMBG_TOKEN:-changeme-pvmbg-token}
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme-postgres-password}@postgres:5432/${POSTGRES_DB:-hazards}?sslmode=disable
-      NATS_URL: nats://nats:4222
-      NATS_STREAM: ${NATS_STREAM:-HAZARDS}
-      NATS_SUBJECT: ${NATS_SUBJECT:-hazard.events}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 5s
@@ -107,3 +91,4 @@ services:
 
 volumes:
   nats-data:
+  postgres-data:

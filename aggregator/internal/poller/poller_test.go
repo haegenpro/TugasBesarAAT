@@ -34,7 +34,7 @@ type fakeStore struct {
 
 func newFakeStore() *fakeStore { return &fakeStore{seen: map[string]bool{}} }
 
-func (f *fakeStore) SaveDedup(ctx context.Context, e domain.HazardEvent) (bool, error) {
+func (f *fakeStore) SaveDedup(ctx context.Context, e domain.HazardEvent, correlationID string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := string(e.Source) + "|" + e.SourceRefID
@@ -44,15 +44,6 @@ func (f *fakeStore) SaveDedup(ctx context.Context, e domain.HazardEvent) (bool, 
 	f.seen[key] = true
 	atomic.AddInt32(&f.Puts, 1)
 	return true, nil
-}
-
-type fakePublisher struct {
-	Published int32
-}
-
-func (f *fakePublisher) Publish(ctx context.Context, event domain.HazardEvent, correlationID string) error {
-	atomic.AddInt32(&f.Published, 1)
-	return nil
 }
 
 type fakeLookup struct{}
@@ -96,16 +87,14 @@ func oneVolcanicReport() []map[string]any {
 	}}
 }
 
-func TestDeduplication_SameRecordTwice_OneInsertOnePublish(t *testing.T) {
+func TestDeduplication_SameRecordTwice_OneInsert(t *testing.T) {
 	bmkg := bmkgTestServer(t, 0)
 	defer bmkg.Close()
 
 	fs := newFakeStore()
-	fp := &fakePublisher{}
 	p := &poller.Poller{
 		BMKG:     clients.NewBMKGClient(bmkg.URL, "key", testLogger()),
 		Store:    fs,
-		Pub:      fp,
 		Status:   poller.NewPVMBGStatus(),
 		Interval: time.Hour,
 		Logger:   testLogger(),
@@ -117,7 +106,6 @@ func TestDeduplication_SameRecordTwice_OneInsertOnePublish(t *testing.T) {
 	pollBMKG(ctx) // second cycle sees the same source record again
 
 	assert.Equal(t, int32(1), fs.Puts, "second cycle must not create a duplicate canonical record")
-	assert.Equal(t, int32(1), fp.Published, "only the newly inserted event should be published")
 }
 
 func TestPVMBGOutage_DoesNotBlockBMKG(t *testing.T) {
@@ -129,13 +117,11 @@ func TestPVMBGOutage_DoesNotBlockBMKG(t *testing.T) {
 	defer pvmbg.Close()
 
 	fs := newFakeStore()
-	fp := &fakePublisher{}
 	status := poller.NewPVMBGStatus()
 	p := &poller.Poller{
 		BMKG:     clients.NewBMKGClient(bmkg.URL, "key", testLogger()),
 		PVMBG:    clients.NewPVMBGClient(pvmbg.URL, "token", testLogger()),
 		Store:    fs,
-		Pub:      fp,
 		Status:   status,
 		Interval: time.Hour,
 		Logger:   testLogger(),
@@ -160,13 +146,11 @@ func TestConcurrency_PVMBGSlow_BMKGStaysFast(t *testing.T) {
 	defer pvmbg.Close()
 
 	fs := newFakeStore()
-	fp := &fakePublisher{}
 	p := &poller.Poller{
 		BMKG:     clients.NewBMKGClient(bmkg.URL, "key", testLogger()),
 		PVMBG:    clients.NewPVMBGClient(pvmbg.URL, "token", testLogger()),
 		Store:    fs,
 		Lookup:   fakeLookup{},
-		Pub:      fp,
 		Status:   poller.NewPVMBGStatus(),
 		Interval: time.Hour,
 		Logger:   testLogger(),
@@ -205,5 +189,5 @@ func percentile(d []time.Duration, p float64) time.Duration {
 	return sorted[idx]
 }
 
-func getBMKGPoll(p *poller.Poller) func(context.Context) { return p.PollBMKGOnce }
+func getBMKGPoll(p *poller.Poller) func(context.Context)  { return p.PollBMKGOnce }
 func getPVMBGPoll(p *poller.Poller) func(context.Context) { return p.PollPVMBGOnce }
