@@ -28,6 +28,7 @@ func testStore(t *testing.T) *store.Store {
 	s, err := store.New(ctx, url)
 	require.NoError(t, err)
 	require.NoError(t, s.Ping(ctx))
+	require.NoError(t, s.CheckSchema(ctx))
 	t.Cleanup(s.Close)
 	return s
 }
@@ -54,7 +55,7 @@ func TestSaveDedup_InsertAndRead(t *testing.T) {
 	ctx := context.Background()
 
 	e := sampleEvent(domain.SourceBMKG, "store-test-"+uuid.NewString())
-	inserted, err := s.SaveDedup(ctx, e)
+	inserted, err := s.SaveDedup(ctx, e, "test-correlation")
 	require.NoError(t, err)
 	require.True(t, inserted)
 
@@ -72,11 +73,11 @@ func TestSaveDedup_DuplicateSourceRefID(t *testing.T) {
 	e1 := sampleEvent(domain.SourceBMKG, refID)
 	e2 := sampleEvent(domain.SourceBMKG, refID) // different hazard_id, same (source, source_ref_id)
 
-	inserted1, err := s.SaveDedup(ctx, e1)
+	inserted1, err := s.SaveDedup(ctx, e1, "test-correlation")
 	require.NoError(t, err)
 	require.True(t, inserted1)
 
-	inserted2, err := s.SaveDedup(ctx, e2)
+	inserted2, err := s.SaveDedup(ctx, e2, "test-correlation")
 	require.NoError(t, err)
 	require.False(t, inserted2, "second insert with same (source, source_ref_id) must be rejected by the unique constraint")
 }
@@ -93,9 +94,9 @@ func TestJSONB_OldAndNewAttributeShapesCoexist(t *testing.T) {
 	newShape.HazardType = domain.HazardVolcanic
 	newShape.Attributes = map[string]interface{}{"eruption_count_24h": float64(2), "ash_column_height_m": float64(1500), "confidence_level": 0.93}
 
-	_, err := s.SaveDedup(ctx, oldShape)
+	_, err := s.SaveDedup(ctx, oldShape, "test-correlation")
 	require.NoError(t, err)
-	_, err = s.SaveDedup(ctx, newShape)
+	_, err = s.SaveDedup(ctx, newShape, "test-correlation")
 	require.NoError(t, err)
 
 	got1, err := s.GetByID(ctx, oldShape.HazardID)
@@ -116,7 +117,7 @@ func TestQuery_Filtering(t *testing.T) {
 	e := sampleEvent(domain.SourceBMKG, unique)
 	e.Severity = domain.SeverityAwas
 	e.AreaName = unique
-	_, err := s.SaveDedup(ctx, e)
+	_, err := s.SaveDedup(ctx, e, "test-correlation")
 	require.NoError(t, err)
 
 	results, err := s.Query(ctx, store.Filters{Severity: string(domain.SeverityAwas), AreaName: unique})

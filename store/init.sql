@@ -1,8 +1,6 @@
 -- Canonical Store schema for the Aggregator (BNPB slice), IF4031 M1.
--- Single init.sql, run once via postgres:16-alpine's
--- /docker-entrypoint-initdb.d/ convention. No migration framework: the only
--- field that "changes" (confidence_level) lives inside the attributes JSONB
--- column and needs no DDL change at all.
+-- Initial schema, run once via postgres:16-alpine3.24's
+-- /docker-entrypoint-initdb.d/ convention.
 
 CREATE TABLE IF NOT EXISTS hazard_events (
     hazard_id      UUID PRIMARY KEY,
@@ -29,6 +27,18 @@ CREATE INDEX IF NOT EXISTS ix_hazard_events_severity ON hazard_events (severity)
 CREATE INDEX IF NOT EXISTS ix_hazard_events_area_name ON hazard_events (area_name);
 CREATE INDEX IF NOT EXISTS ix_hazard_events_occurred_at ON hazard_events (occurred_at);
 CREATE INDEX IF NOT EXISTS ix_hazard_events_ingested_at ON hazard_events (ingested_at);
+
+-- One pending publication per new hazard. The Aggregator writes this row in
+-- the same transaction as hazard_events and removes it after NATS acknowledges.
+CREATE TABLE IF NOT EXISTS hazard_outbox (
+    hazard_id UUID PRIMARY KEY REFERENCES hazard_events(hazard_id) ON DELETE CASCADE,
+    event_payload JSONB NOT NULL,
+    correlation_id TEXT NOT NULL,
+    queued_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_hazard_outbox_queued_at
+    ON hazard_outbox (queued_at, hazard_id);
 
 -- Static volcano reference data: volcano_id -> area_name, latitude, longitude.
 -- Owned by the Aggregator; PVMBG's mock volcano_id values must match these.

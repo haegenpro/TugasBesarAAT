@@ -17,25 +17,20 @@ contract exist so those services can be built against it later.
 | Canonical Store | [`store/`](store/) | internal (5432) | PostgreSQL 16, accessed only by the Aggregator |
 
 Each Go service has its own `go.mod` (no shared workspace module) and its own
-multi-stage Dockerfile (`golang:1.24-alpine` builder → `alpine:3.20`
-runtime with `ca-certificates` installed). **Assumption:** the spec calls
-for `golang:1.27-alpine3.24` / Go 1.27.1, which does not exist yet in this
-environment (the local Go toolchain here is 1.24.7). We used the latest
-available Go 1.x / Alpine combination that actually builds and runs; the
-`go.mod` files pin `go 1.23` so the same source builds unmodified once a
-newer toolchain is available.
+multi-stage Dockerfile (`golang:1.27.1-alpine3.24` builder → `alpine:3.24`
+runtime). Every Go module requires Go 1.27.1.
 
 ## Broker choice: NATS JetStream, not RabbitMQ
 
 The original assignment text mentions RabbitMQ; the team's technical
 decision (see `docs/Technical Stack Specifications.md` and
-`docs/Contracts.md`) supersedes that with **NATS 2.10 (`nats:2.10-alpine`)
-with JetStream enabled (`-js`)**. This implementation publishes every newly
-mapped `HazardEvent` to the durable JetStream stream `HAZARDS` on subject
-`hazard.events`, using `github.com/nats-io/nats.go`'s `jetstream` package.
-Publishing is synchronous — the Aggregator waits for JetStream's write
-acknowledgement before considering an event published — which is what makes
-at-least-once delivery to future consumers possible.
+`docs/Contracts.md`) supersedes that with **NATS JetStream**. The broker image
+extends official `nats:2.15.0-alpine3.22`, mounts `broker/nats.conf` read-only,
+and initializes its stream whenever it starts. JetStream storage persists in a
+volume. New `HazardEvent`s and pending publications are saved in one Postgres
+transaction. A dispatcher publishes each pending event to stream `HAZARDS` on
+subject `hazard.events` and removes it from the outbox only after JetStream
+acknowledges it.
 
 ## Repository layout
 
@@ -53,14 +48,23 @@ docs/             # Pre-existing team contract docs (wire format, stack, deploym
 
 ```bash
 cp .env.example .env   # optional — compose provides sane defaults itself
+cp broker/.env.example broker/.env   # required NATS settings
 docker compose up --build
 ```
 
-Startup order is enforced with `depends_on: condition: service_healthy` on
-Postgres, NATS, and both mocks, backed by real healthchecks (not just
-`depends_on`'s default "container started" semantics). The Aggregator also
-retries its initial Postgres/NATS connections with backoff on its own, since
-compose readiness is not a hard guarantee in practice.
+Each service can start independently. The Aggregator serves `/health` while
+Postgres or NATS is unavailable. It retries its connections, begins polling
+when Postgres and the tables from `store/init.sql` are ready, and queues events
+in the outbox until NATS is ready.
+`/ready` reports store and broker availability. The broker health check uses
+`NATS_URL` from `broker/.env` and passes only after the stream is initialized
+and reachable. The optional `broker-init` service can reapply the stream
+configuration with `docker compose --profile tools run --rm broker-init`.
+Changes to `broker/nats.conf` take effect after recreating the broker with
+`docker compose up -d --force-recreate broker`; they do not require rebuilding
+its image.
+Postgres runs `init.sql` only for a new data volume. A local volume created
+before `hazard_outbox` was added needs to be recreated or initialized manually.
 
 Once everything is healthy:
 
@@ -68,20 +72,23 @@ Once everything is healthy:
 curl http://localhost:8081/health   # {"status":"ok","service":"bmkg-mock"}
 curl http://localhost:8082/health   # {"status":"ok","service":"pvmbg-mock"}
 curl http://localhost:8080/health   # {"status":"ok","service":"aggregator"}
+curl http://localhost:8080/ready    # store and broker status
 ```
 
 ## Standalone (non-Docker) run
 
 Each service reads plain env vars; `godotenv` is optional local-dev sugar.
-You need Postgres 16 and NATS (`-js`) reachable for the Aggregator.
+The Aggregator can start without Postgres or NATS, and recovers when they
+appear. Starting the broker initializes its JetStream stream.
 
 ```bash
 # 1. Canonical Store
 docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=hazards \
-  -v $(pwd)/store/init.sql:/docker-entrypoint-initdb.d/init.sql postgres:16-alpine
+  -v $(pwd)/store/init.sql:/docker-entrypoint-initdb.d/init.sql postgres:16-alpine3.24
 
-# 2. NATS JetStream
-docker run -d --name nats -p 4222:4222 -p 8222:8222 nats:2.10-alpine -js -m 8222
+# 2. NATS JetStream, including its stream initializer
+cp broker/.env.example broker/.env
+docker compose up -d broker
 
 # 3. BMKG mock
 cd bmkg-mock && BMKG_API_KEY=devkey go run ./cmd/server &
@@ -109,7 +116,7 @@ To also run the Aggregator's Postgres-backed store tests:
 
 ```bash
 docker run -d --name pg-test -p 5433:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=hazards \
-  -v $(pwd)/store/init.sql:/docker-entrypoint-initdb.d/init.sql postgres:16-alpine
+  -v $(pwd)/store/init.sql:/docker-entrypoint-initdb.d/init.sql postgres:16-alpine3.24
 cd aggregator && TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/hazards?sslmode=disable" go test ./internal/store/...
 ```
 
@@ -247,10 +254,9 @@ on tracking a last-poll timestamp).
 ### Deduplication
 
 Keyed on `(source, source_ref_id)`, never on `hazard_id`. The Store's unique
-index is the final correctness guard; the poller also checks whether its
-own `INSERT ... ON CONFLICT DO NOTHING` actually inserted a row before
-publishing, so a record re-seen on a later poll cycle is neither
-re-inserted nor re-published.
+index is the final correctness guard. A new row and its outbox record commit
+together. A record re-seen on a later poll cycle updates its canonical row
+without adding a second outbox record.
 
 ### Canonical Store
 
@@ -287,7 +293,7 @@ asserting p95 < 300ms.
 
 ### NATS publishing
 
-Every newly inserted `HazardEvent` (never a duplicate) is published to
+Every newly inserted `HazardEvent` is queued in Postgres and published to
 subject `hazard.events` on the durable JetStream stream `HAZARDS`
 (`NATS_STREAM`/`NATS_SUBJECT`, both configurable), wrapped in the envelope:
 
@@ -300,9 +306,9 @@ subject `hazard.events` on the durable JetStream stream `HAZARDS`
 }
 ```
 
-`Publish` blocks on JetStream's write acknowledgement before returning, so a
-publish is only considered successful once the broker has durably stored it
-— the basis for at-least-once delivery to future consumers.
+The dispatcher retries pending rows until JetStream acknowledges the write.
+It then removes the row from the outbox. A crash between acknowledgement and
+removal can publish a duplicate; consumers must deduplicate by `hazard_id`.
 
 ### Internal read API
 
@@ -311,6 +317,7 @@ publish is only considered successful once the broker has durably stored it
 | GET | `/internal/hazards` | `since`, `hazard_type`, `severity`, `area_name` (all optional; filtering happens in SQL, not in memory) | `{"data": [...], "count": N, "as_of": "<ISO8601>"}` |
 | GET | `/internal/hazards/{id}` | — | A single `HazardEvent`, or `404` |
 | GET | `/health` | — | `{"status":"ok","service":"aggregator"}` |
+| GET | `/ready` | — | Store and broker availability; `503` when the store is unavailable |
 
 ```bash
 curl http://localhost:8080/internal/hazards | jq '.count'
@@ -343,7 +350,7 @@ lines with `target_service":"nats"`), or by running a throwaway subscriber:
 
 ```bash
 docker run --rm --network tugasbesaraat_default natsio/nats-box:latest \
-  nats sub -s nats://nats:4222 hazard.events
+  nats sub -s nats://broker:4222 hazard.events
 ```
 
 ### Demo B — PVMBG schema evolution
@@ -407,10 +414,6 @@ test actually measures it.
 
 ## Implementation notes / assumptions
 
-- **Go/Alpine version substitution**: the spec's `golang:1.27-alpine3.24` /
-  Go 1.27.1 is not available in this environment (latest local toolchain:
-  1.24.7); `golang:1.24-alpine` / `alpine:3.20` are used instead, documented
-  above.
 - **`since` semantics on both mocks**: an omitted or unparseable `since`
   returns the full current dataset, per the spec's "handle missing `since`
   sensibly" guidance.
@@ -424,21 +427,14 @@ test actually measures it.
 - **Volcano reference data**: implemented as the `volcano_reference` Postgres
   table (the spec's preferred option), seeded with 10 Indonesian volcanoes
   matching PVMBG's mock `volcano_id` values exactly.
-- **Runtime CA certificates**: each Dockerfile copies
-  `/etc/ssl/certs/ca-certificates.crt` from the `golang:1.24-alpine` builder
-  stage into the `alpine:3.20` runtime stage instead of running
+- **Runtime CA certificates**: the mock and Aggregator Dockerfiles copy
+  `/etc/ssl/certs/ca-certificates.crt` from the `golang:1.27.1-alpine3.24` builder
+  stage into the `alpine:3.24` runtime stage instead of running
   `apk add ca-certificates` there, so the runtime image needs no extra
   network access at build time and still ends up with a working CA bundle.
-- **Restricted build networks**: if `docker compose build` cannot reach
-  Docker Hub / `proxy.golang.org` from your network (e.g. a sandboxed CI
-  runner), run `go mod vendor` in each of `bmkg-mock/`, `pvmbg-mock/`,
-  `aggregator/` and change each Dockerfile's build step to
-  `go build -mod=vendor -o ...` with the `COPY go.mod go.sum* ./ / RUN go mod
-  download` lines removed — this exact fallback was used to verify the full
-  stack in this session's environment and is proven to work end-to-end.
 - **Dedup vs. schema evolution**: `SaveDedup` upserts on
-  `(source, source_ref_id)` — a genuinely new record inserts (and is the
-  only case published to NATS); a record seen again on a later poll cycle
+  `(source, source_ref_id)` — a genuinely new record inserts and queues an
+  outbox event; a record seen again on a later poll cycle
   updates its mutable columns (severity, area, coordinates, `attributes`)
   in place but keeps its original `hazard_id` and is never re-published.
   This is what lets PVMBG's schema-version toggle reach already-ingested

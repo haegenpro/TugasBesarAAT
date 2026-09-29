@@ -7,17 +7,17 @@
 | Item | Value |
 | --- | --- |
 | Language | Go, all services (mocks, Aggregator, Canonical Store access layer, Client-API, Auth, Broker publisher/consumers) |
-| Go version | 1.27.1 |
+| Go version | 1.27.1 for repository-owned Go services |
 | Module strategy | One `go.mod` per service (BMKG mock, PVMBG mock, Aggregator, Client-API, Auth, each consumer) — no shared workspace-level module. Shared types (`HazardEvent`, the broker envelope) are duplicated per service or vendored as a small internal package per service, not a shared external module, to keep each service independently buildable per the spec's container-independence requirement |
 
 ## Container Images
 
 | Item | Value |
 | --- | --- |
-| Builder image | `golang:1.27-alpine3.24` |
-| Runtime image | `alpine:3.24` |
-| Build pattern | Multi-stage Dockerfile: build a static binary in the `golang:1.27-alpine3.24` stage (`CGO_ENABLED=0`), copy the binary alone into a fresh `alpine:3.24` stage — keeps runtime images small and avoids shipping the Go toolchain |
-| Alpine packages needed at runtime | `ca-certificates` (for outbound TLS calls, if any) — install explicitly in the final stage since Alpine doesn't include it by default |
+| Builder image | `golang:1.27.1-alpine3.24` |
+| Runtime image | `alpine:3.24` for repository-owned Go services; official NATS uses Alpine 3.22 |
+| Build pattern | Multi-stage Dockerfile: build a static binary in the `golang:1.27.1-alpine3.24` stage (`CGO_ENABLED=0`), copy the binary alone into a fresh `alpine:3.24` stage — keeps runtime images small and avoids shipping the Go toolchain |
+| Alpine packages needed at runtime | The mocks and Aggregator copy the CA bundle from the builder stage for outbound TLS calls. |
 
 ## HTTP Layer
 
@@ -32,9 +32,9 @@
 
 | Item | Value |
 | --- | --- |
-| Database | PostgreSQL 16 (`postgres:16-alpine` image) |
+| Database | PostgreSQL 16 (`postgres:16-alpine3.24` image) |
 | Driver | `pgx` (v5), used via its native interface (`github.com/jackc/pgx/v5`) rather than wrapped in `database/sql`, for better JSONB and context-cancellation support |
-| Schema management | A single `init.sql`, mounted into the Postgres container and run once at first boot (via the official image's `/docker-entrypoint-initdb.d/` convention) — **no migration tool**. This is sufficient because the fixed columns are set by the assignment spec and won't change during M1; the only field that "changes" (`confidence_level`) lives inside the `attributes` JSONB column and needs no schema change at all |
+| Schema management | `store/init.sql` initializes a fresh database, including the outbox. The Aggregator checks the schema but does not create or migrate tables. Source-specific changes such as `confidence_level` remain in `attributes` JSONB. |
 | Table shape (starting point) | Fixed, indexed columns for `hazard_id` (PK), `source`, `hazard_type`, `severity`, `area_name`, `occurred_at`, `ingested_at`; a `JSONB` column for `attributes` (and optionally the full raw payload, for easy whole-record reads) |
 
 ## Message Broker
@@ -42,7 +42,7 @@
 | Item | Value |
 | --- | --- |
 | Broker | NATS with JetStream enabled |
-| Image | `nats:2.10-alpine` with `-js` flag (or JetStream enabled via config file) |
+| Image | Custom broker image based on official `nats:2.15.0-alpine3.22`; Compose mounts `broker/nats.conf` read-only to enable JetStream, and the stream is initialized on every broker start |
 | Go client | `github.com/nats-io/nats.go` |
 | Delivery mode | JetStream durable consumer with explicit ack (`AckExplicit`) — matches the at-least-once requirement; **the delivery-semantics section of the cross-team contracts doc needs updating to JetStream's ack model** if this broker change is confirmed (see note above) |
 
@@ -74,4 +74,4 @@
 
 - [ ] **Broker reversal** — confirm NATS+JetStream with Anggota 3 explicitly; update `cross-team-contracts.md`'s Contract 2 (broker choice, ack model, Go publish/consume code) if confirmed
 - [ ] Load testing tool — `vegeta` suggested above, not yet confirmed
-- [ ] NATS image tag/version — `nats:2.10-alpine` is a placeholder above, confirm the actual version available when setting up
+- [x] NATS version — the broker Dockerfile uses official `nats:2.15.0-alpine3.22` as its base

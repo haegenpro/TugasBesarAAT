@@ -1,13 +1,15 @@
 # Canonical Store
 
-PostgreSQL 16 (`postgres:16-alpine`). Owned exclusively by the Aggregator —
+PostgreSQL 16 (`postgres:16-alpine3.24`). Owned exclusively by the Aggregator —
 no other service connects to this database directly.
 
-`init.sql` is mounted at `/docker-entrypoint-initdb.d/init.sql` and runs once
-on first container boot. There is no migration framework for M1: the schema
-is fixed by the assignment spec, and the one field that evolves
-(`confidence_level`) lives inside the `attributes` JSONB column, so it never
-requires a DDL change.
+`init.sql` is mounted at `/docker-entrypoint-initdb.d/init.sql` and creates all
+tables, including the outbox, on first container boot. The Aggregator checks
+for the tables but does not create or migrate them. Compose mounts Postgres
+data in the `postgres-data` volume so pending events survive container
+recreation. A local volume created before the outbox was added needs to be
+recreated or initialized manually; `init.sql` does not rerun on an existing
+volume.
 
 ## Tables
 
@@ -29,6 +31,14 @@ The canonical `HazardEvent` table.
 Static `volcano_id -> area_name, latitude, longitude` lookup used by the
 Aggregator's PVMBG mapping. Seeded with the same `volcano_id` values PVMBG's
 mock uses, so every seeded volcanic report resolves.
+
+### `hazard_outbox`
+
+One pending publication per newly inserted hazard, keyed by `hazard_id`.
+`event_payload` stores the original event snapshot and `correlation_id` keeps
+its trace. The dispatcher removes a row only after JetStream acknowledges it.
+Published messages may be duplicated after a crash; consumers use `hazard_id`
+for idempotency.
 
 ## Verifying JSONB coexistence
 
