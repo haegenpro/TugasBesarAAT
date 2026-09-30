@@ -27,11 +27,14 @@ Everything else (Auth internals, Consumer internals) stays inside one person's o
 {
   "data": [ /* HazardEvent[] per the wire format spec */ ],
   "count": 42,
-  "as_of": "2026-09-24T10:15:00.000Z"
+  "as_of": "2026-09-24T10:15:00.000Z",
+  "source_status": {"PVMBG": {"state": "fresh"}}
 }
 ```
 
 `as_of` is the timestamp the Aggregator generated this response at — Client-API uses it, not `Date.now()`/`time.Now()` on its own side, when it needs to reason about data freshness (avoids clock-skew arguments between the two services).
+
+`source_status.PVMBG` becomes `{"state":"stale","stale_since":"<ISO8601>"}` during an outage, including when the result has no volcanic rows. Client-API forwards this metadata outside the hazard objects, so Media can see availability without seeing raw `attributes`.
 
 **Pagination:** not required for M1's data volumes (≥20 seed records per source, low event rate) — explicitly out of scope. If the list grows large during testing, add `limit`/`offset` later without breaking existing callers (additive query params only).
 
@@ -53,7 +56,7 @@ When PVMBG is in outage and a `HazardEvent` in the response is volcanic data tha
 ```
 
 - `stale` (bool): only present and `true` when the underlying source is known to be unreachable and this is last-known data
-- `stale_since` (ISO 8601): when the Aggregator last successfully refreshed this event's source
+- `stale_since` (ISO 8601): when the Aggregator first observed the PVMBG outage
 
 **Client-API's job:** surface this to the end client as an explicit status (e.g. include `"data_status": "stale"` in its own response, or a `Warning` header) rather than silently passing it through inside `attributes` — that's specifically what P2's criterion 3 asks for ("disertai penanda kebaruan data ... bukan error 500").
 

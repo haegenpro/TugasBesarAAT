@@ -1,11 +1,8 @@
-# TugasBesarAAT — IF4031 M1: Mock + Aggregator + Store
+# TugasBesarAAT — IF4031 M1
 
-This repository implements one slice of the IF4031 distributed-systems
-course project (BNPB disaster-coordination system): the **BMKG mock**, the
-**PVMBG mock**, the **BNPB Aggregator/Gateway**, and the **Aggregator-owned
-Canonical Store**. Client-API, Auth, and downstream broker consumers are out
-of scope here — the Aggregator's internal read API and its NATS publishing
-contract exist so those services can be built against it later.
+This repository contains the BMKG and PVMBG mocks, BNPB Aggregator,
+Aggregator-owned Canonical Store, Client API, Auth Service, and an interactive
+downstream client. Broker consumers are still separate work.
 
 ## Services
 
@@ -13,8 +10,11 @@ contract exist so those services can be built against it later.
 | --- | --- | --- | --- |
 | BMKG mock | [`bmkg-mock/`](bmkg-mock/) | 8081 | Simulated seismic/tsunami source |
 | PVMBG mock | [`pvmbg-mock/`](pvmbg-mock/) | 8082 | Simulated volcanic-activity source |
-| Aggregator | [`aggregator/`](aggregator/) | 8080 | Polls both mocks, maps to canonical `HazardEvent`, owns the Store, publishes to NATS, serves the internal read API |
+| Aggregator | [`aggregator/`](aggregator/) | internal (8080) | Polls both mocks, maps to canonical `HazardEvent`, owns the Store, publishes to NATS, serves the internal read API |
 | Canonical Store | [`store/`](store/) | internal (5432) | PostgreSQL 16, accessed only by the Aggregator |
+| Auth Service | [`auth-service/`](auth-service/) | internal (8083) | Owns persistent sessions, issues and rotates tokens |
+| Client API | [`client-api/`](client-api/) | 8080 | Authenticated downstream reads and server-side field projection |
+| Client TUI | [`client-tui/`](client-tui/) | interactive | One terminal app for Media, Field, and Internal identities |
 
 Each Go service has its own `go.mod` (no shared workspace module) and its own
 multi-stage Dockerfile (`golang:1.27.1-alpine3.24` builder → `alpine:3.24`
@@ -39,6 +39,9 @@ bmkg-mock/        # Go module, :8081
 pvmbg-mock/       # Go module, :8082
 aggregator/       # Go module, :8080 (internal read API)
 store/            # init.sql + Store README (Postgres, Aggregator-owned)
+auth-service/     # Go module, :8083 (internal token service + SQLite)
+client-api/       # Go module, :8080 (public API)
+client-tui/       # Go module, interactive terminal client
 docker-compose.yml
 .env.example
 docs/             # Pre-existing team contract docs (wire format, stack, deployment)
@@ -47,7 +50,7 @@ docs/             # Pre-existing team contract docs (wire format, stack, deploym
 ## Quick start: Docker Compose
 
 ```bash
-cp .env.example .env   # optional — compose provides sane defaults itself
+cp .env.example .env
 cp broker/.env.example broker/.env   # required NATS settings
 docker compose up --build
 ```
@@ -71,9 +74,71 @@ Once everything is healthy:
 ```bash
 curl http://localhost:8081/health   # {"status":"ok","service":"bmkg-mock"}
 curl http://localhost:8082/health   # {"status":"ok","service":"pvmbg-mock"}
-curl http://localhost:8080/health   # {"status":"ok","service":"aggregator"}
-curl http://localhost:8080/ready    # store and broker status
+curl http://localhost:8080/health   # client-api
+curl http://localhost:8080/ready    # auth and aggregator readiness
 ```
+
+The `.env` file is required for distinct downstream credentials and the
+internal Auth key. Its example values are demonstration placeholders; replace
+them with distinct secrets for a real deployment. Both `.env` and
+`broker/.env` are gitignored. The Auth Service owns its SQLite database in the
+`auth-data` volume. Restarting the Auth container does not remove valid sessions.
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `MEDIA_CLIENT_ID`, `MEDIA_CLIENT_SECRET` | Media identity | Required |
+| `FIELD_CLIENT_ID`, `FIELD_CLIENT_SECRET` | Field identity | Required |
+| `INTERNAL_CLIENT_ID`, `INTERNAL_CLIENT_SECRET` | Internal identity | Required |
+| `AUTH_INTERNAL_KEY` | Auth-to-Client-API trust key | Required |
+| `ACCESS_TOKEN_TTL_SEC` | Access token lifetime | `60` |
+| `REFRESH_TOKEN_TTL_SEC` | Refresh token lifetime | `86400` |
+| `AUTH_DB_PATH` | Auth-owned SQLite file inside its container | `/data/auth.db` |
+| `AUTH_PORT` | Auth container HTTP port | `8083` |
+| `CLIENT_API_PORT` | Client API container and host HTTP port | `8080` |
+| `AGGREGATOR_PORT` | Internal Aggregator HTTP port | `8080` |
+| `AUTH_BASE_URL`, `AGGREGATOR_BASE_URL` | Internal upstream URLs for standalone Client API runs | Compose service URLs |
+| `BNPB_API_URL` | TUI destination URL | `http://localhost:8080` on host; Compose service URL in Docker |
+
+### Client API and TUI
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| POST | `/auth/login` | JSON `client_id`, `client_secret`; returns bearer access and refresh tokens, TTL, and server-assigned role |
+| POST | `/auth/refresh` | JSON `refresh_token`; rotates both tokens and revokes the old access token immediately |
+| POST | `/auth/logout` | JSON `refresh_token`; revokes the session |
+| GET | `/hazards` | Bearer token; optional `since`, `hazard_type`, `severity`, `area_name`, `view=summary\|raw` |
+| GET | `/hazards/{id}` | Bearer token; optional `view=summary\|raw` |
+| GET | `/health`, `/ready` | Process health and dependency readiness |
+
+Media receives only `hazard_id`, `source`, `hazard_type`, `severity`,
+`area_name`, `occurred_at`, and `ingested_at` inside each hazard. A Media
+request with `view=raw` returns `403`. Field and Internal receive the full
+canonical event by default. `source_status` is response metadata, separate
+from the hazard fields, so even Media can see when PVMBG data is stale.
+
+```bash
+docker compose up -d --build
+docker compose run --rm --build client-tui
+```
+
+Run the TUI command in three terminals to test three identities concurrently.
+The TUI reads public client IDs from Compose and prompts for each secret.
+Choose a role, list or filter hazards, open a detail, or request raw data.
+For the refresh demo, log in as Field, wait more than the default 60 seconds,
+then list hazards. The TUI refreshes after the expired token gets `401`,
+retries the read, and its “Uji token lama” action checks that the old token
+gets `401`. The same TUI can run on the host with
+`BNPB_API_URL=http://localhost:8080`.
+
+Client API and Auth Service emit JSON logs with `correlation_id`; Client API
+forwards `X-Correlation-ID` to Auth and Aggregator and logs outbound latency.
+The database network contains only PostgreSQL and Aggregator. Aggregator's
+internal port is not published to the host.
+
+On Windows, `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage`
+checks institution credential isolation, three client identities, Media redaction, token rotation, natural expiry,
+PVMBG outage status, and session persistence after an Auth restart. It reads demo credentials from
+the gitignored `.env` and prints only the pass/fail result.
 
 ## Standalone (non-Docker) run
 
@@ -314,15 +379,15 @@ removal can publish a duplicate; consumers must deduplicate by `hazard_id`.
 
 | Method | Path | Query params | Returns |
 | --- | --- | --- | --- |
-| GET | `/internal/hazards` | `since`, `hazard_type`, `severity`, `area_name` (all optional; filtering happens in SQL, not in memory) | `{"data": [...], "count": N, "as_of": "<ISO8601>"}` |
+| GET | `/internal/hazards` | `since`, `hazard_type`, `severity`, `area_name` (all optional; filtering happens in SQL, not in memory) | `{"data": [...], "count": N, "as_of": "<ISO8601>", "source_status": {...}}` |
 | GET | `/internal/hazards/{id}` | — | A single `HazardEvent`, or `404` |
 | GET | `/health` | — | `{"status":"ok","service":"aggregator"}` |
 | GET | `/ready` | — | Store and broker availability; `503` when the store is unavailable |
 
 ```bash
-curl http://localhost:8080/internal/hazards | jq '.count'
-curl "http://localhost:8080/internal/hazards?hazard_type=VOLCANIC&severity=SIAGA"
-curl http://localhost:8080/internal/hazards/<hazard-id>
+docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards' | jq '.count'
+docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC&severity=SIAGA'
+docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards/<hazard-id>'
 ```
 
 ---
@@ -339,7 +404,7 @@ sleep 8   # let a few poll cycles happen
 
 curl -H "X-BMKG-Key: changeme-bmkg-key" http://localhost:8081/seismic-events | jq 'length'
 curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:8082/volcanic-reports | jq 'length'
-curl http://localhost:8080/internal/hazards | jq '.count, .data[0]'
+docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards' | jq '.count, .data[0]'
 ```
 
 You should see 20 seismic records from BMKG, 20 volcanic reports from
@@ -349,7 +414,7 @@ NATS receipt can be observed via the container logs
 lines with `target_service":"nats"`), or by running a throwaway subscriber:
 
 ```bash
-docker run --rm --network tugasbesaraat_default natsio/nats-box:latest \
+docker run --rm --network tugasbesaraat_backend natsio/nats-box:latest \
   nats sub -s nats://broker:4222 hazard.events
 ```
 
@@ -365,7 +430,7 @@ curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:8082/volca
 
 sleep 5   # let the Aggregator's next poll cycle pick up the new shape
 
-curl http://localhost:8080/internal/hazards?hazard_type=VOLCANIC | \
+docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | \
   jq '.data[] | select(.attributes | has("confidence_level")) | .attributes.confidence_level'
 ```
 
@@ -383,13 +448,13 @@ curl -i http://localhost:8080/health        # still 200
 curl -H "X-BMKG-Key: changeme-bmkg-key" http://localhost:8081/seismic-events | jq 'length'   # unaffected
 
 sleep 5   # let the Aggregator notice PVMBG is down
-curl http://localhost:8080/internal/hazards?hazard_type=VOLCANIC | jq '.data[0].attributes.stale, .data[0].attributes.stale_since'
+docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | jq '.data[0].attributes.stale, .data[0].attributes.stale_since, .source_status.PVMBG'
 
 docker compose logs aggregator | grep '"level":"warn"' | grep pvmbg
 
 curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" http://localhost:8082/admin/outage
 sleep 5
-curl http://localhost:8080/internal/hazards?hazard_type=VOLCANIC | jq '.data[0].attributes | has("stale")'
+docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | jq '.data[0].attributes | has("stale")'
 # => false, once the next successful poll clears the stale flag
 ```
 
@@ -401,7 +466,7 @@ docker compose stop pvmbg-mock
 PVMBG_MIN_DELAY_MS=3000 PVMBG_MAX_DELAY_MS=3000 docker compose up -d pvmbg-mock
 
 for i in $(seq 1 20); do
-  /usr/bin/time -f "%e s" curl -s -o /dev/null http://localhost:8080/internal/hazards?hazard_type=SEISMIC
+  /usr/bin/time -f "%e s" docker compose exec -T aggregator wget -qO /dev/null 'http://localhost:8080/internal/hazards?hazard_type=SEISMIC'
 done
 ```
 
