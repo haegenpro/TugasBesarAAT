@@ -16,8 +16,12 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
 	logger := middleware.NewLogger()
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("invalid configuration", "service", "bmkg-mock", "error", err.Error())
+		os.Exit(1)
+	}
 
 	events, warnings := seed.Build()
 	h := handlers.New(events, warnings, cfg.DelayMs)

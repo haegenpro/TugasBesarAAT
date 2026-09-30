@@ -1,26 +1,32 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"strconv"
 )
 
 type Config struct {
-	Port         string
-	Token        string
-	AdminToken   string
-	MinDelayMs   int
-	MaxDelayMs   int
+	Port       string
+	Token      string
+	AdminToken string
+	MinDelayMs int
+	MaxDelayMs int
 }
 
-func Load() Config {
+func Load() (Config, error) {
+	token := os.Getenv("PVMBG_TOKEN")
+	adminToken := os.Getenv("PVMBG_ADMIN_TOKEN")
+	if token == "" || adminToken == "" || token == adminToken {
+		return Config{}, errors.New("PVMBG_TOKEN and PVMBG_ADMIN_TOKEN must be distinct and nonempty")
+	}
 	return Config{
 		Port:       getEnv("PVMBG_PORT", "8082"),
-		Token:      getEnv("PVMBG_TOKEN", "changeme-pvmbg-token"),
-		AdminToken: getEnv("PVMBG_ADMIN_TOKEN", "changeme-pvmbg-admin-token"),
+		Token:      token,
+		AdminToken: adminToken,
 		MinDelayMs: getEnvInt("PVMBG_MIN_DELAY_MS", 500),
 		MaxDelayMs: getEnvInt("PVMBG_MAX_DELAY_MS", 3000),
-	}
+	}, nil
 }
 
 func getEnv(key, def string) string {

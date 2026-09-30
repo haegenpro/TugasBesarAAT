@@ -17,8 +17,12 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
 	logger := middleware.NewLogger()
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("invalid configuration", "service", "pvmbg-mock", "error", err.Error())
+		os.Exit(1)
+	}
 
 	reports := seed.Build()
 	toggles := state.New()
