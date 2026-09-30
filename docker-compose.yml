@@ -17,6 +17,7 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    networks: [backend]
 
   broker-init:
     build:
@@ -26,13 +27,14 @@ services:
       - ./broker/.env
     profiles:
       - tools
+    networks: [backend]
 
   postgres:
     image: postgres:16-alpine3.24
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-hazards}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme-postgres-password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - ./store/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - postgres-data:/var/lib/postgresql/data
@@ -41,27 +43,29 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks: [store]
 
   bmkg-mock:
     build: ./bmkg-mock
     ports: ["8081:8081"]
     environment:
       BMKG_PORT: 8081
-      BMKG_API_KEY: ${BMKG_API_KEY:-changeme-bmkg-key}
+      BMKG_API_KEY: ${BMKG_API_KEY:?set BMKG_API_KEY in .env}
       BMKG_DELAY_MS: ${BMKG_DELAY_MS:-100}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8081/health"]
       interval: 5s
       timeout: 5s
       retries: 10
+    networks: [backend]
 
   pvmbg-mock:
     build: ./pvmbg-mock
     ports: ["8082:8082"]
     environment:
       PVMBG_PORT: 8082
-      PVMBG_TOKEN: ${PVMBG_TOKEN:-changeme-pvmbg-token}
-      PVMBG_ADMIN_TOKEN: ${PVMBG_ADMIN_TOKEN:-changeme-pvmbg-admin-token}
+      PVMBG_TOKEN: ${PVMBG_TOKEN:?set PVMBG_TOKEN in .env}
+      PVMBG_ADMIN_TOKEN: ${PVMBG_ADMIN_TOKEN:?set PVMBG_ADMIN_TOKEN in .env}
       PVMBG_MIN_DELAY_MS: ${PVMBG_MIN_DELAY_MS:-500}
       PVMBG_MAX_DELAY_MS: ${PVMBG_MAX_DELAY_MS:-3000}
     healthcheck:
@@ -69,26 +73,83 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks: [backend]
 
   aggregator:
     build: ./aggregator
-    ports: ["8080:8080"]
     env_file:
       - ./broker/.env
     environment:
-      AGGREGATOR_PORT: 8080
+      AGGREGATOR_PORT: ${AGGREGATOR_PORT:-8080}
       POLL_INTERVAL: ${POLL_INTERVAL:-3}
       BMKG_BASE_URL: http://bmkg-mock:8081
-      BMKG_API_KEY: ${BMKG_API_KEY:-changeme-bmkg-key}
+      BMKG_API_KEY: ${BMKG_API_KEY:?set BMKG_API_KEY in .env}
       PVMBG_BASE_URL: http://pvmbg-mock:8082
-      PVMBG_TOKEN: ${PVMBG_TOKEN:-changeme-pvmbg-token}
-      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-changeme-postgres-password}@postgres:5432/${POSTGRES_DB:-hazards}?sslmode=disable
+      PVMBG_TOKEN: ${PVMBG_TOKEN:?set PVMBG_TOKEN in .env}
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-hazards}?sslmode=disable
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:${AGGREGATOR_PORT:-8080}/health"]
       interval: 5s
       timeout: 5s
       retries: 10
+    networks: [backend, store]
+
+  auth-service:
+    build: ./auth-service
+    environment:
+      AUTH_PORT: ${AUTH_PORT:-8083}
+      AUTH_DB_PATH: ${AUTH_DB_PATH:-/data/auth.db}
+      AUTH_INTERNAL_KEY: ${AUTH_INTERNAL_KEY:?set AUTH_INTERNAL_KEY in .env}
+      ACCESS_TOKEN_TTL_SEC: ${ACCESS_TOKEN_TTL_SEC:-60}
+      REFRESH_TOKEN_TTL_SEC: ${REFRESH_TOKEN_TTL_SEC:-86400}
+      MEDIA_CLIENT_ID: ${MEDIA_CLIENT_ID:?set MEDIA_CLIENT_ID in .env}
+      MEDIA_CLIENT_SECRET: ${MEDIA_CLIENT_SECRET:?set MEDIA_CLIENT_SECRET in .env}
+      FIELD_CLIENT_ID: ${FIELD_CLIENT_ID:?set FIELD_CLIENT_ID in .env}
+      FIELD_CLIENT_SECRET: ${FIELD_CLIENT_SECRET:?set FIELD_CLIENT_SECRET in .env}
+      INTERNAL_CLIENT_ID: ${INTERNAL_CLIENT_ID:?set INTERNAL_CLIENT_ID in .env}
+      INTERNAL_CLIENT_SECRET: ${INTERNAL_CLIENT_SECRET:?set INTERNAL_CLIENT_SECRET in .env}
+    volumes:
+      - auth-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:${AUTH_PORT:-8083}/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+
+  client-api:
+    build: ./client-api
+    ports: ["${CLIENT_API_PORT:-8080}:${CLIENT_API_PORT:-8080}"]
+    environment:
+      CLIENT_API_PORT: ${CLIENT_API_PORT:-8080}
+      AUTH_BASE_URL: http://auth-service:${AUTH_PORT:-8083}
+      AGGREGATOR_BASE_URL: http://aggregator:${AGGREGATOR_PORT:-8080}
+      AUTH_INTERNAL_KEY: ${AUTH_INTERNAL_KEY:?set AUTH_INTERNAL_KEY in .env}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:${CLIENT_API_PORT:-8080}/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [backend, client]
+
+  client-tui:
+    build: ./client-tui
+    profiles: [demo]
+    stdin_open: true
+    tty: true
+    environment:
+      BNPB_API_URL: http://client-api:${CLIENT_API_PORT:-8080}
+      MEDIA_CLIENT_ID: ${MEDIA_CLIENT_ID:?set MEDIA_CLIENT_ID in .env}
+      FIELD_CLIENT_ID: ${FIELD_CLIENT_ID:?set FIELD_CLIENT_ID in .env}
+      INTERNAL_CLIENT_ID: ${INTERNAL_CLIENT_ID:?set INTERNAL_CLIENT_ID in .env}
+    networks: [client]
 
 volumes:
   nats-data:
   postgres-data:
+  auth-data:
+
+networks:
+  backend:
+  store:
+  client:
