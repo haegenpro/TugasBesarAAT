@@ -21,8 +21,12 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
 	logger := middleware.NewLogger()
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("invalid configuration", "service", "aggregator", "error", err.Error())
+		os.Exit(1)
+	}
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()

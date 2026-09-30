@@ -45,3 +45,9 @@ func (s *PVMBGStatus) StaleSince() time.Time {
 	defer s.mu.RUnlock()
 	return s.staleSince
 }
+
+func (s *PVMBGStatus) Snapshot() (bool, time.Time) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.healthy, s.staleSince
+}

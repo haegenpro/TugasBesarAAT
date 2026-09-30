@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"strconv"
 	"time"
@@ -23,23 +24,32 @@ type Config struct {
 	NATSSubject string
 }
 
-func Load() Config {
+func Load() (Config, error) {
+	bmkgKey := os.Getenv("BMKG_API_KEY")
+	pvmbgToken := os.Getenv("PVMBG_TOKEN")
+	databaseURL := os.Getenv("DATABASE_URL")
+	if bmkgKey == "" || pvmbgToken == "" || databaseURL == "" {
+		return Config{}, errors.New("BMKG_API_KEY, PVMBG_TOKEN, and DATABASE_URL are required")
+	}
+	if bmkgKey == pvmbgToken {
+		return Config{}, errors.New("BMKG and PVMBG credentials must be distinct")
+	}
 	return Config{
 		Port: getEnv("AGGREGATOR_PORT", "8080"),
 
 		BMKGBaseURL:  getEnv("BMKG_BASE_URL", "http://localhost:8081"),
-		BMKGAPIKey:   getEnv("BMKG_API_KEY", "changeme-bmkg-key"),
+		BMKGAPIKey:   bmkgKey,
 		PVMBGBaseURL: getEnv("PVMBG_BASE_URL", "http://localhost:8082"),
-		PVMBGToken:   getEnv("PVMBG_TOKEN", "changeme-pvmbg-token"),
+		PVMBGToken:   pvmbgToken,
 
 		PollInterval: time.Duration(getEnvInt("POLL_INTERVAL", 3)) * time.Second,
 
-		DatabaseURL: getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/hazards?sslmode=disable"),
+		DatabaseURL: databaseURL,
 
 		NATSURL:     getEnv("NATS_URL", "nats://localhost:4222"),
 		NATSStream:  getEnv("NATS_STREAM", "HAZARDS"),
 		NATSSubject: getEnv("NATS_SUBJECT", "hazard.events"),
-	}
+	}, nil
 }
 
 func getEnv(key, def string) string {

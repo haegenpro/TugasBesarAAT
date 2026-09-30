@@ -25,9 +25,23 @@ func New(s *store.Store, status *poller.PVMBGStatus, deps *Dependencies) *API {
 }
 
 type listResponse struct {
-	Data  []domain.HazardEvent `json:"data"`
-	Count int                  `json:"count"`
-	AsOf  timeutil.Time        `json:"as_of"`
+	Data         []domain.HazardEvent    `json:"data"`
+	Count        int                     `json:"count"`
+	AsOf         timeutil.Time           `json:"as_of"`
+	SourceStatus map[string]sourceStatus `json:"source_status"`
+}
+
+type sourceStatus struct {
+	State      string `json:"state"`
+	StaleSince string `json:"stale_since,omitempty"`
+}
+
+func (a *API) currentSourceStatus() map[string]sourceStatus {
+	healthy, staleSince := a.Status.Snapshot()
+	if healthy {
+		return map[string]sourceStatus{"PVMBG": {State: "fresh"}}
+	}
+	return map[string]sourceStatus{"PVMBG": {State: "stale", StaleSince: timeutil.FormatISOMilli(staleSince)}}
 }
 
 // enrichStale adds attributes.stale / attributes.stale_since to volcanic
@@ -78,9 +92,10 @@ func (a *API) ListHazards(c *gin.Context) {
 	events = a.enrichStale(events)
 
 	c.JSON(http.StatusOK, listResponse{
-		Data:  events,
-		Count: len(events),
-		AsOf:  timeutil.New(domain.Now()),
+		Data:         events,
+		Count:        len(events),
+		AsOf:         timeutil.New(domain.Now()),
+		SourceStatus: a.currentSourceStatus(),
 	})
 }
 
