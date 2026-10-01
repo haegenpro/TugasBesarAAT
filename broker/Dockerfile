@@ -9,5 +9,5 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/broker-init ./init
 FROM nats:2.15.0-alpine3.22
 COPY --from=builder /out/broker-init /usr/local/bin/broker-init
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]

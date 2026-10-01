@@ -42,6 +42,8 @@ store/            # init.sql + Store README (Postgres, Aggregator-owned)
 auth-service/     # Go module, :8083 (internal token service + SQLite)
 client-api/       # Go module, :8080 (public API)
 client-tui/       # Go module, interactive terminal client
+broker/           # NATS JetStream + stream initializer
+scripts/          # API smoke test
 docker-compose.yml
 .env.example
 docs/             # Pre-existing team contract docs (wire format, stack, deployment)
@@ -49,10 +51,13 @@ docs/             # Pre-existing team contract docs (wire format, stack, deploym
 
 ## Quick start: Docker Compose
 
-```bash
-cp .env.example .env
-cp broker/.env.example broker/.env   # required NATS settings
-docker compose up --build
+Create the eight service env files manually using the root `.env.example`
+and the per-service table below. Copy only the variables required by each
+service, including shared variables listed in the template. Then run from
+the repository root:
+
+```powershell
+docker compose up -d --build
 ```
 
 Each service can start independently. The Aggregator serves `/health` while
@@ -78,11 +83,50 @@ curl http://localhost:8080/health   # client-api
 curl http://localhost:8080/ready    # auth and aggregator readiness
 ```
 
-The `.env` file is required for distinct downstream credentials and the
-internal Auth key. Its example values are demonstration placeholders; replace
-them with distinct secrets for a real deployment. Both `.env` and
-`broker/.env` are gitignored. The Auth Service owns its SQLite database in the
-`auth-data` volume. Restarting the Auth container does not remove valid sessions.
+### Per-service environment files
+
+The only environment template is `.env.example` in the root. Create the
+following gitignored files manually, each containing only the variables
+needed by that service:
+
+| File | Used by | Configuration |
+| --- | --- | --- |
+| `bmkg-mock/.env` | BMKG mock | Port, API key, delay |
+| `pvmbg-mock/.env` | PVMBG mock | Port, source/admin tokens, delays |
+| `broker/.env` | Broker and optional broker-init tool | NATS URL, stream, subject, retention |
+| `store/.env` | PostgreSQL | Database name, user, password |
+| `aggregator/.env` | Aggregator | Source URLs/credentials, database URL, NATS publication, polling |
+| `auth-service/.env` | Auth Service | Three client credentials, internal key, TTLs, SQLite path |
+| `client-api/.env` | Client API | Port, Auth/Aggregator URLs, internal key |
+| `client-tui/.env` | Interactive TUI | API URL and public client IDs; no login secrets |
+
+Compose injects these values through `env_file`; it does not mount the files.
+Build contexts exclude local env files with `.dockerignore`. The root `.env`
+is not needed at runtime. Example secrets are demonstration placeholders;
+configure real values in the service files.
+
+Env values must fit on one line. Use single quotes to preserve literal
+characters such as `$` and `#`, for example `AUTH_INTERNAL_KEY='your-key'`.
+
+Keep shared values consistent when editing files: BMKG's key is also in
+Aggregator; PVMBG's source token is also in Aggregator; the internal Auth key
+is in Auth and Client API; client IDs are in Auth and TUI; NATS URL, stream,
+and subject are in Broker and Aggregator. Set Aggregator's `DATABASE_URL`
+from the PostgreSQL credentials, with URI-encoded user/password/name when
+they contain special characters. If those credentials change later, update
+`store/.env` and Aggregator's URL
+together. Changing PostgreSQL credentials also requires updating the existing
+database; recreating a container does not alter users in an initialized volume.
+
+Docker host mappings stay at Client API `8080`, BMKG `8081`, PVMBG `8082`,
+and NATS `4222`/`8222`. Keep `CLIENT_API_PORT=8080`, `BMKG_PORT=8081`,
+and `PVMBG_PORT=8082` to match these mappings.
+For other port changes, keep service URLs, health checks, and Compose mappings
+consistent. Apply env changes with `docker compose up -d --force-recreate`
+and restart the one-off TUI. Building images is only needed for code changes.
+
+The Auth Service owns its SQLite database in the `auth-data` volume.
+Restarting the Auth container does not remove valid sessions.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
@@ -94,7 +138,7 @@ them with distinct secrets for a real deployment. Both `.env` and
 | `REFRESH_TOKEN_TTL_SEC` | Refresh token lifetime | `86400` |
 | `AUTH_DB_PATH` | Auth-owned SQLite file inside its container | `/data/auth.db` |
 | `AUTH_PORT` | Auth container HTTP port | `8083` |
-| `CLIENT_API_PORT` | Client API container and host HTTP port | `8080` |
+| `CLIENT_API_PORT` | Client API container HTTP port; fixed host mapping | `8080` |
 | `AGGREGATOR_PORT` | Internal Aggregator HTTP port | `8080` |
 | `AUTH_BASE_URL`, `AGGREGATOR_BASE_URL` | Internal upstream URLs for standalone Client API runs | Compose service URLs |
 | `BNPB_API_URL` | TUI destination URL | `http://localhost:8080` on host; Compose service URL in Docker |
@@ -138,11 +182,13 @@ internal port is not published to the host.
 On Windows, `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage`
 checks institution credential isolation, three client identities, Media redaction, token rotation, natural expiry,
 PVMBG outage status, and session persistence after an Auth restart. It reads demo credentials from
-the gitignored `.env` and prints only the pass/fail result.
+the corresponding service env files and prints only the pass/fail result.
 
 ## Standalone (non-Docker) run
 
-Each service reads plain env vars; `godotenv` is optional local-dev sugar.
+Each service reads process environment variables. Go services do not load
+their `.env` files automatically when run outside Docker; export the required
+values before starting them and use `localhost` URLs for services on the host.
 The Aggregator can start without Postgres or NATS, and recovers when they
 appear. Starting the broker initializes its JetStream stream.
 
@@ -152,7 +198,7 @@ docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_D
   -v $(pwd)/store/init.sql:/docker-entrypoint-initdb.d/init.sql postgres:16-alpine3.24
 
 # 2. NATS JetStream, including its stream initializer
-cp broker/.env.example broker/.env
+# Prepare broker/.env manually from the root template
 docker compose up -d broker
 
 # 3. BMKG mock

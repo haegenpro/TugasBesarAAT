@@ -1,17 +1,59 @@
 param([switch]$RestartAuth, [switch]$WaitForExpiry, [switch]$TestOutage)
 
 $ErrorActionPreference = 'Stop'
-$settings = @{}
-Get-Content -LiteralPath '.env' | ForEach-Object {
-    if ($_ -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
-        $settings[$matches[1]] = $matches[2]
+
+function Read-EnvFile {
+    param([string]$Path)
+
+    $settings = @{}
+    if (-not [System.IO.File]::Exists($Path)) { throw "Environment file not found: $Path" }
+
+    $lineNumber = 0
+    foreach ($line in [System.IO.File]::ReadAllLines($Path)) {
+        $lineNumber++
+        if ([string]::IsNullOrWhiteSpace($line) -or $line.TrimStart().StartsWith('#')) { continue }
+        $entry = [regex]::Match($line, '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$')
+        if (-not $entry.Success) { throw "Invalid environment entry at ${Path}:$lineNumber" }
+
+        $key = $entry.Groups[1].Value
+        $value = $entry.Groups[2].Value.Trim()
+        if ($settings.ContainsKey($key)) { throw "Duplicate variable $key in $Path" }
+        if ($value.StartsWith("'")) {
+            $quoted = [regex]::Match($value, '^''((?:\\''|[^''])*)''\s*(?:#.*)?$')
+            if (-not $quoted.Success) { throw "Invalid quoted variable $key in $Path" }
+            $value = $quoted.Groups[1].Value.Replace("\'", "'")
+        } elseif ($value.StartsWith('"')) {
+            $quoted = [regex]::Match($value, '^"((?:\\.|[^"\\])*)"\s*(?:#.*)?$')
+            if (-not $quoted.Success) { throw "Invalid quoted variable $key in $Path" }
+            $value = [regex]::Replace($quoted.Groups[1].Value, '\\([\\"nrt$])', {
+                param($escape)
+                switch ($escape.Groups[1].Value) {
+                    'n' { "`n" }
+                    'r' { "`r" }
+                    't' { "`t" }
+                    default { $escape.Groups[1].Value }
+                }
+            })
+        } else {
+            $value = [regex]::Replace($value, '\s+#.*$', '').TrimEnd()
+        }
+        if ($value.Contains("`r") -or $value.Contains("`n")) {
+            throw "Variable $key in $Path must fit on one line"
+        }
+        $settings[$key] = $value
     }
+    return $settings
 }
+
+$projectRoot = Split-Path -Parent $PSScriptRoot
+$authSettings = Read-EnvFile (Join-Path $projectRoot 'auth-service/.env')
+$bmkgSettings = Read-EnvFile (Join-Path $projectRoot 'bmkg-mock/.env')
+$pvmbgSettings = Read-EnvFile (Join-Path $projectRoot 'pvmbg-mock/.env')
 
 function Login([string]$prefix) {
     $body = @{
-        client_id = $settings["${prefix}_CLIENT_ID"]
-        client_secret = $settings["${prefix}_CLIENT_SECRET"]
+        client_id = $authSettings["${prefix}_CLIENT_ID"]
+        client_secret = $authSettings["${prefix}_CLIENT_SECRET"]
     } | ConvertTo-Json -Compress
     return Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/auth/login' -ContentType 'application/json' -Body $body
 }
@@ -39,8 +81,8 @@ if ($media.role -ne 'media' -or $field.role -ne 'field' -or $internal.role -ne '
 }
 
 foreach ($case in @(
-    @{ uri = 'http://localhost:8082/volcanic-reports'; headers = @{ Authorization = "Bearer $($settings['BMKG_API_KEY'])" } },
-    @{ uri = 'http://localhost:8081/seismic-events'; headers = @{ 'X-BMKG-Key' = $settings['PVMBG_TOKEN'] } }
+    @{ uri = 'http://localhost:8082/volcanic-reports'; headers = @{ Authorization = "Bearer $($bmkgSettings['BMKG_API_KEY'])" } },
+    @{ uri = 'http://localhost:8081/seismic-events'; headers = @{ 'X-BMKG-Key' = $pvmbgSettings['PVMBG_TOKEN'] } }
 )) {
     try {
         Invoke-WebRequest -Method Get -Uri $case.uri -Headers $case.headers -UseBasicParsing | Out-Null
@@ -75,7 +117,7 @@ $internalData = Hazards $internal.access_token '/hazards'
 if (-not $internalData.data[0].PSObject.Properties['attributes']) { throw 'Internal response has no raw attributes' }
 
 if ($TestOutage) {
-    $adminHeaders = @{ Authorization = "Bearer $($settings['PVMBG_ADMIN_TOKEN'])" }
+    $adminHeaders = @{ Authorization = "Bearer $($pvmbgSettings['PVMBG_ADMIN_TOKEN'])" }
     $null = Invoke-RestMethod -Method Post -Uri 'http://localhost:8082/admin/outage' -Headers $adminHeaders
     try {
         $stale = $false
@@ -97,7 +139,8 @@ if ($TestOutage) {
 }
 
 if ($RestartAuth) {
-    docker compose restart auth-service | Out-Null
+    docker compose -f (Join-Path $projectRoot 'docker-compose.yml') restart auth-service | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Auth container restart failed' }
     $ready = $false
     for ($attempt = 0; $attempt -lt 20; $attempt++) {
         try {
