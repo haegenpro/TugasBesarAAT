@@ -19,6 +19,9 @@ type Config struct {
 	StreamName    string
 	StreamSubject string
 	StreamMaxAge  time.Duration
+	DLQStream     string
+	DLQPrefix     string
+	DLQMaxAge     time.Duration
 }
 
 func loadConfig() (Config, error) {
@@ -46,12 +49,31 @@ func loadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("Invalid NATS_STREAM_MAX_AGE %q: %w", maxAgeRaw, err)
 	}
+	dlqStream, err := requireEnv("NATS_DLQ_STREAM")
+	if err != nil {
+		return Config{}, err
+	}
+	dlqPrefix, err := requireEnv("NATS_DLQ_SUBJECT_PREFIX")
+	if err != nil {
+		return Config{}, err
+	}
+	dlqAgeRaw, err := requireEnv("NATS_DLQ_MAX_AGE")
+	if err != nil {
+		return Config{}, err
+	}
+	dlqAge, err := time.ParseDuration(dlqAgeRaw)
+	if err != nil || dlqAge <= 0 {
+		return Config{}, fmt.Errorf("invalid NATS_DLQ_MAX_AGE %q", dlqAgeRaw)
+	}
 
 	return Config{
 		NATSURL:       natsURL,
 		StreamName:    streamName,
 		StreamSubject: streamSubject,
 		StreamMaxAge:  maxAge,
+		DLQStream:     dlqStream,
+		DLQPrefix:     dlqPrefix,
+		DLQMaxAge:     dlqAge,
 	}, nil
 }
 
@@ -85,6 +107,13 @@ func ensureStream(parent context.Context, js jetstream.JetStream, cfg Config) er
 		info.Config.Storage,
 		info.Config.MaxAge,
 	)
+	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name: cfg.DLQStream, Subjects: []string{cfg.DLQPrefix + ".>"},
+		Storage: jetstream.FileStorage, MaxAge: cfg.DLQMaxAge,
+	})
+	if err != nil {
+		return fmt.Errorf("create/update DLQ stream %q: %w", cfg.DLQStream, err)
+	}
 
 	return nil
 }
@@ -116,6 +145,18 @@ func checkStream(parent context.Context, cfg Config) error {
 	if info.Config.Storage != jetstream.FileStorage || info.Config.MaxAge != cfg.StreamMaxAge ||
 		len(info.Config.Subjects) != 1 || info.Config.Subjects[0] != cfg.StreamSubject {
 		return fmt.Errorf("stream %q has unexpected configuration", cfg.StreamName)
+	}
+	dlq, err := js.Stream(ctx, cfg.DLQStream)
+	if err != nil {
+		return fmt.Errorf("find DLQ stream %q: %w", cfg.DLQStream, err)
+	}
+	dlqInfo, err := dlq.Info(ctx)
+	if err != nil {
+		return err
+	}
+	if dlqInfo.Config.Storage != jetstream.FileStorage || dlqInfo.Config.MaxAge != cfg.DLQMaxAge ||
+		len(dlqInfo.Config.Subjects) != 1 || dlqInfo.Config.Subjects[0] != cfg.DLQPrefix+".>" {
+		return fmt.Errorf("DLQ stream %q has unexpected configuration", cfg.DLQStream)
 	}
 	return nil
 }

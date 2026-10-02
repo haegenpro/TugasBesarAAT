@@ -2,7 +2,7 @@
 
 This repository contains the BMKG and PVMBG mocks, BNPB Aggregator,
 Aggregator-owned Canonical Store, Client API, Auth Service, and an interactive
-downstream client. Broker consumers are still separate work.
+downstream client, and two durable broker consumers.
 
 ## Services
 
@@ -16,6 +16,8 @@ downstream client. Broker consumers are still separate work.
 | Auth Service | [`auth-service/`](auth-service/) | internal (8083) | Owns persistent sessions, issues and rotates tokens |
 | Client API | [`client-api/`](client-api/) | 8080 | Authenticated downstream reads and server-side field projection |
 | Client TUI | [`client-tui/`](client-tui/) | interactive | One terminal app for Media, Field, and Internal identities |
+| Dashboard consumer | [`consumer-dashboard/`](consumer-dashboard/) | internal (8091) | Durable JetStream subscription and SQLite hazard projection |
+| Notifier consumer | [`consumer-notifier/`](consumer-notifier/) | internal (8092) | Durable JetStream subscription and simulated notification ledger |
 
 Each Go service has its own `go.mod` (no shared workspace module) and its own
 multi-stage Dockerfile (`golang:1.27.1-alpine3.24` builder → `alpine:3.24`
@@ -32,6 +34,10 @@ volume. New `HazardEvent`s and pending publications are saved in one Postgres
 transaction. A dispatcher publishes each pending event to stream `HAZARDS` on
 subject `hazard.events` and removes it from the outbox only after JetStream
 acknowledges it.
+The broker also maintains a separate `HAZARDS_DLQ` stream. Each consumer has
+its own durable cursor and publishes undecodable messages to its own DLQ
+subject after the failure rules below. The broker stores and delivers bytes;
+schema lookup and validation happen in each consumer after delivery.
 
 ## Repository layout
 
@@ -45,6 +51,8 @@ client-api/       # Go module, :8080 (public API)
 client-tui/       # Go module, interactive terminal client
 broker/           # NATS JetStream + stream initializer
 registry/         # Apicurio Registry + separate persistent database
+consumer-dashboard/ # durable dashboard projection
+consumer-notifier/  # durable simulated notifications
 scripts/          # API smoke test
 docker-compose.yml
 .env.example
@@ -53,7 +61,7 @@ docs/             # Pre-existing team contract docs (wire format, stack, deploym
 
 ## Quick start: Docker Compose
 
-Create the nine service env files manually using the root `.env.example`
+Create the eleven service env files manually using the root `.env.example`
 and the per-service table below. Copy only the variables required by each
 service, including shared variables listed in the template. Then run from
 the repository root:
@@ -102,6 +110,8 @@ needed by that service:
 | `auth-service/.env` | Auth Service | Three client credentials, internal key, TTLs, SQLite path |
 | `client-api/.env` | Client API | Port, Auth/Aggregator URLs, internal key |
 | `client-tui/.env` | Interactive TUI | API URL and public client IDs; no login secrets |
+| `consumer-dashboard/.env` | Dashboard consumer | Role, durable name, SQLite path, broker and registry URLs, DLQ subject |
+| `consumer-notifier/.env` | Notifier consumer | Role, durable name, SQLite path, broker and registry URLs, DLQ subject |
 
 Compose injects these values through `env_file`; it does not mount the files.
 Build contexts exclude local env files with `.dockerignore`. The root `.env`
@@ -477,6 +487,103 @@ docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/haza
 ```
 
 ---
+
+## Durable consumers and DLQ
+
+Both consumers subscribe to the same `HAZARDS` stream and `hazard.events`
+subject, but use independent durable names. The dashboard records the full
+decoded HazardEvent in its own SQLite volume; the notifier records one local
+notification summary per hazard. Each SQLite transaction commits the projection
+and its `(stream, sequence, payload digest)` processing identity together.
+Redelivery after an ack failure sees the committed identity and only retries a
+confirmed ack. `hazard_id` also remains unique, and a second event with changed
+content for the same hazard halts the consumer until an explicit versioning
+contract exists. Each consumer acknowledges only after its SQLite write succeeds.
+Their `/health`, `/ready`, and `/records` endpoints are reachable only on the
+Compose backend network. `/records` returns the latest 100 processed records
+for demo inspection.
+
+Each consumer reads the five-byte schema-ID frame, retrieves the writer schema
+from Apicurio on a cache miss, and saves validated writer schemas by registry
+URL and ID in SQLite. Cached schemas survive consumer restarts and registry
+outages. JSON-encoded attribute values are decoded individually. A registry
+timeout or 5xx response causes a 30-second fetch cooldown and delayed broker
+redelivery; already cached schemas remain usable after the cooldown. A 404
+starts a persisted five-minute retry window with capped backoff and jitter.
+Ten distinct unknown-schema messages within one minute halt the consumer and
+set `/ready` to 503, preventing a registry misconfiguration from mass-DLQing
+valid events. Corrupt frames/Avro bytes go to the DLQ immediately. An
+additional ten-message-per-minute corrupt-payload guard halts a widespread
+producer or registry mismatch before it fills the DLQ. An unsupported envelope
+or consumer-model incompatibility halts and alerts through the error log and
+readiness endpoint. SQLite busy/locked errors retry; disk, I/O, and
+corruption errors halt; a message-specific constraint error retries three
+times, then goes to the DLQ with `reason_code=sqlite_constraint`. Ten distinct
+constraint failures within a minute halt instead. The DLQ record includes
+original bytes (base64 in JSON), stream sequence, consumer, reason code,
+attempt count, and time; replay is manual.
+
+The consumer fetches one message at a time. Delayed NAKs are held by JetStream,
+so later valid events can proceed while fewer than 64 messages are pending.
+Processing is bounded to 25 seconds under a 60-second ack wait. JetStream
+`MaxDeliver=-1` allows the application policy to finish; a finite broker limit
+could stop delivery before the timed retry or DLQ publication. DLQ publication
+is confirmed before the original message is confirmed as acked. Its deterministic
+message ID reduces duplicate DLQ publications during JetStream's deduplication
+window; downstream DLQ tooling should use `(consumer, original_stream,
+stream_sequence)` as its permanent deduplication key.
+
+On a halt, `/ready` returns 503 and a reason, and Compose marks the container
+unhealthy. The halt persists across restarts. Diagnose the registry, consumer
+code, or SQLite volume, then stop the consumer, remove its `halt_reason` row
+from the local `consumer_control` SQLite table, and start it again. Do this
+before the stream retention window expires. The `/health` endpoint remains a
+liveness check. This consumer treats hazard events as immutable; no per-hazard
+ordering is required for its insert-only projection. A future update event
+must include a version and reject stale writes before enabling updates.
+
+The main stream retains messages for `NATS_STREAM_MAX_AGE` (example: 24h), so
+an offline durable consumer catches up only while the messages remain there.
+The separate DLQ stream retains failures for `NATS_DLQ_MAX_AGE` (example: 168h).
+Set `NATS_DLQ_STREAM`, `NATS_DLQ_SUBJECT_PREFIX`, and `NATS_DLQ_MAX_AGE`
+in `broker/.env`; configure `NATS_DLQ_STREAM` and a distinct
+`NATS_DLQ_SUBJECT` in each consumer env file. The optional third consumer
+uses the dashboard image, a new durable name, and a separate SQLite volume.
+
+```bash
+docker compose exec -T consumer-dashboard wget -qO- http://localhost:8091/records
+docker compose exec -T consumer-notifier wget -qO- http://localhost:8092/records
+docker compose stop consumer-notifier
+# Trigger a new PVMBG report via the schema toggle in Demo B; the dashboard continues.
+docker compose start consumer-notifier
+docker compose --profile consumer-demo up -d consumer-dashboard-demo
+docker compose exec -T consumer-dashboard-demo wget -qO- http://localhost:8093/records
+```
+
+The two main consumers and the optional third one all read the existing
+publisher output; adding the third requires no Aggregator change. Both new
+Go modules can be checked with `go test ./...` from their directories.
+To demonstrate that a bad schema ID does not hold up a later valid event,
+publish a deliberately unknown ID from the broker module, then trigger a
+fresh PVMBG report with Demo B's schema toggle:
+
+```bash
+cd broker
+NATS_URL=nats://localhost:4222 NATS_SUBJECT=hazard.events go run ./cmd/publish-invalid
+cd ..
+docker compose logs consumer-dashboard consumer-notifier | grep 'message quarantined'
+curl -s 'http://localhost:8222/jsz?streams=true' | jq '[.account_details[].stream_detail[] | {name, messages: .state.messages}]'
+cd broker
+NATS_URL=nats://localhost:4222 NATS_DLQ_STREAM=HAZARDS_DLQ go run ./cmd/inspect-dlq hazard.dlq.dashboard
+NATS_URL=nats://localhost:4222 NATS_DLQ_STREAM=HAZARDS_DLQ go run ./cmd/inspect-dlq hazard.dlq.notifier
+cd ..
+```
+
+The unknown ID is retried for at least five minutes before quarantine; a
+registry outage pauses fetching and does not count as another 404. The later
+valid event can be processed while that retry waits. Each of the two consumers
+places its own copy in `HAZARDS_DLQ`. Do not use the fixture against
+a shared or production broker.
 
 ## Demo scenarios
 

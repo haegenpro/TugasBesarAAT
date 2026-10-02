@@ -147,10 +147,10 @@ Publish the `HazardEvent` in an Avro record wrapped in a thin envelope carrying 
 
 Why at-least-once over at-most-once: P5's criterion 3 explicitly requires explaining what happens to events published while a consumer was down ("tersusul atau hilang sesuai konfigurasi broker") — at-least-once with a durable JetStream stream and consumer means a reconnecting consumer catches up on missed events, which is both the safer default for a disaster-coordination system (losing a tsunami warning silently is bad) and gives a clean, demoable answer to that criterion.
 
-**Consequence: every consumer must be idempotent.** A message can be delivered more than once (e.g. consumer acks, then crashes before committing its own side-effect, broker redelivers). Both consumers should key on `payload.hazard_id` to detect duplicates:
+**Consequence: every consumer must be idempotent.** A message can be delivered more than once (e.g. the SQLite commit succeeds, then the consumer crashes before its ack is confirmed). Both consumers persist the broker stream sequence and payload digest in the same SQLite transaction as their local effect. They also keep `payload.hazard_id` unique:
 
-- **Dashboard updater:** upsert by `hazard_id` (safe by construction — applying the same update twice is a no-op)
-- **Notifier:** keep a small "already notified" set/table keyed by `hazard_id` (+ maybe `envelope.published_at` if the same hazard can legitimately update twice) and skip sending a duplicate notification
+- **Dashboard updater:** insert each immutable hazard once; a changed event with the same ID requires a versioning contract
+- **Notifier:** record one local notification summary per hazard; a future external sender requires an outbox and receiver-side idempotency
 
 This is worth stating explicitly in the report per P5's criterion 5 ("apakah consumer perlu bersifat idempoten dan bagaimana kelompok menyikapinya") — it's a direct rubric line, not just good practice.
 
@@ -164,9 +164,24 @@ its cached ID and codec during a registry outage.
 
 A consumer reads the frame's schema ID, resolves the writer schema from the
 registry (or a previously cached copy), decodes the Avro record, then decodes
-each `attributes` value as JSON. It deduplicates by `hazard_id` and acknowledges
+each `attributes` value as JSON. It deduplicates by stream sequence and hazard ID and acknowledges
 only after its own processing succeeds. An unknown ID during a registry outage
 must remain unacknowledged for retry.
+
+The dashboard and notifier are separate durable JetStream consumers with their
+own SQLite volumes. Each commits `(stream, sequence, payload digest)` in the
+same transaction as its projection and confirms the JetStream ack; redelivery
+only repeats the ack. Validated writer schemas are cached in SQLite by registry
+URL and ID. A registry outage triggers a fetch cooldown and delayed retry.
+Unknown IDs have a persisted five-minute retry window with capped backoff; a
+burst of ten distinct unknown messages per minute pauses the consumer for
+operator investigation. Corrupt Avro is sent to the consumer's DLQ subject;
+unsupported registered schemas halt the consumer. SQLite busy/locked retries,
+environmental failures halt, and isolated constraints have a bounded DLQ
+policy. The original delivery is acknowledged only after JetStream confirms
+the DLQ publication. Later valid messages can be processed while a single
+unknown ID waits, up to the durable consumer's pending limit. `MaxDeliver=-1`
+keeps broker delivery attempts from ending before the application policy does.
 
 ## Open decisions to confirm as a team
 
@@ -178,7 +193,7 @@ must remain unacknowledged for retry.
 
 - [ ] Anggota 2's Client-API can call `GET /internal/hazards` against a running Aggregator and parse the `data`/`count`/`as_of` envelope
 - [ ] Anggota 2's Client-API correctly surfaces `attributes.stale`/`stale_since` as an explicit client-facing status, not passed through silently
-- [ ] Anggota 1's Aggregator publishes Avro to `NATS_SUBJECT` in the envelope shape above, verified by a consumer that resolves the schema ID
-- [ ] Anggota 3's consumers deserialize `payload` using the same `HazardEvent` model from the wire format spec (no separate ad hoc parsing)
-- [ ] Both consumers (dashboard updater, notifier) key on `hazard_id` for dedup and can be shown handling a redelivered/duplicate message without double-applying it
-- [ ] Correlation ID from the envelope shows up in both the Aggregator's publish log line and the consumer's processing log line for the same event
+- [x] Anggota 1's Aggregator publishes Avro to `NATS_SUBJECT` in the envelope shape above, verified by a consumer that resolves the schema ID
+- [x] Anggota 3's consumers deserialize `payload` using the same `HazardEvent` model from the wire format spec (no separate ad hoc parsing)
+- [x] Both consumers (dashboard updater, notifier) key on `hazard_id` for dedup and can be shown handling a redelivered/duplicate message without double-applying it
+- [x] Correlation ID from the envelope shows up in both the Aggregator's publish log line and the consumer's processing log line for the same event
