@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"aggregator/internal/api"
+	"aggregator/internal/avrowire"
 	"aggregator/internal/clients"
 	"aggregator/internal/config"
 	"aggregator/internal/middleware"
@@ -41,6 +42,10 @@ func main() {
 	deps := &api.Dependencies{}
 	bmkgClient := clients.NewBMKGClient(cfg.BMKGBaseURL, cfg.BMKGAPIKey, logger)
 	pvmbgClient := clients.NewPVMBGClient(cfg.PVMBGBaseURL, cfg.PVMBGToken, logger)
+	registry := avrowire.NewClient(cfg.SchemaRegistryURL)
+	registry.ConfigureLogging(logger, "aggregator")
+	bmkgClient.Registry = registry
+	pvmbgClient.Registry = registry
 	lookup := volcano.NewLookup(st.Pool)
 	status := poller.NewPVMBGStatus()
 
@@ -59,7 +64,7 @@ func main() {
 	router := server.New(logger, a)
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: router}
 	go monitorStore(ctx, st, deps, p, logger)
-	go dispatchOutbox(ctx, st, cfg, deps, logger)
+	go dispatchOutbox(ctx, st, cfg, deps, registry, logger)
 
 	go func() {
 		logger.Info("starting aggregator", "service", "aggregator", "port", cfg.Port, "poll_interval_sec", cfg.PollInterval.Seconds())
@@ -118,7 +123,7 @@ func monitorStore(ctx context.Context, st *store.Store, deps *api.Dependencies, 
 }
 
 // dispatchOutbox retries both broker connection and pending publication.
-func dispatchOutbox(ctx context.Context, st *store.Store, cfg config.Config, deps *api.Dependencies, logger *slog.Logger) {
+func dispatchOutbox(ctx context.Context, st *store.Store, cfg config.Config, deps *api.Dependencies, registry *avrowire.Client, logger *slog.Logger) {
 	for {
 		if ctx.Err() != nil {
 			return
@@ -130,7 +135,7 @@ func dispatchOutbox(ctx context.Context, st *store.Store, cfg config.Config, dep
 			continue
 		}
 		connectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		pub, err := publisher.New(connectCtx, cfg.NATSURL, cfg.NATSStream, cfg.NATSSubject, logger)
+		pub, err := publisher.New(connectCtx, cfg.NATSURL, cfg.NATSStream, cfg.NATSSubject, registry, logger)
 		cancel()
 		if err != nil {
 			logger.Warn("nats jetstream unavailable; retrying", "service", "aggregator", "error", err.Error())

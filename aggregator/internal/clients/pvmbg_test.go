@@ -20,7 +20,8 @@ func TestDecodeVolcanicReport_WithoutConfidenceLevel(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "rep-1", r.ReportID)
 	assert.Equal(t, "merapi", r.VolcanoID)
-	assert.NotContains(t, r.Extra, "confidence_level")
+	assert.Equal(t, "Siaga", r.AlertLevel)
+	assert.NotContains(t, r.Attributes, "confidence_level")
 }
 
 func TestDecodeVolcanicReport_WithConfidenceLevel(t *testing.T) {
@@ -33,10 +34,12 @@ func TestDecodeVolcanicReport_WithConfidenceLevel(t *testing.T) {
 
 	r, err := decodeVolcanicReport(raw)
 	require.NoError(t, err)
-	assert.Equal(t, 0.93, r.Extra["confidence_level"])
+	assert.Equal(t, "rep-2", r.ReportID)
+	assert.Equal(t, "Awas", r.AlertLevel)
+	assert.Equal(t, 0.93, r.Attributes["confidence_level"])
 }
 
-func TestDecodeVolcanicReport_UnknownFieldSurvives(t *testing.T) {
+func TestDecodeVolcanicReport_UnmappedFieldBecomesAttribute(t *testing.T) {
 	raw := map[string]interface{}{}
 	require.NoError(t, json.Unmarshal([]byte(`{
 		"report_id": "rep-3", "volcano_id": "merapi", "alert_level": "Normal",
@@ -46,5 +49,37 @@ func TestDecodeVolcanicReport_UnknownFieldSurvives(t *testing.T) {
 
 	r, err := decodeVolcanicReport(raw)
 	require.NoError(t, err)
-	assert.Equal(t, float64(12), r.Extra["seismic_tremor_count"], "genuinely unknown fields must pass through, not be dropped")
+	assert.Equal(t, "rep-3", r.ReportID)
+	assert.Equal(t, "Normal", r.AlertLevel)
+	assert.Equal(t, float64(12), r.Attributes["seismic_tremor_count"])
+}
+
+func TestDecodeVolcanicReport_FractionalEruptionCountFails(t *testing.T) {
+	raw := map[string]interface{}{
+		"report_id": "rep-5", "volcano_id": "merapi", "alert_level": "Siaga",
+		"eruption_count_24h": float64(1.5), "ash_column_height_m": float64(1500),
+		"reported_at": "2026-09-01T00:00:00.000Z",
+	}
+	_, err := decodeVolcanicReport(raw)
+	require.ErrorContains(t, err, `"eruption_count_24h"`)
+}
+
+func TestDecodeVolcanicReport_InvalidAlertLevelFails(t *testing.T) {
+	raw := map[string]interface{}{
+		"report_id": "rep-5", "volcano_id": "merapi", "alert_level": "Unknown",
+		"eruption_count_24h": float64(1), "ash_column_height_m": float64(1500),
+		"reported_at": "2026-09-01T00:00:00.000Z",
+	}
+	_, err := decodeVolcanicReport(raw)
+	require.ErrorContains(t, err, "invalid alert_level")
+}
+
+func TestDecodeVolcanicReport_RenamedRequiredFieldFails(t *testing.T) {
+	raw := map[string]interface{}{
+		"report_code": "rep-4", "volcano_id": "merapi", "alert_level": "Siaga",
+		"eruption_count_24h": float64(2), "ash_column_height_m": float64(1500),
+		"reported_at": "2026-09-01T00:00:00.000Z",
+	}
+	_, err := decodeVolcanicReport(raw)
+	require.ErrorContains(t, err, `"report_id"`)
 }

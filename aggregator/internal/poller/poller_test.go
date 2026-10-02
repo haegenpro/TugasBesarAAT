@@ -60,7 +60,9 @@ func bmkgTestServer(t *testing.T, delay time.Duration) *httptest.Server {
 		switch r.URL.Path {
 		case "/seismic-events":
 			json.NewEncoder(w).Encode([]clients.SeismicEvent{
-				{EventID: "evt-1", Magnitude: 3.0, OccurredAt: time.Now()},
+				{EventID: "evt-1", Magnitude: 3.0, DepthKM: 10, EpicenterLat: -6.5,
+					EpicenterLon: 106.5, RegionName: "Test Area", OccurredAt: time.Now(),
+					PotentialTsunami: false},
 			})
 		case "/tsunami-warnings":
 			json.NewEncoder(w).Encode([]clients.TsunamiWarning{})
@@ -133,6 +135,23 @@ func TestPVMBGOutage_DoesNotBlockBMKG(t *testing.T) {
 
 	getBMKGPoll(p)(ctx)
 	assert.Equal(t, int32(1), fs.Puts, "BMKG processing must succeed despite PVMBG outage")
+}
+
+func TestPVMBGRenamedRequiredFieldRejectsPoll(t *testing.T) {
+	reports := oneVolcanicReport()
+	reports[0]["report_code"] = reports[0]["report_id"]
+	delete(reports[0], "report_id")
+	pvmbg := pvmbgTestServer(0, reports)
+	defer pvmbg.Close()
+	store := newFakeStore()
+	status := poller.NewPVMBGStatus()
+	p := &poller.Poller{
+		PVMBG: clients.NewPVMBGClient(pvmbg.URL, "token", testLogger()),
+		Store: store, Lookup: fakeLookup{}, Status: status, Logger: testLogger(),
+	}
+	p.PollPVMBGOnce(context.Background())
+	assert.Equal(t, int32(0), store.Puts)
+	assert.False(t, status.IsHealthy())
 }
 
 // TestConcurrency_PVMBGSlow_BMKGStaysFast is the acceptance test for the

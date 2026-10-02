@@ -4,11 +4,11 @@
 
 ## Overview
 
-This document fixes the parts of the `HazardEvent` canonical format that the IF4031 M1 spec leaves open — exact JSON encoding, ID generation, and cross-language type mapping. The **field list and mapping rules are fixed by the assignment spec** (Kontrak BNPB, Format Kanonik) and are not up for debate here; this doc only pins down *how those fields are serialized on the wire* so the Aggregator (producer), Canonical Store, Client-Facing API, and any consumer can agree on a byte-for-byte compatible JSON shape regardless of implementation language.
+This document fixes the JSON representation of `HazardEvent` used by the Canonical Store, Aggregator read API, and Client API. The Aggregator publishes the equivalent logical fields to NATS as registry-framed Avro; see `Contracts.md` for that wire boundary.
 
 **Applies to:** anyone writing code that produces, stores, or reads a `HazardEvent` — the Aggregator (Person A), the Canonical Store / Client-Facing API (Person B), and Auth-filtered responses / consumers (Person C).
 
-**Target languages:** examples are given in Go and Python as the team's minimum baseline; the wire format itself is language-agnostic JSON, so any language can implement it from the field table alone.
+**Target languages:** examples are given in Go and Python. JSON clients use the field table below; broker consumers first decode Avro with the registry schema ID.
 
 ## JSON representation rules
 
@@ -147,36 +147,27 @@ If the team prefers stdlib-only (no pydantic dependency), a `dataclass` works th
 
 ## attributes map: known keys
 
-Per-source keys that land in `attributes`, so P3's field-filtering code has a fixed list to check against rather than passing through whatever a source happens to send:
+Per-source keys that land in `attributes`. Client API projects Media responses from an explicit summary field list, so additional raw attributes cannot leak into Media responses:
 
 | Source | Key | Type | Present when |
 | --- | --- | --- | --- |
 | SeismicEvent | `magnitude` | float | always |
 | SeismicEvent | `depth_km` | float | always |
 | SeismicEvent | `potential_tsunami` | bool | always |
+| TsunamiWarning | `warning_id` | string | when a matching warning exists |
+| TsunamiWarning | `related_event_id` | string | when a matching warning exists |
 | SeismicEvent | `threat_level` | string | `potential_tsunami = true` and a matching `TsunamiWarning` exists |
 | SeismicEvent | `affected_zones` | list\<string> | same as above |
 | SeismicEvent | `estimated_arrival` | string (ISO 8601) | same as above |
 | VolcanicReport | `eruption_count_24h` | integer | always |
 | VolcanicReport | `ash_column_height_m` | float | always |
-| VolcanicReport | `confidence_level` | float (0-1) | only after `POST /admin/schema-version` is triggered (P1's schema-evolution scenario) |
+| VolcanicReport | `confidence_level` | float (0–1) | when present after the schema toggle |
 
-**Policy for genuinely unknown fields** (anything PVMBG/BMKG adds beyond this table): pass through into `attributes` under their original field name, unmodified. This must match whatever policy Person A declares in the P1 report — update this table if that policy changes.
+**Unmapped-field policy:** Preserve source fields without a canonical top-level mapping in `attributes` for both BMKG and PVMBG. This includes `confidence_level` when present after `POST /admin/schema-version`, plus later additive source fields. Avro schema evolution lets the Aggregator read the new source record without a restart.
 
 ## Static volcano reference table
 
-The spec requires `VolcanicReport → HazardEvent` mapping to resolve `latitude`/`longitude` and `area_name` from `volcano_id` via "a static reference table owned by BNPB" — this needs to exist once, not be duplicated per-implementation.
-
-**Decision:** ship it as a single `volcanoes.json` file committed to the Aggregator's codebase (not a database table — it's static reference data, no need for a migration), loaded at startup:
-
-```json
-[
-  { "volcano_id": "merapi", "area_name": "Gunung Merapi", "latitude": -7.5407, "longitude": 110.4457 },
-  { "volcano_id": "semeru", "area_name": "Gunung Semeru", "latitude": -8.1077, "longitude": 112.9224 }
-]
-```
-
-PVMBG's mock (Person A) and the Aggregator's mapping logic (also Person A) should reference the **same file** — the mock only needs `volcano_id` values that exist in this table, and the Aggregator needs the table to resolve them. Keep the file in one shared location in the repo (e.g. `/shared/volcanoes.json`) rather than copy-pasting it into both services.
+The Aggregator resolves `latitude`, `longitude`, and `area_name` from the BNPB-owned `volcano_reference` table seeded by `store/init.sql`. PVMBG's seed `volcano_id` values match that table. An unknown ID fails mapping instead of producing fabricated coordinates.
 
 ## Cross-language validation checklist
 

@@ -7,11 +7,12 @@ import (
 )
 
 type Config struct {
-	Port       string
-	Token      string
-	AdminToken string
-	MinDelayMs int
-	MaxDelayMs int
+	Port        string
+	Token       string
+	AdminToken  string
+	MinDelayMs  int
+	MaxDelayMs  int
+	RegistryURL string
 }
 
 func Load() (Config, error) {
@@ -21,11 +22,12 @@ func Load() (Config, error) {
 		return Config{}, errors.New("PVMBG_TOKEN and PVMBG_ADMIN_TOKEN must be distinct and nonempty")
 	}
 	return Config{
-		Port:       getEnv("PVMBG_PORT", "8082"),
-		Token:      token,
-		AdminToken: adminToken,
-		MinDelayMs: getEnvInt("PVMBG_MIN_DELAY_MS", 500),
-		MaxDelayMs: getEnvInt("PVMBG_MAX_DELAY_MS", 3000),
+		Port:        getEnv("PVMBG_PORT", "8082"),
+		Token:       token,
+		AdminToken:  adminToken,
+		MinDelayMs:  getEnvInt("PVMBG_MIN_DELAY_MS", 500),
+		MaxDelayMs:  getEnvInt("PVMBG_MAX_DELAY_MS", 3000),
+		RegistryURL: getEnv("SCHEMA_REGISTRY_URL", "http://schema-registry:8080/apis/ccompat/v7"),
 	}, nil
 }
 

@@ -55,11 +55,9 @@ func (s *Store) CheckSchema(ctx context.Context) error {
 // SaveDedup upserts a HazardEvent, deduplicating on (source, source_ref_id).
 // A genuinely new source record inserts a fresh row and outbox event and
 // returns inserted=true. A record seen on an earlier poll cycle updates its
-// mutable fields in place
-// (this is what lets a source's schema evolution, e.g. PVMBG's
-// confidence_level, reach already-ingested rows on the next poll with no
-// restart/migration) but keeps its original hazard_id and returns
-// inserted=false, so it is never queued again.
+// mutable fields in place but keeps its original hazard_id and returns
+// inserted=false, so it is never queued again. Source fields that the
+// Aggregator ignores never enter this store operation.
 func (s *Store) SaveDedup(ctx context.Context, e domain.HazardEvent, correlationID string) (inserted bool, err error) {
 	attrsJSON, err := json.Marshal(e.Attributes)
 	if err != nil {

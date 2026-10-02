@@ -1,10 +1,10 @@
 // Package mapping implements the BMKG/PVMBG -> canonical HazardEvent
-// transformation, including severity rules and the schema-evolution
-// passthrough policy for unknown PVMBG fields.
+// transformation, including severity rules and source attribute passthrough.
 package mapping
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 
@@ -74,13 +74,19 @@ func warningsForEvent(eventID string, all []clients.TsunamiWarning) []clients.Ts
 // SeismicToHazard maps a BMKG SeismicEvent (plus any related tsunami
 // warnings) to a canonical HazardEvent. hazard_id is a fresh UUIDv4.
 func SeismicToHazard(event clients.SeismicEvent, allWarnings []clients.TsunamiWarning) domain.HazardEvent {
-	related := warningsForEvent(event.EventID, allWarnings)
+	var related []clients.TsunamiWarning
+	if event.PotentialTsunami {
+		related = warningsForEvent(event.EventID, allWarnings)
+	}
 	severity := SeismicSeverity(event.Magnitude, related)
 
 	attrs := map[string]interface{}{
-		"magnitude":          event.Magnitude,
-		"depth_km":           event.DepthKM,
-		"potential_tsunami":  event.PotentialTsunami,
+		"magnitude":         event.Magnitude,
+		"depth_km":          event.DepthKM,
+		"potential_tsunami": event.PotentialTsunami,
+	}
+	for key, value := range event.Attributes {
+		attrs[key] = value
 	}
 	if w, ok := highestWarning(related); ok {
 		attrs["warning_id"] = w.WarningID
@@ -88,6 +94,9 @@ func SeismicToHazard(event clients.SeismicEvent, allWarnings []clients.TsunamiWa
 		attrs["threat_level"] = w.ThreatLevel
 		attrs["affected_zones"] = w.AffectedZones
 		attrs["estimated_arrival"] = timeutil.FormatISOMilli(w.EstimatedArrival)
+		for key, value := range w.Attributes {
+			attrs[key] = value
+		}
 	}
 
 	return domain.HazardEvent{
@@ -112,35 +121,28 @@ var alertSeverity = map[string]domain.Severity{
 	"Awas":    domain.SeverityAwas,
 }
 
-// VolcanicToHazard maps a PVMBG VolcanicReport to a canonical HazardEvent,
-// resolving area_name/lat/lon via the volcano reference lookup. Unknown
-// fields (including confidence_level, once PVMBG emits it) pass through into
-// attributes under their original name.
+// VolcanicToHazard maps the supported PVMBG fields to a canonical HazardEvent,
+// resolving area_name/lat/lon via the volcano reference lookup.
 func VolcanicToHazard(ctx context.Context, lookup volcano.Lookuper, report clients.VolcanicReport) (domain.HazardEvent, error) {
 	ref, found, err := lookup.Get(ctx, report.VolcanoID)
 	if err != nil {
 		return domain.HazardEvent{}, err
 	}
-	var areaName string
-	var lat, lon float64
-	if found {
-		areaName = ref.AreaName
-		lat, lon = ref.Latitude, ref.Longitude
-	} else {
-		areaName = report.VolcanoID
+	if !found {
+		return domain.HazardEvent{}, fmt.Errorf("unknown volcano_id %q in BNPB reference table", report.VolcanoID)
 	}
 
 	severity, ok := alertSeverity[report.AlertLevel]
 	if !ok {
-		severity = domain.SeverityNormal
+		return domain.HazardEvent{}, fmt.Errorf("invalid PVMBG alert_level %q", report.AlertLevel)
 	}
 
 	attrs := map[string]interface{}{
 		"eruption_count_24h":  report.EruptionCount24h,
 		"ash_column_height_m": report.AshColumnHeightM,
 	}
-	for k, v := range report.Extra {
-		attrs[k] = v
+	for key, value := range report.Attributes {
+		attrs[key] = value
 	}
 
 	return domain.HazardEvent{
@@ -149,9 +151,9 @@ func VolcanicToHazard(ctx context.Context, lookup volcano.Lookuper, report clien
 		SourceRefID: report.ReportID,
 		HazardType:  domain.HazardVolcanic,
 		Severity:    severity,
-		AreaName:    areaName,
-		Latitude:    lat,
-		Longitude:   lon,
+		AreaName:    ref.AreaName,
+		Latitude:    ref.Latitude,
+		Longitude:   ref.Longitude,
 		OccurredAt:  timeutil.New(report.ReportedAt),
 		IngestedAt:  timeutil.New(domain.Now()),
 		Attributes:  attrs,

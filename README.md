@@ -12,6 +12,7 @@ downstream client. Broker consumers are still separate work.
 | PVMBG mock | [`pvmbg-mock/`](pvmbg-mock/) | 8082 | Simulated volcanic-activity source |
 | Aggregator | [`aggregator/`](aggregator/) | internal (8080) | Polls both mocks, maps to canonical `HazardEvent`, owns the Store, publishes to NATS, serves the internal read API |
 | Canonical Store | [`store/`](store/) | internal (5432) | PostgreSQL 16, accessed only by the Aggregator |
+| Schema Registry | [`registry/`](registry/) | 8084 | Apicurio Registry with its own persistent PostgreSQL database |
 | Auth Service | [`auth-service/`](auth-service/) | internal (8083) | Owns persistent sessions, issues and rotates tokens |
 | Client API | [`client-api/`](client-api/) | 8080 | Authenticated downstream reads and server-side field projection |
 | Client TUI | [`client-tui/`](client-tui/) | interactive | One terminal app for Media, Field, and Internal identities |
@@ -43,6 +44,7 @@ auth-service/     # Go module, :8083 (internal token service + SQLite)
 client-api/       # Go module, :8080 (public API)
 client-tui/       # Go module, interactive terminal client
 broker/           # NATS JetStream + stream initializer
+registry/         # Apicurio Registry + separate persistent database
 scripts/          # API smoke test
 docker-compose.yml
 .env.example
@@ -51,7 +53,7 @@ docs/             # Pre-existing team contract docs (wire format, stack, deploym
 
 ## Quick start: Docker Compose
 
-Create the eight service env files manually using the root `.env.example`
+Create the nine service env files manually using the root `.env.example`
 and the per-service table below. Copy only the variables required by each
 service, including shared variables listed in the template. Then run from
 the repository root:
@@ -91,11 +93,12 @@ needed by that service:
 
 | File | Used by | Configuration |
 | --- | --- | --- |
-| `bmkg-mock/.env` | BMKG mock | Port, API key, delay |
-| `pvmbg-mock/.env` | PVMBG mock | Port, source/admin tokens, delays |
+| `bmkg-mock/.env` | BMKG mock | Port, API key, delay, schema registry URL |
+| `pvmbg-mock/.env` | PVMBG mock | Port, source/admin tokens, delays, schema registry URL |
 | `broker/.env` | Broker and optional broker-init tool | NATS URL, stream, subject, retention |
 | `store/.env` | PostgreSQL | Database name, user, password |
-| `aggregator/.env` | Aggregator | Source URLs/credentials, database URL, NATS publication, polling |
+| `registry/.env` | Schema Registry and its database | Separate database credentials and Apicurio storage settings |
+| `aggregator/.env` | Aggregator | Source URLs/credentials, database URL, NATS publication, schema registry URL, polling |
 | `auth-service/.env` | Auth Service | Three client credentials, internal key, TTLs, SQLite path |
 | `client-api/.env` | Client API | Port, Auth/Aggregator URLs, internal key |
 | `client-tui/.env` | Interactive TUI | API URL and public client IDs; no login secrets |
@@ -283,7 +286,7 @@ admin toggles.
 - **Port:** 8082
 - **Auth:** `Authorization: Bearer <PVMBG_TOKEN>` on `/volcanic-reports` — a **different mechanism** than BMKG's header key, per spec. Admin endpoints require `Authorization: Bearer <PVMBG_ADMIN_TOKEN>` (a separate credential).
 - **Delay:** random delay per request in `[PVMBG_MIN_DELAY_MS, PVMBG_MAX_DELAY_MS]` (default 500–3000ms).
-- **Seed data:** 20 deterministic volcanic reports across all four alert levels (Normal/Waspada/Siaga/Awas), spanning 10 seeded Indonesian volcanoes. Every third record already carries a `confidence_level` value in storage — demonstrating that old/new record shapes coexist independently of the wire-visibility toggle below.
+- **Seed data:** 20 deterministic volcanic reports across all four alert levels (Normal/Waspada/Siaga/Awas), spanning 10 seeded Indonesian volcanoes. Some source reports have a `confidence_level` value, hidden until the toggle is activated.
 
 ### Endpoints
 
@@ -354,8 +357,8 @@ on tracking a last-poll timestamp).
 ### Mapping
 
 `internal/mapping` implements:
-- **Seismic → HazardEvent**: `source=BMKG`, `hazard_type=SEISMIC`, area/lat/lon from the event, severity per the priority rules below, `attributes` = `magnitude`, `depth_km`, `potential_tsunami`, plus the matching tsunami warning's fields (`warning_id`, `related_event_id`, `threat_level`, `affected_zones`, `estimated_arrival`) when one exists.
-- **Volcanic → HazardEvent**: `source=PVMBG`, `hazard_type=VOLCANIC`, area/lat/lon resolved via the `volcano_reference` table (never hardcoded in mapping code), severity from the alert-level mapping, `attributes` = `eruption_count_24h`, `ash_column_height_m`, plus **any other field PVMBG's response carries** (including `confidence_level` once emitted) — decoded generically so a new field never causes a decode failure or gets silently dropped.
+- **Seismic → HazardEvent**: `source=BMKG`, `hazard_type=SEISMIC`, area/lat/lon from the event, severity per the priority rules below, `attributes` = `magnitude`, `depth_km`, `potential_tsunami`, plus the matching tsunami warning's fields (`warning_id`, `related_event_id`, `threat_level`, `affected_zones`, `estimated_arrival`) when one exists. Further source fields without a canonical top-level mapping also enter `attributes`.
+- **Volcanic → HazardEvent**: `source=PVMBG`, `hazard_type=VOLCANIC`, area/lat/lon resolved via the `volcano_reference` table (never hardcoded in mapping code), severity from the alert-level mapping, `attributes` = integer `eruption_count_24h`, `ash_column_height_m`, and `confidence_level` when present. Further source fields without a canonical top-level mapping also enter `attributes`; an unknown volcano ID is rejected rather than given fabricated coordinates.
 
 **Severity rules for seismic events** (priority order):
 1. Any related tsunami warning at `Awas` → `AWAS`, overriding magnitude.
@@ -377,12 +380,38 @@ repository (`SaveDedup`, `GetByID`, `Query`, `LastKnownVolcanic`).
 
 ### Schema evolution
 
-`confidence_level` is never a Postgres column — it flows into the
-`attributes` JSONB column through the generic PVMBG decode path described
-above, so PVMBG can start emitting it (via its schema-version toggle) with
-zero Aggregator redeploy and zero migration. Old rows (no `confidence_level`)
-and new rows (with it) live in the same table, same column, and both are
-queryable/readable at once.
+The BMKG and PVMBG REST endpoints return JSON by default. Requests with
+`Accept: application/avro` receive Confluent-framed Avro bytes (magic byte,
+four-byte schema ID, Avro datum). The Aggregator uses that representation for
+both sources. Schemas are registered in Apicurio under
+`bmkg.seismic-events-value`, `bmkg.tsunami-warnings-value`, and
+`pvmbg.volcanic-reports-value`; each subject uses `FULL_TRANSITIVE`
+compatibility. The PVMBG admin toggle registers its additive v2 schema on
+first activation, then exposes `confidence_level` in both JSON and Avro. Each
+activation also adds one newly identified report carrying the field, so the
+Aggregator's source-ID deduplication keeps existing hazard IDs while updating
+their attributes and stores a new canonical row from the new report. The new
+field remains present in PVMBG's response and is mapped into canonical
+`attributes` when present.
+Unknown schema IDs and unregistered schema versions fail closed. A process can
+continue using schema IDs and codecs it has already cached while the registry
+is unavailable. A cold registry outage returns `503` for Avro source reads and
+the first PVMBG schema activation; JSON source reads and health checks remain
+available. The Aggregator keeps serving stored data and retries polling.
+
+The Aggregator's declared unmapped-field policy is **pass through to
+`attributes`** for BMKG and PVMBG fields without a canonical top-level
+destination. `confidence_level` follows this same rule; the Aggregator has no
+dedicated field or branch for it. PVMBG v2 is decoded without a restart. The Canonical
+Store still uses JSONB for attributes and needs no migration when the source
+schema changes. The new source report created by the toggle gets its own
+canonical row beside earlier reports; both remain readable.
+If a source removes or renames a field required by the mapping, the Aggregator
+rejects that poll and logs a contract violation with the correlation ID. It
+does not save a partial or zero-valued `HazardEvent`. The Client API similarly
+rejects an Aggregator JSON response missing required canonical fields and
+returns `503` rather than serving an incomplete hazard. The TUI reports an
+invalid response if a required field in its summary list disappears.
 
 ### Outage behavior
 
@@ -404,9 +433,11 @@ asserting p95 < 300ms.
 
 ### NATS publishing
 
-Every newly inserted `HazardEvent` is queued in Postgres and published to
-subject `hazard.events` on the durable JetStream stream `HAZARDS`
-(`NATS_STREAM`/`NATS_SUBJECT`, both configurable), wrapped in the envelope:
+Every newly inserted `HazardEvent` is queued as JSON in Postgres and published
+as Avro to the configured JetStream `NATS_STREAM` and `NATS_SUBJECT`. The
+example `.env` uses `HAZARDS` and `hazard.events`; neither value has a code
+default. The subject's registry name is `<NATS_SUBJECT>-value`. The Avro record
+has the following logical envelope:
 
 ```json
 {
@@ -416,6 +447,15 @@ subject `hazard.events` on the durable JetStream stream `HAZARDS`
   "payload": { "...": "canonical HazardEvent" }
 }
 ```
+
+The broker payload uses the same five-byte schema-ID frame as source Avro.
+`payload.attributes` is an Avro `map<string, bytes>`; each value is a JSON
+encoded attribute value, preserving the mixed types used by the Canonical
+Store and Client API. Consumers must resolve the schema ID and decode Avro
+before interpreting the envelope. The Aggregator registers the broker schema
+when it first needs to publish, so a cold registry outage leaves the service
+running and the JSON outbox pending. The Aggregator-to-Client API contract
+remains JSON.
 
 The dispatcher retries pending rows until JetStream acknowledges the write.
 It then removes the row from the outbox. A crash between acknowledgement and
@@ -455,9 +495,10 @@ docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/haza
 
 You should see 20 seismic records from BMKG, 20 volcanic reports from
 PVMBG, and both reflected as canonical `HazardEvent`s from the Aggregator.
-NATS receipt can be observed via the container logs
+NATS publish acknowledgements can be observed via the container logs
 (`docker compose logs aggregator | grep "outbound call"` shows the publish
-lines with `target_service":"nats"`), or by running a throwaway subscriber:
+lines with `target_service":"nats"`). A throwaway subscriber receives binary
+Avro bytes, which need the registry schema to decode:
 
 ```bash
 docker run --rm --network tugasbesaraat_backend natsio/nats-box:latest \
@@ -477,12 +518,22 @@ curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:8082/volca
 sleep 5   # let the Aggregator's next poll cycle pick up the new shape
 
 docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | \
-  jq '.data[] | select(.attributes | has("confidence_level")) | .attributes.confidence_level'
+  jq '.data[] | select(.source_ref_id == "rep-00001" or .source_ref_id == "rep-schema-00001") | {source_ref_id, attributes}'
 ```
 
 No restart of any container is needed at any point in this sequence.
-Records ingested before the toggle remain readable via
-`/internal/hazards/{id}` without `confidence_level` in `attributes`.
+The two canonical rows have different source IDs. After the toggle, the
+Aggregator updates previously ingested reports that now include
+`confidence_level` and stores the newly identified report with that attribute.
+
+To trigger a registry failure during the demo, stop it with
+`docker compose stop schema-registry`. A source process that has already
+registered its current schema can still answer Avro requests from its cache.
+Restart `pvmbg-mock` while the registry is stopped to show a cold cache:
+its JSON endpoint and `/health` still answer, while an Avro request returns
+`503` and the first schema toggle cannot activate. Start the registry again
+with `docker compose start schema-registry`; the next Avro request can register
+its schema and the toggle can proceed.
 
 ### Demo C — PVMBG outage
 
@@ -548,5 +599,5 @@ test actually measures it.
   outbox event; a record seen again on a later poll cycle
   updates its mutable columns (severity, area, coordinates, `attributes`)
   in place but keeps its original `hazard_id` and is never re-published.
-  This is what lets PVMBG's schema-version toggle reach already-ingested
-  rows on the very next poll cycle with no restart, matching Demo B.
+  The schema-version toggle creates a fresh source report ID, so Demo B
+  stores a new row alongside pre-toggle rows without changing their IDs.

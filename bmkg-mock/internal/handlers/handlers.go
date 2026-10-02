@@ -6,7 +6,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"bmkg-mock/internal/avrowire"
 	"bmkg-mock/internal/domain"
+	"bmkg-mock/internal/middleware"
 	"bmkg-mock/internal/timeutil"
 )
 
@@ -14,6 +16,7 @@ type Handler struct {
 	Events   []domain.SeismicEvent
 	Warnings []domain.TsunamiWarning
 	DelayMs  int
+	Registry *avrowire.Client
 }
 
 func New(events []domain.SeismicEvent, warnings []domain.TsunamiWarning, delayMs int) *Handler {
@@ -49,6 +52,19 @@ func (h *Handler) SeismicEvents(c *gin.Context) {
 			out = append(out, e)
 		}
 	}
+	if c.GetHeader("Accept") == avrowire.MediaType {
+		if h.Registry == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			return
+		}
+		data, err := h.encodeSeismic(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), out)
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			return
+		}
+		c.Data(http.StatusOK, avrowire.MediaType, data)
+		return
+	}
 	c.JSON(http.StatusOK, out)
 }
 
@@ -60,6 +76,19 @@ func (h *Handler) TsunamiWarnings(c *gin.Context) {
 		if since.IsZero() || w.EstimatedArrival.Time.After(since) {
 			out = append(out, w)
 		}
+	}
+	if c.GetHeader("Accept") == avrowire.MediaType {
+		if h.Registry == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			return
+		}
+		data, err := h.encodeWarnings(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), out)
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			return
+		}
+		c.Data(http.StatusOK, avrowire.MediaType, data)
+		return
 	}
 	c.JSON(http.StatusOK, out)
 }

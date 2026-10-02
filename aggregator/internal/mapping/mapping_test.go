@@ -95,3 +95,19 @@ func TestSeismicToHazard_NoWarning_MagnitudeDerived(t *testing.T) {
 	_, hasWarningID := hazard.Attributes["warning_id"]
 	assert.False(t, hasWarningID, "warning fields must be omitted when no warning exists")
 }
+
+func TestSeismicToHazard_DoesNotApplyWarningWithoutTsunamiPotential(t *testing.T) {
+	ev := clients.SeismicEvent{EventID: "evt-4", Magnitude: 4.1, PotentialTsunami: false}
+	warnings := []clients.TsunamiWarning{{WarningID: "warn-invalid", RelatedEventID: "evt-4", ThreatLevel: "Awas"}}
+	hazard := mapping.SeismicToHazard(ev, warnings)
+	assert.Equal(t, domain.SeverityNormal, hazard.Severity)
+	assert.NotContains(t, hazard.Attributes, "warning_id")
+}
+
+func TestSeismicToHazard_PreservesUnmappedAttributes(t *testing.T) {
+	ev := clients.SeismicEvent{EventID: "evt-3", Magnitude: 4.1, PotentialTsunami: true, Attributes: map[string]any{"sensor_quality": "high"}}
+	warnings := []clients.TsunamiWarning{{RelatedEventID: "evt-3", ThreatLevel: "Waspada", Attributes: map[string]any{"bulletin_revision": float64(2)}}}
+	hazard := mapping.SeismicToHazard(ev, warnings)
+	assert.Equal(t, "high", hazard.Attributes["sensor_quality"])
+	assert.Equal(t, float64(2), hazard.Attributes["bulletin_revision"])
+}

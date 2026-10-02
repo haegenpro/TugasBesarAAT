@@ -25,17 +25,17 @@ const (
 
 // HazardEvent is the Aggregator's canonical object, per the wire format spec.
 type HazardEvent struct {
-	HazardID     string                 `json:"hazard_id"`
-	Source       Source                 `json:"source"`
-	SourceRefID  string                 `json:"source_ref_id"`
-	HazardType   HazardType             `json:"hazard_type"`
-	Severity     Severity               `json:"severity"`
-	AreaName     string                 `json:"area_name"`
-	Latitude     float64                `json:"latitude"`
-	Longitude    float64                `json:"longitude"`
-	OccurredAt   timeutil.Time          `json:"occurred_at"`
-	IngestedAt   timeutil.Time          `json:"ingested_at"`
-	Attributes   map[string]interface{} `json:"attributes"`
+	HazardID    string                 `json:"hazard_id"`
+	Source      Source                 `json:"source"`
+	SourceRefID string                 `json:"source_ref_id"`
+	HazardType  HazardType             `json:"hazard_type"`
+	Severity    Severity               `json:"severity"`
+	AreaName    string                 `json:"area_name"`
+	Latitude    float64                `json:"latitude"`
+	Longitude   float64                `json:"longitude"`
+	OccurredAt  timeutil.Time          `json:"occurred_at"`
+	IngestedAt  timeutil.Time          `json:"ingested_at"`
+	Attributes  map[string]interface{} `json:"attributes"`
 }
 
 func Now() time.Time { return time.Now().UTC() }

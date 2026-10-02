@@ -43,7 +43,7 @@ func Build() ([]domain.SeismicEvent, []domain.TsunamiWarning) {
 		mag := magnitudes[i]
 		region := regions[i%len(regions)]
 		occurred := base.Add(time.Duration(i) * 36 * time.Hour)
-		potentialTsunami := mag >= 6.0 && i%3 != 2
+		potentialTsunami := mag >= 6.0 && (i%3 != 2 || i == 8)
 
 		ev := domain.SeismicEvent{
 			EventID:          fmt.Sprintf("evt-%05d", i+1),
@@ -84,7 +84,7 @@ func Build() ([]domain.SeismicEvent, []domain.TsunamiWarning) {
 		idx   int
 		level domain.ThreatLevel
 	}{
-		{2, domain.ThreatWaspada},
+		{12, domain.ThreatWaspada},
 		{6, domain.ThreatSiaga},
 		{8, domain.ThreatAwas},
 	}

@@ -12,6 +12,33 @@ import (
 
 const testHazardID = "11111111-1111-4111-8111-111111111111"
 
+func TestAggregatorRenameReturnsServiceUnavailable(t *testing.T) {
+	aggregator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"data":[{"hazard_code":"renamed","source":"PVMBG","source_ref_id":"rep-1","hazard_type":"VOLCANIC","severity":"SIAGA","area_name":"Merapi","latitude":-7.5,"longitude":110.4,"occurred_at":"2026-09-30T00:00:00Z","ingested_at":"2026-09-30T00:00:01Z","attributes":{}}],"count":1,"as_of":"2026-09-30T01:01:00Z","source_status":{"PVMBG":{"state":"fresh"}}}`)
+	}))
+	defer aggregator.Close()
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"client_id":"field-id","role":"field","scope":"hazards:raw"}`)
+	}))
+	defer auth.Close()
+	a := &api{cfg: config{AuthURL: auth.URL, AggregatorURL: aggregator.URL, AuthInternalKey: "internal-secret"}, log: slog.New(slog.NewJSONHandler(io.Discard, nil)), client: http.DefaultClient}
+	server := httptest.NewServer(a.router())
+	defer server.Close()
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/hazards", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer field-token")
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("renamed hazard_id returned %d, want 503", resp.StatusCode)
+	}
+}
+
 func TestMediaProjectionAndRawAuthorization(t *testing.T) {
 	var receivedCorrelation string
 	aggregator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

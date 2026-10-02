@@ -19,17 +19,18 @@ type Config struct {
 
 	DatabaseURL string
 
-	NATSURL     string
-	NATSStream  string
-	NATSSubject string
+	NATSURL           string
+	NATSStream        string
+	NATSSubject       string
+	SchemaRegistryURL string
 }
 
 func Load() (Config, error) {
 	bmkgKey := os.Getenv("BMKG_API_KEY")
 	pvmbgToken := os.Getenv("PVMBG_TOKEN")
 	databaseURL := os.Getenv("DATABASE_URL")
-	if bmkgKey == "" || pvmbgToken == "" || databaseURL == "" {
-		return Config{}, errors.New("BMKG_API_KEY, PVMBG_TOKEN, and DATABASE_URL are required")
+	if bmkgKey == "" || pvmbgToken == "" || databaseURL == "" || os.Getenv("NATS_STREAM") == "" || os.Getenv("NATS_SUBJECT") == "" || os.Getenv("SCHEMA_REGISTRY_URL") == "" {
+		return Config{}, errors.New("BMKG_API_KEY, PVMBG_TOKEN, DATABASE_URL, NATS_STREAM, NATS_SUBJECT, and SCHEMA_REGISTRY_URL are required")
 	}
 	if bmkgKey == pvmbgToken {
 		return Config{}, errors.New("BMKG and PVMBG credentials must be distinct")
@@ -46,9 +47,10 @@ func Load() (Config, error) {
 
 		DatabaseURL: databaseURL,
 
-		NATSURL:     getEnv("NATS_URL", "nats://localhost:4222"),
-		NATSStream:  getEnv("NATS_STREAM", "HAZARDS"),
-		NATSSubject: getEnv("NATS_SUBJECT", "hazard.events"),
+		NATSURL:           getEnv("NATS_URL", "nats://localhost:4222"),
+		NATSStream:        os.Getenv("NATS_STREAM"),
+		NATSSubject:       os.Getenv("NATS_SUBJECT"),
+		SchemaRegistryURL: os.Getenv("SCHEMA_REGISTRY_URL"),
 	}, nil
 }
 

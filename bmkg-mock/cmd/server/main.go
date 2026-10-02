@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"bmkg-mock/internal/avrowire"
 	"bmkg-mock/internal/config"
 	"bmkg-mock/internal/handlers"
 	"bmkg-mock/internal/middleware"
@@ -25,6 +26,8 @@ func main() {
 
 	events, warnings := seed.Build()
 	h := handlers.New(events, warnings, cfg.DelayMs)
+	h.Registry = avrowire.NewClient(cfg.RegistryURL)
+	h.Registry.ConfigureLogging(logger, "bmkg-mock")
 	router := server.New(logger, cfg.APIKey, h)
 
 	srv := &http.Server{
