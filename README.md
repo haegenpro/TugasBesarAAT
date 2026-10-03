@@ -152,6 +152,7 @@ Restarting the Auth container does not remove valid sessions.
 | `AUTH_DB_PATH` | Auth-owned SQLite file inside its container | `/data/auth.db` |
 | `AUTH_PORT` | Auth container HTTP port | `8083` |
 | `CLIENT_API_PORT` | Client API container HTTP port; fixed host mapping | `8080` |
+| `CLIENT_API_MAX_INFLIGHT` | Max concurrent Client API requests; excess gets `429` (`0` disables) | `128` |
 | `AGGREGATOR_PORT` | Internal Aggregator HTTP port | `8080` |
 | `AUTH_BASE_URL`, `AGGREGATOR_BASE_URL` | Internal upstream URLs for standalone Client API runs | Compose service URLs |
 | `BNPB_API_URL` | TUI destination URL | `http://localhost:8080` on host; Compose service URL in Docker |
@@ -186,6 +187,13 @@ then list hazards. The TUI refreshes after the expired token gets `401`,
 retries the read, and its “Uji token lama” action checks that the old token
 gets `401`. The same TUI can run on the host with
 `BNPB_API_URL=http://localhost:8080`.
+
+Concurrency model: Go serves each request on its own goroutine, and the Client
+API caps in-flight requests at `CLIENT_API_MAX_INFLIGHT`. A request over the cap
+is rejected immediately with `429` and `Retry-After: 1`, without queueing and
+before any call to Auth, so overload cannot pile up upstream work. Each upstream
+call is bounded by a 5 s client timeout. `/health` and `/ready` are exempt and
+stay answerable under saturation. Rejections are logged as `request rejected`.
 
 Client API and Auth Service emit JSON logs with `correlation_id`; Client API
 forwards `X-Correlation-ID` to Auth and Aggregator and logs outbound latency.
@@ -705,7 +713,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode 
 ```
 
 `sustained` reports throughput, p50/p95/p99, error rate, and the count of
-`429` responses (the Client API has no explicit limiter, so expect none).
+`429` responses (`controlled_rejections_429`). At the default cap of 128 and 60
+VUs expect none; raise `-Vus` (for example 300) or lower
+`CLIENT_API_MAX_INFLIGHT` to see controlled rejections.
 `mixed` splits the VUs between `hazard_type=SEISMIC` and `VOLCANIC` and fails
 unless the SEISMIC p95 is under 300 ms; run it with PVMBG's delay at 3s (see
 Demo D). Each VU logs in as Field and logs in again every 45 s, because the

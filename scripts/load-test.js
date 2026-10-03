@@ -2,7 +2,7 @@
 // MODE=mixed     : half the VUs request SEISMIC (BMKG-only), half VOLCANIC; p95(seismic) < 300ms.
 // MODE=sustained : VUS parallel connections for DURATION on /hazards.
 import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { sleep } from 'k6';
 import { Counter } from 'k6/metrics';
 
 const BASE = __ENV.BASE_URL || 'http://host.docker.internal:8080';
@@ -33,13 +33,22 @@ function login() {
   const res = http.post(`${BASE}/auth/login`,
     JSON.stringify({ client_id: __ENV.CLIENT_ID, client_secret: __ENV.CLIENT_SECRET }),
     { headers: { 'Content-Type': 'application/json' }, tags: { kind: 'login' } });
-  check(res, { 'login 200': (r) => r.status === 200 });
-  token = res.json('access_token');
-  obtained = Date.now();
+  if (res.status === 200) {
+    token = res.json('access_token');
+    obtained = Date.now();
+    return true;
+  }
+  // A rejected login (429 under overload) is not an error; back off and retry next iteration.
+  if (res.status === 429) rejected.add(1);
+  else unexpected.add(1);
+  token = null;
+  return false;
 }
 
 export default function () {
-  if (!token || Date.now() - obtained > REFRESH_AFTER_MS) login();
+  if (!token || Date.now() - obtained > REFRESH_AFTER_MS) {
+    if (!login()) { sleep(0.5); return; }
+  }
 
   let kind = 'sustained';
   let path = '/hazards';
