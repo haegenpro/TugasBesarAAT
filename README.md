@@ -53,7 +53,7 @@ broker/           # NATS JetStream + stream initializer
 registry/         # Apicurio Registry + separate persistent database
 consumer-dashboard/ # durable dashboard projection
 consumer-notifier/  # durable simulated notifications
-scripts/          # API smoke test
+scripts/          # smoke test, isolation demo, k6 load test
 docker-compose.yml
 .env.example
 docs/             # Pre-existing team contract docs (wire format, stack, deployment)
@@ -664,20 +664,54 @@ docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/haza
 
 ### Demo D — BMKG stays fast while PVMBG is slow
 
+The mock reads its delay from `pvmbg-mock/.env`, not from the shell, so
+prefixing `docker compose` with `PVMBG_MIN_DELAY_MS=...` has no effect. Edit
+the file and recreate the container:
+
 ```bash
-# Force PVMBG's random delay to a fixed ~3s window
-docker compose stop pvmbg-mock
-PVMBG_MIN_DELAY_MS=3000 PVMBG_MAX_DELAY_MS=3000 docker compose up -d pvmbg-mock
+# In pvmbg-mock/.env set PVMBG_MIN_DELAY_MS=3000 and PVMBG_MAX_DELAY_MS=3000, then:
+docker compose up -d --force-recreate pvmbg-mock
 
 for i in $(seq 1 20); do
   /usr/bin/time -f "%e s" docker compose exec -T aggregator wget -qO /dev/null 'http://localhost:8080/internal/hazards?hazard_type=SEISMIC'
 done
 ```
 
+That loop is sequential. For the concurrent BMKG-only versus PVMBG-path
+comparison, run the k6 mixed mode from Demo F while the delay is 3s. Restore
+the original delay values and recreate the container afterwards.
+
 Or use the Aggregator's own proof: `cd aggregator && go test ./internal/poller/... -run TestConcurrency -v`
 runs exactly this scenario against `httptest` servers (BMKG instant, PVMBG
 3s) and asserts p95 < 300ms for the BMKG-only path — no faked numbers, the
 test actually measures it.
+
+### Demo E — institution credential isolation
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1
+```
+
+Prints one pass/fail line per probe: each institution's own credential gets
+`200`; the BMKG key on PVMBG (data and admin), the PVMBG token on BMKG, the
+PVMBG data token on its admin endpoint all get `403`; no credential gets
+`401`. Reads credentials from the service env files and never prints them.
+
+### Demo F — load test (k6 in Docker)
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode sustained   # 60 VUs, 70s on /hazards
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode mixed -Vus 50 -Duration 65s
+```
+
+`sustained` reports throughput, p50/p95/p99, error rate, and the count of
+`429` responses (the Client API has no explicit limiter, so expect none).
+`mixed` splits the VUs between `hazard_type=SEISMIC` and `VOLCANIC` and fails
+unless the SEISMIC p95 is under 300 ms; run it with PVMBG's delay at 3s (see
+Demo D). Each VU logs in as Field and logs in again every 45 s, because the
+access token lives 60 s. Volcanic reads come from the Canonical Store, so this
+shows the request path is decoupled from the slow PVMBG poller. It requires Docker and uses
+`host.docker.internal` to reach the Client API on port 8080.
 
 ---
 
