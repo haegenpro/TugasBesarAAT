@@ -220,13 +220,13 @@ as readable text in any editor, and the header line `### step 1.1` is the first 
 > canonical store, auth sessions, consumer SQLite, registry). Skip it to keep data.
 
 ```bash
-docker compose down -v
+docker compose --profile consumer-demo down -v --remove-orphans
 docker compose up -d --build 2>&1 | tee evidence/1.1-up.txt
 until ! docker compose ps --format '{{.Health}}' | grep -qv '^healthy$'; do sleep 3; done
 docker compose ps --format 'table {{.Service}}\t{{.Status}}' | tee evidence/1.1-ps.txt
 ```
 ```powershell
-docker compose down -v
+docker compose --profile consumer-demo down -v --remove-orphans
 docker compose up -d --build 2>&1 | ForEach-Object { "$_" } | Tee8 1.1-up.txt
 do { Start-Sleep 3; $bad = docker compose ps --format '{{.Health}}' | Where-Object { $_ -ne 'healthy' } } while ($bad)
 docker compose ps --format 'table {{.Service}}\t{{.Status}}' | Tee8 1.1-ps.txt
@@ -694,8 +694,14 @@ Semantics to state in the report: **at-least-once**, so consumers dedupe by
 
 ```bash
 started > evidence/4.5-started-before.txt
-docker compose --profile consumer-demo up -d consumer-dashboard-demo
-until [ "$(docker compose ps consumer-dashboard-demo --format '{{.Health}}')" = healthy ]; do sleep 2; done
+# Pre-flight: remove any demo container/volume left over from an earlier run (see the warning below)
+docker compose --profile consumer-demo rm -sf consumer-dashboard-demo
+docker volume rm $(docker volume ls -q -f name=dashboard-demo-data) 2>/dev/null || true
+docker compose --profile consumer-demo up -d --force-recreate consumer-dashboard-demo
+for i in $(seq 1 30); do                                    # bounded wait, max ~60 s
+  st=$(docker compose --profile consumer-demo ps consumer-dashboard-demo --format '{{.Health}}'); [ "$st" = healthy ] && break; sleep 2
+done
+[ "$st" = healthy ] || { echo "demo consumer NOT healthy ($st):"; docker compose --profile consumer-demo logs --tail 5 consumer-dashboard-demo; }
 sleep 12; H=$(latest); echo "event published after the third consumer joined: $H"
 for s in "consumer-dashboard 8091" "consumer-notifier 8092" "consumer-dashboard-demo 8093"; do wait_has $s "$H"; done   # all three have it
 echo "demo consumer records: $(rec consumer-dashboard-demo 8093 | jget count)"                                          # history replayed
@@ -704,14 +710,28 @@ consreport
 ```
 ```powershell
 Started | Set-Content evidence/4.5-started-before.txt -Encoding utf8
-docker compose --profile consumer-demo up -d consumer-dashboard-demo
-do { Start-Sleep 2 } until ((docker compose ps consumer-dashboard-demo --format '{{.Health}}') -eq 'healthy')
+# Pre-flight: remove any demo container/volume left over from an earlier run (see the warning below)
+docker compose --profile consumer-demo rm -sf consumer-dashboard-demo
+docker volume ls -q -f name=dashboard-demo-data | ForEach-Object { docker volume rm $_ }
+docker compose --profile consumer-demo up -d --force-recreate consumer-dashboard-demo
+for ($i = 0; $i -lt 30; $i++) {                              # bounded wait, max ~60 s
+  $st = docker compose --profile consumer-demo ps consumer-dashboard-demo --format '{{.Health}}'; if ($st -eq 'healthy') { break }; Start-Sleep 2 }
+if ($st -ne 'healthy') { "demo consumer NOT healthy ($st):"; docker compose --profile consumer-demo logs --tail 5 consumer-dashboard-demo }
 Start-Sleep 12; $h = Latest; "event published after the third consumer joined: $h"
 foreach ($s in @(@('consumer-dashboard',8091),@('consumer-notifier',8092),@('consumer-dashboard-demo',8093))) { Wait-Has $s[0] $s[1] $h }   # all three have it
 "demo consumer records: $((Rec consumer-dashboard-demo 8093).count)"                                              # history replayed
 Started | Select-String aggregator; Select-String aggregator evidence/4.5-started-before.txt                    # same StartedAt
 Consreport
 ```
+
+> **Warning: leftover demo container / volume.** `consumer-dashboard-demo` belongs to the
+> `consumer-demo` Compose profile, so a plain `docker compose down` / `down -v` does **not** remove it
+> or its volume `dashboard-demo-data`. A leftover volume holds the SQLite file from the previous
+> broker, so the new durable replays stream sequence 1 with different bytes and the consumer **halts**
+> (`consumer_incompatible ... HAZARDS/1 was reused with different bytes`, `/ready` = 503, container
+> `unhealthy`). A leftover container from a deleted network fails instead with `network ... not found`
+> (`Exited (128)`). The pre-flight above removes both. Tear down with
+> `docker compose --profile consumer-demo down -v --remove-orphans`.
 
 **Desired state:** a third durable (`dashboard-demo-v1`) appears; all three consumers
 print `... has <hazard_id>` for the **same** event published after it joined; the
@@ -1120,6 +1140,7 @@ docker compose down -v     # also delete all volumes (fresh start next time)
 | k6 `min=-...ns` for `http_req_duration` | Docker VM clock drift (WSL2) | cosmetic; see 6.1 notes. `wsl --shutdown` + restart Docker, then rerun |
 | `controlled_rejections_429` missing from the k6 summary | old script version (counter only shown once incremented) | use the current `scripts/load-test.js`; it now declares a threshold so the line always prints |
 | 4.x output is full of `Γöé`, `ΓöÇ`, `Γò¡` (garbled box characters) | `nats consumer report` prints UTF-8 box-drawing characters; the Windows console decodes them with the OEM code page, and `Tee8`/`Step` then saves the already-garbled text | use `consreport` / `Consreport` (plain ASCII, built from `--json`); in PowerShell run the UTF-8 line from 0.3 (`[Console]::OutputEncoding = ...`) once per terminal |
+| 4.5 stuck in the `Start-Sleep` / `until ... healthy` loop; `docker compose ps` shows the demo container `unhealthy` | leftover `dashboard-demo-data` volume from an earlier run: the new durable replays stream sequence 1 with different bytes, the consumer halts (`consumer_incompatible`, `/ready` 503) and never becomes healthy | `docker compose --profile consumer-demo rm -sf consumer-dashboard-demo`, `docker volume rm $(docker volume ls -q -f name=dashboard-demo-data)`, then `up -d --force-recreate`. The 4.5 pre-flight does this and its wait is now bounded (60 s) and prints the logs. Tear down with `--profile consumer-demo down -v --remove-orphans`. |
 
 ## Appendix C: evidence checklist (a complete run produces all of these)
 
