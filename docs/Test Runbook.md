@@ -63,7 +63,7 @@ for r in MEDIA FIELD INTERNAL; do
   eval "${r}_SECRET=\$(envget auth-service/.env ${r}_CLIENT_SECRET)"
 done
 API=http://localhost:8080; BMKG=http://localhost:8081; PVMBG=http://localhost:8082
-NET=$(docker network ls --format '{{.Name}}' | grep '_backend$' | head -1)
+# NET is resolved when `nats` runs (the network only exists once the stack is up; see the nats helper)
 
 # ---- JSON helpers: jget <path>, jkeys <path>, jlen <path>, jfind <path> <field> <value> ----
 # path is dotted, numbers index arrays, "." is the root. e.g.  jget data.0.hazard_id
@@ -97,7 +97,8 @@ hz(){ curl -s -H "Authorization: Bearer $1" "$API$2"; }                      # h
 agg(){ docker compose exec -T aggregator wget -qO- "http://localhost:8080$1"; }   # internal API (not published)
 rec(){ docker compose exec -T "$1" wget -qO- "http://localhost:$2/records"; }     # rec <service> <port>
 sql(){ echo "$1" | docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; }
-nats(){ docker run --rm --network "$NET" natsio/nats-box nats -s nats://broker:4222 "$@"; }
+nats(){ local NET; NET=$(docker network ls --format '{{.Name}}' | grep '_backend$' | head -1); [ -n "$NET" ] || { echo "no *_backend network: is the stack up? (Phase 1.1)" >&2; return 1; }
+      docker run --rm --network "$NET" natsio/nats-box nats -s nats://broker:4222 "$@"; }
 started(){ docker inspect -f '{{.Name}} {{.State.StartedAt}}' $(docker compose ps -q); }  # container start times
 # Both mocks emit a new event every 10 s on their own, so tests follow one specific event instead of counting.
 latest(){ agg '/internal/hazards' | jget data.0.hazard_id; }                  # newest hazard in the Aggregator
@@ -119,7 +120,6 @@ foreach ($r in 'MEDIA','FIELD','INTERNAL') {
   $Creds[$r] = @{ id = Get-EnvVal auth-service/.env "${r}_CLIENT_ID"; secret = Get-EnvVal auth-service/.env "${r}_CLIENT_SECRET" }
 }
 $API = 'http://localhost:8080'; $BmkgUrl = 'http://localhost:8081'; $PvmbgUrl = 'http://localhost:8082'
-$NET = docker network ls --format '{{.Name}}' | Where-Object { $_ -like '*_backend' } | Select-Object -First 1
 $AdminH = @{ Authorization = "Bearer $PvmbgAdmin" }
 
 # ---- HTTP / stack helpers ----
@@ -135,7 +135,9 @@ function Hz($tok,$path,$cid=$null){ $h=@{Authorization="Bearer $tok"}; if($cid){
 function Agg($path){ docker compose exec -T aggregator wget -qO- "http://localhost:8080$path" | Out-String | ConvertFrom-Json }
 function Rec($svc,$port){ docker compose exec -T $svc wget -qO- "http://localhost:$port/records" | Out-String | ConvertFrom-Json }
 function Sql($q){ $q | docker compose exec -T postgres sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB' }
-function Nats { docker run --rm --network $NET natsio/nats-box nats -s nats://broker:4222 @args }
+function Nats { $net = docker network ls --format '{{.Name}}' | Where-Object { $_ -like '*_backend' } | Select-Object -First 1   # looked up per call: the network only exists once the stack is up
+  if (-not $net) { Write-Error 'no *_backend network: is the stack up? (Phase 1.1)'; return }
+  docker run --rm --network $net natsio/nats-box nats -s nats://broker:4222 @args }
 function Started { docker inspect -f '{{.Name}} {{.State.StartedAt}}' (docker compose ps -q) }
 # Both mocks emit a new event every 10 s on their own, so tests follow one specific event instead of counting.
 function Latest { (Agg '/internal/hazards').data[0].hazard_id }             # newest hazard in the Aggregator
@@ -166,6 +168,16 @@ pollutes the evidence. The helpers below fix both and make `step <id>` capture a
 exec 3>&1 4>&2                                                   # remember the real terminal
 step(){ exec 1>&3 2>&4; sleep 0.3; exec > >(tee "evidence/$1.txt") 2>&1; echo "### step $1  $(date -Is)"; }
 endstep(){ exec 1>&3 2>&4; }                                     # stop capturing
+
+# ASCII-only consumer summary (replaces the box-drawing `nats consumer report` table, which
+# turns into "Γöé" garbage when it passes through a non-UTF-8 Windows console)
+consreport(){
+  S=$(nats stream info HAZARDS --json)
+  echo "stream HAZARDS: messages=$(echo "$S" | jget state.messages) subjects=$(echo "$S" | jget config.subjects | tr -d '[:space:]')"
+  for c in ${@:-dashboard-v1 notifier-v1 dashboard-demo-v1}; do
+    J=$(nats consumer info HAZARDS "$c" --json 2>/dev/null) || continue          # skip durables that don't exist (yet)
+    echo "$c unprocessed=$(echo "$J" | jget num_pending) ack_pending=$(echo "$J" | jget num_ack_pending) redelivered=$(echo "$J" | jget num_redelivered) ack_floor=$(echo "$J" | jget ack_floor.stream_seq)"
+  done; }
 ```
 
 **PowerShell**:
@@ -175,6 +187,18 @@ function Tee8($f){ begin{ $p="evidence/$f"; '' | Out-File $p -Encoding utf8 -NoN
                    process{ $_ | Out-File $p -Append -Encoding utf8; $_ } }
 function Step($id){ try{Stop-Transcript | Out-Null}catch{}; Start-Transcript -Path "evidence/$id.txt" -Force | Out-Null; "### step $id" }
 function EndStep { try{Stop-Transcript | Out-Null}catch{} }
+
+# Make the console and native-command pipes UTF-8 (default is the OEM code page, which mangles
+# any non-ASCII output, e.g. nats tables, into "Γöé"), then use an ASCII-only consumer summary.
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding
+function Consreport {
+  $S = Nats stream info HAZARDS --json | Out-String | ConvertFrom-Json
+  "stream HAZARDS: messages=$($S.state.messages) subjects=$($S.config.subjects -join ',')"
+  foreach ($c in 'dashboard-v1','notifier-v1','dashboard-demo-v1') {
+    $j = Nats consumer info HAZARDS $c --json 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not $j.Trim()) { continue }                         # durable doesn't exist (yet)
+    $j = $j | ConvertFrom-Json
+    "$c unprocessed=$($j.num_pending) ack_pending=$($j.num_ack_pending) redelivered=$($j.num_redelivered) ack_floor=$($j.ack_floor.stream_seq)" } }
 ```
 
 `Step` uses a PowerShell transcript (UTF-8, records native-command output). If a transcript
@@ -573,12 +597,12 @@ to show up in a consumer.
 > Capture: run `step 4.1` first. Output is saved to `evidence/4.1.txt`.
 
 ```bash
-nats stream info HAZARDS | head -30
-nats consumer report HAZARDS | tee evidence/4.1-consumers.txt
+nats stream info HAZARDS --json | jget config.subjects          # ["hazard.events"]
+consreport | tee evidence/4.1-consumers.txt
 ```
 ```powershell
-Nats stream info HAZARDS | Select-Object -First 30
-Nats consumer report HAZARDS | Tee8 4.1-consumers.txt
+(Nats stream info HAZARDS --json | Out-String | ConvertFrom-Json).config.subjects       # hazard.events
+Consreport | Tee8 4.1-consumers.txt
 ```
 
 **Desired state:** stream `HAZARDS` on subject `hazard.events`; two consumers
@@ -619,7 +643,7 @@ sleep 25; MISSED=$(latest); echo "published while notifier is down: $MISSED"   #
 wait_has consumer-dashboard 8091 "$MISSED"                                      # dashboard not blocked
 sql "SELECT count(*) AS outbox_pending FROM hazard_outbox;"                     # 0  (producer not stuck)
 docker compose ps --format '{{.Service}} {{.Health}}' | grep -E 'aggregator|dashboard'
-nats consumer report HAZARDS | tee evidence/4.3-consumers-during.txt            # notifier-v1 Unprocessed > 0
+consreport | tee evidence/4.3-consumers-during.txt            # notifier-v1 Unprocessed > 0
 docker compose logs aggregator --since 1m 2>&1 | grep -ci '"level":"error"'     # => 0
 ```
 ```powershell
@@ -628,7 +652,7 @@ Start-Sleep 25; $missed = Latest; "published while notifier is down: $missed"   
 Wait-Has consumer-dashboard 8091 $missed                                         # dashboard not blocked
 Sql "SELECT count(*) AS outbox_pending FROM hazard_outbox;"                      # 0
 docker compose ps --format '{{.Service}} {{.Health}}' | Select-String 'aggregator|dashboard'
-Nats consumer report HAZARDS | Tee8 4.3-consumers-during.txt      # notifier-v1 Unprocessed > 0
+Consreport | Tee8 4.3-consumers-during.txt      # notifier-v1 Unprocessed > 0
 (docker compose logs aggregator --since 1m 2>&1 | Select-String '"level":"error"').Count   # => 0
 ```
 
@@ -647,13 +671,13 @@ broker keeps those events for its durable cursor. Keep `MISSED` / `$missed` for 
 docker compose start consumer-notifier
 until [ "$(docker compose ps consumer-notifier --format '{{.Health}}')" = healthy ]; do sleep 2; done
 wait_has consumer-notifier 8092 "$MISSED"                                       # the event it missed is delivered
-nats consumer report HAZARDS | tee evidence/4.4-consumers-after.txt            # notifier-v1 Unprocessed back to 0 (or 1)
+consreport | tee evidence/4.4-consumers-after.txt            # notifier-v1 Unprocessed back to 0 (or 1)
 ```
 ```powershell
 docker compose start consumer-notifier
 do { Start-Sleep 2 } until ((docker compose ps consumer-notifier --format '{{.Health}}') -eq 'healthy')
 Wait-Has consumer-notifier 8092 $missed                                          # the event it missed is delivered
-Nats consumer report HAZARDS | Tee8 4.4-consumers-after.txt
+Consreport | Tee8 4.4-consumers-after.txt
 ```
 
 **Desired state:** notifier **catches up**: it now has the `hazard_id` that was
@@ -676,7 +700,7 @@ sleep 12; H=$(latest); echo "event published after the third consumer joined: $H
 for s in "consumer-dashboard 8091" "consumer-notifier 8092" "consumer-dashboard-demo 8093"; do wait_has $s "$H"; done   # all three have it
 echo "demo consumer records: $(rec consumer-dashboard-demo 8093 | jget count)"                                          # history replayed
 started | grep -E 'aggregator' ; grep aggregator evidence/4.5-started-before.txt                                      # same StartedAt
-nats consumer report HAZARDS
+consreport
 ```
 ```powershell
 Started | Set-Content evidence/4.5-started-before.txt -Encoding utf8
@@ -686,7 +710,7 @@ Start-Sleep 12; $h = Latest; "event published after the third consumer joined: $
 foreach ($s in @(@('consumer-dashboard',8091),@('consumer-notifier',8092),@('consumer-dashboard-demo',8093))) { Wait-Has $s[0] $s[1] $h }   # all three have it
 "demo consumer records: $((Rec consumer-dashboard-demo 8093).count)"                                              # history replayed
 Started | Select-String aggregator; Select-String aggregator evidence/4.5-started-before.txt                    # same StartedAt
-Nats consumer report HAZARDS
+Consreport
 ```
 
 **Desired state:** a third durable (`dashboard-demo-v1`) appears; all three consumers
@@ -1083,7 +1107,7 @@ docker compose down -v     # also delete all volumes (fresh start next time)
 | `jget` prints nothing / `command not found: python3` | neither jq nor python3 on PATH | install jq, or set `PY=python` (Windows), or use the PowerShell variant |
 | Git Bash: `docker run -v` fails with weird path | MSYS path conversion | prefix the command with `MSYS_NO_PATHCONV=1` |
 | `k6` cannot reach `host.docker.internal` (Linux) | no host alias | add `--add-host=host.docker.internal:host-gateway` |
-| `nats` helper: `network not found` / empty `$NET` | project network name differs | `docker network ls` and set `NET` manually to the one ending in `_backend` |
+| `network natsio/nats-box not found` (or `no *_backend network`) when running `nats` / `Nats` | the helpers were pasted before the stack was up, so the old `$NET` was empty and `--network` swallowed the image name | re-paste the current 0.2 helpers (the network is now looked up on every call); make sure `docker compose ps` shows the stack up and `docker network ls` lists `*_backend` |
 | All `/hazards` calls return `401` mid-run | access token TTL is 60 s | re-login (`login`/`Login`) |
 | `wait_has` / `Wait-Has` prints `MISSING` | the consumer is stopped, halted, or still replaying a long history | check `docker compose ps` and the consumer's `/ready`; for a fresh third consumer, run the same `wait_has` again |
 | `latest` returns the same ID twice in 4.2 | no new event was ingested in the 12 s window | check `docker compose logs bmkg-mock pvmbg-mock \| grep generated` and that `*_INTERVAL_MS` is at most 10000 |
@@ -1095,6 +1119,7 @@ docker compose down -v     # also delete all volumes (fresh start next time)
 | Transcript file from `Step` is empty | host does not record native-command output | wrap the step's commands in `Tee8 <file>` instead, or run in Windows Terminal with PowerShell 7 |
 | k6 `min=-...ns` for `http_req_duration` | Docker VM clock drift (WSL2) | cosmetic; see 6.1 notes. `wsl --shutdown` + restart Docker, then rerun |
 | `controlled_rejections_429` missing from the k6 summary | old script version (counter only shown once incremented) | use the current `scripts/load-test.js`; it now declares a threshold so the line always prints |
+| 4.x output is full of `Γöé`, `ΓöÇ`, `Γò¡` (garbled box characters) | `nats consumer report` prints UTF-8 box-drawing characters; the Windows console decodes them with the OEM code page, and `Tee8`/`Step` then saves the already-garbled text | use `consreport` / `Consreport` (plain ASCII, built from `--json`); in PowerShell run the UTF-8 line from 0.3 (`[Console]::OutputEncoding = ...`) once per terminal |
 
 ## Appendix C: evidence checklist (a complete run produces all of these)
 
@@ -1112,10 +1137,10 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 | 3.3 | `3.3.txt` **(missing)** | Media key list = 7 summary fields; Field/Internal also have `source_ref_id, latitude, longitude, attributes`; `?view=raw` -> `403`; no token -> `401` |
 | 3.4 | `3.4.txt` **(missing)** | `200 -> 401 -> refresh 200 -> old 401`, reused refresh token rejected |
 | 3.5 | `3.5.txt` **(missing)** | no tracked `.env`; `.env.example` present; no `HARDCODED:` / `IN HISTORY:` lines |
-| 4.1 | `4.1.txt` | two durables, pending 0 (or briefly 1) |
+| 4.1 | `4.1.txt`, `4.1-consumers.txt` | two durables, unprocessed 0 (or briefly 1); **plain-ASCII `consreport` lines, no `Γöé`** |
 | 4.2 | `4.2.txt` **(missing)** | `new` differs from `previous`; both consumers print `has <hazard_id>` for the same ID; its `correlation_id` is in the aggregator log |
 | 4.3 | `4.3.txt` **(missing)** | notifier stopped; dashboard has the event published during the stop; `outbox_pending = 0`; aggregator healthy, 0 errors; notifier Unprocessed above 0 |
-| 4.4 | `4.4.txt` | notifier prints `has <hazard_id>` for the event it missed; Unprocessed back to 0 (or briefly 1) (use the UTF-8 file, not the old garbled one) |
+| 4.4 | `4.4.txt` | notifier prints `has <hazard_id>` for the event it missed; Unprocessed back to 0 (or briefly 1) (plain-ASCII `consreport` output) |
 | 4.5 | `4.5.txt`, `4.5-started-before.txt` **(per-consumer id comparison was missing)** | all three consumers print `has <hazard_id>` for the same new event; aggregator `StartedAt` unchanged |
 | 5.1 | `5.1.txt` | one image per component; only 8080/8081/8082/4222/8222/8084 published |
 | 5.2 | `5.2.txt`, `5.2-started-before.txt`, `5.2-started-after.txt`, Terminal-A probe log (`5.2-probe.txt`) **(all missing)** | image ID of the notifier changes; only its `StartedAt` differs; probe prints `200 / 200` throughout. Capture Terminal A with `... \| tee evidence/5.2-probe.txt` / `\| Tee8 5.2-probe.txt`. |
