@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"encoding/json"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -166,4 +167,53 @@ func TestRandomDelayWithinConfiguredRange(t *testing.T) {
 	elapsed := time.Since(start)
 	assert.GreaterOrEqual(t, elapsed.Milliseconds(), int64(50))
 	assert.LessOrEqual(t, elapsed.Milliseconds(), int64(200))
+}
+
+func TestGeneratedReport_ConfidenceFollowsSchemaToggle(t *testing.T) {
+	toggles := state.New()
+	h := handlers.New(seed.Build(), toggles, 0, 0)
+	r := server.New(middleware.NewLogger(), testToken, testAdminToken, h, toggles)
+	volcanoes := map[string]bool{"merapi": true, "semeru": true, "kelud": true, "agung": true, "sinabung": true,
+		"krakatau": true, "bromo": true, "raung": true, "dukono": true, "ibu": true}
+
+	rng := rand.New(rand.NewSource(1))
+	now := time.Now().UTC()
+	report := seed.NextReport(1700000000, 1, now, rng)
+	require.True(t, volcanoes[report.VolcanoID], "volcano_id must exist in the BNPB reference table")
+	h.AddReport(report)
+
+	fetch := func() map[string]any {
+		req := httptest.NewRequest(http.MethodGet, "/volcanic-reports?since="+now.Add(-time.Minute).Format(time.RFC3339), nil)
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+		var reports []map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &reports))
+		for _, rep := range reports {
+			if rep["report_id"] == report.ReportID {
+				return rep
+			}
+		}
+		t.Fatalf("generated report %s not returned", report.ReportID)
+		return nil
+	}
+
+	_, present := fetch()["confidence_level"]
+	assert.False(t, present, "confidence_level must be hidden before schema toggle")
+
+	toggles.ToggleSchema()
+	_, present = fetch()["confidence_level"]
+	assert.True(t, present, "confidence_level should appear after toggle")
+}
+
+func TestGeneratedReports_Bounded(t *testing.T) {
+	toggles := state.New()
+	h := handlers.New(seed.Build(), toggles, 0, 0)
+	rng := rand.New(rand.NewSource(1))
+	for n := 1; n <= 105; n++ {
+		h.AddReport(seed.NextReport(1700000000, n, time.Now().UTC(), rng))
+	}
+	assert.Len(t, h.Reports, 120)
+	assert.Equal(t, "rep-00001", h.Reports[0].ReportID)
 }

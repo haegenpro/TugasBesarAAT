@@ -32,6 +32,10 @@ func main() {
 	h.Registry.ConfigureLogging(logger, "pvmbg-mock")
 	router := server.New(logger, cfg.Token, cfg.AdminToken, h, toggles)
 
+	genCtx, stopGenerator := context.WithCancel(context.Background())
+	defer stopGenerator()
+	go h.RunGenerator(genCtx, time.Duration(cfg.ReportIntervalMs)*time.Millisecond, logger)
+
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
 		Handler: router,

@@ -262,6 +262,7 @@ Simulated BMKG source: seismic events and tsunami warnings.
 - **Auth:** header `X-BMKG-Key: <BMKG_API_KEY>` on data endpoints. Missing → `401`, wrong key → `403`.
 - **Delay:** fixed simulated delay per request, `BMKG_DELAY_MS` (default `100`, spec range 50–150ms).
 - **Seed data:** 20 deterministic seismic events (magnitudes spanning <5.0, 5.0–6.5, ≥6.5, with/without tsunami potential) and related tsunami warnings across Waspada/Siaga/Awas, generated at boot from a fixed epoch — same data every run.
+- **Live data:** one new seismic event every `BMKG_EVENT_INTERVAL_MS` (default `10000`, allowed 1–10000; lower it to speed up a demo), with a tsunami warning when the event has tsunami potential. IDs look like `evt-<boot-unix>-<n>`, so they stay unique across restarts. The mock keeps the 20 seed events plus the latest 100 generated ones.
 
 ### Endpoints
 
@@ -305,6 +306,7 @@ admin toggles.
 - **Auth:** `Authorization: Bearer <PVMBG_TOKEN>` on `/volcanic-reports` — a **different mechanism** than BMKG's header key, per spec. Admin endpoints require `Authorization: Bearer <PVMBG_ADMIN_TOKEN>` (a separate credential).
 - **Delay:** random delay per request in `[PVMBG_MIN_DELAY_MS, PVMBG_MAX_DELAY_MS]` (default 500–3000ms).
 - **Seed data:** 20 deterministic volcanic reports across all four alert levels (Normal/Waspada/Siaga/Awas), spanning 10 seeded Indonesian volcanoes. Some source reports have a `confidence_level` value, hidden until the toggle is activated.
+- **Live data:** one new volcanic report every `PVMBG_REPORT_INTERVAL_MS` (default `10000`, allowed 1–10000; lower it to speed up a demo), with IDs like `rep-<boot-unix>-<n>`. Generation continues during an outage, so the Aggregator catches up when the outage ends. The mock keeps the seed reports plus the latest 100 generated ones.
 
 ### Endpoints
 
@@ -562,7 +564,7 @@ uses the dashboard image, a new durable name, and a separate SQLite volume.
 docker compose exec -T consumer-dashboard wget -qO- http://localhost:8091/records
 docker compose exec -T consumer-notifier wget -qO- http://localhost:8092/records
 docker compose stop consumer-notifier
-# Trigger a new PVMBG report via the schema toggle in Demo B; the dashboard continues.
+# Both mocks emit a new event every 10 s; wait ~30 s and the dashboard keeps receiving them.
 docker compose start consumer-notifier
 docker compose --profile consumer-demo up -d consumer-dashboard-demo
 docker compose exec -T consumer-dashboard-demo wget -qO- http://localhost:8093/records
@@ -572,8 +574,8 @@ The two main consumers and the optional third one all read the existing
 publisher output; adding the third requires no Aggregator change. Both new
 Go modules can be checked with `go test ./...` from their directories.
 To demonstrate that a bad schema ID does not hold up a later valid event,
-publish a deliberately unknown ID from the broker module, then trigger a
-fresh PVMBG report with Demo B's schema toggle:
+publish a deliberately unknown ID from the broker module, then wait for the
+mocks' next generated events:
 
 ```bash
 cd broker
@@ -608,8 +610,10 @@ curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:8082/volca
 docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards' | jq '.count, .data[0]'
 ```
 
-You should see 20 seismic records from BMKG, 20 volcanic reports from
-PVMBG, and both reflected as canonical `HazardEvent`s from the Aggregator.
+You should see at least 20 seismic records from BMKG and 20 volcanic reports
+from PVMBG, both reflected as canonical `HazardEvent`s from the Aggregator.
+Each mock adds one record every 10 seconds, so the counts keep growing;
+`docker compose logs aggregator | grep polled` shows `new_hazards` above zero.
 NATS publish acknowledgements can be observed via the container logs
 (`docker compose logs aggregator | grep "outbound call"` shows the publish
 lines with `target_service":"nats"`). A throwaway subscriber receives binary

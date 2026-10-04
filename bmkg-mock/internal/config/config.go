@@ -7,10 +7,11 @@ import (
 )
 
 type Config struct {
-	Port        string
-	APIKey      string
-	DelayMs     int
-	RegistryURL string
+	Port            string
+	APIKey          string
+	DelayMs         int
+	EventIntervalMs int
+	RegistryURL     string
 }
 
 func Load() (Config, error) {
@@ -18,11 +19,17 @@ func Load() (Config, error) {
 	if key == "" {
 		return Config{}, errors.New("BMKG_API_KEY is required")
 	}
+	// The contract requires at least one new event every 10 seconds.
+	interval := getEnvInt("BMKG_EVENT_INTERVAL_MS", 10000)
+	if interval < 1 || interval > 10000 {
+		return Config{}, errors.New("BMKG_EVENT_INTERVAL_MS must be between 1 and 10000")
+	}
 	return Config{
-		Port:        getEnv("BMKG_PORT", "8081"),
-		APIKey:      key,
-		DelayMs:     getEnvInt("BMKG_DELAY_MS", 100),
-		RegistryURL: getEnv("SCHEMA_REGISTRY_URL", "http://schema-registry:8080/apis/ccompat/v7"),
+		Port:            getEnv("BMKG_PORT", "8081"),
+		APIKey:          key,
+		DelayMs:         getEnvInt("BMKG_DELAY_MS", 100),
+		EventIntervalMs: interval,
+		RegistryURL:     getEnv("SCHEMA_REGISTRY_URL", "http://schema-registry:8080/apis/ccompat/v7"),
 	}, nil
 }
 
