@@ -83,6 +83,8 @@ func TestSaveDedup_DuplicateSourceRefID(t *testing.T) {
 }
 
 func TestJSONB_OldAndNewAttributeShapesCoexist(t *testing.T) {
+	// Store capability test: source fields ignored by the Aggregator do not
+	// reach this layer, but JSONB can store future explicitly mapped fields.
 	s := testStore(t)
 	ctx := context.Background()
 
@@ -92,7 +94,7 @@ func TestJSONB_OldAndNewAttributeShapesCoexist(t *testing.T) {
 
 	newShape := sampleEvent(domain.SourcePVMBG, "jsonb-new-"+uuid.NewString())
 	newShape.HazardType = domain.HazardVolcanic
-	newShape.Attributes = map[string]interface{}{"eruption_count_24h": float64(2), "ash_column_height_m": float64(1500), "confidence_level": 0.93}
+	newShape.Attributes = map[string]interface{}{"eruption_count_24h": float64(2), "ash_column_height_m": float64(1500), "future_metric": 0.93}
 
 	_, err := s.SaveDedup(ctx, oldShape, "test-correlation")
 	require.NoError(t, err)
@@ -101,12 +103,12 @@ func TestJSONB_OldAndNewAttributeShapesCoexist(t *testing.T) {
 
 	got1, err := s.GetByID(ctx, oldShape.HazardID)
 	require.NoError(t, err)
-	_, hasConfidence := got1.Attributes["confidence_level"]
-	require.False(t, hasConfidence)
+	_, hasFutureMetric := got1.Attributes["future_metric"]
+	require.False(t, hasFutureMetric)
 
 	got2, err := s.GetByID(ctx, newShape.HazardID)
 	require.NoError(t, err)
-	require.Equal(t, 0.93, got2.Attributes["confidence_level"])
+	require.Equal(t, 0.93, got2.Attributes["future_metric"])
 }
 
 func TestQuery_Filtering(t *testing.T) {

@@ -26,10 +26,11 @@ func (a *api) router() *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "client-api"})
 	})
 	r.GET("/ready", a.ready)
-	r.POST("/auth/login", a.login)
-	r.POST("/auth/refresh", a.refresh)
-	r.POST("/auth/logout", a.logout)
-	protected := r.Group("/", a.authenticate())
+	limited := r.Group("/", limitInFlight(a.cfg.MaxInFlight, a.log))
+	limited.POST("/auth/login", a.login)
+	limited.POST("/auth/refresh", a.refresh)
+	limited.POST("/auth/logout", a.logout)
+	protected := limited.Group("/", a.authenticate())
 	protected.GET("/hazards", a.listHazards)
 	protected.GET("/hazards/:id", a.getHazard)
 	return r
@@ -44,6 +45,27 @@ func correlation() gin.HandlerFunc {
 		c.Set("correlation_id", id)
 		c.Header("X-Correlation-ID", id)
 		c.Next()
+	}
+}
+
+// limitInFlight bounds concurrent requests. When all slots are taken it fails
+// fast with 429 instead of queueing, so overload cannot pile up goroutines or
+// upstream calls to Auth and the Aggregator. n <= 0 disables the limit.
+func limitInFlight(n int, log logger) gin.HandlerFunc {
+	if n <= 0 {
+		return func(c *gin.Context) { c.Next() }
+	}
+	slots := make(chan struct{}, n)
+	return func(c *gin.Context) {
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+			c.Next()
+		default:
+			log.Warn("request rejected", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "reason", "max_in_flight", "limit", n)
+			c.Header("Retry-After", "1")
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "server busy"})
+		}
 	}
 }
 

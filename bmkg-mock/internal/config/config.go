@@ -7,9 +7,10 @@ import (
 )
 
 type Config struct {
-	Port    string
-	APIKey  string
-	DelayMs int
+	Port        string
+	APIKey      string
+	DelayMs     int
+	RegistryURL string
 }
 
 func Load() (Config, error) {
@@ -18,9 +19,10 @@ func Load() (Config, error) {
 		return Config{}, errors.New("BMKG_API_KEY is required")
 	}
 	return Config{
-		Port:    getEnv("BMKG_PORT", "8081"),
-		APIKey:  key,
-		DelayMs: getEnvInt("BMKG_DELAY_MS", 100),
+		Port:        getEnv("BMKG_PORT", "8081"),
+		APIKey:      key,
+		DelayMs:     getEnvInt("BMKG_DELAY_MS", 100),
+		RegistryURL: getEnv("SCHEMA_REGISTRY_URL", "http://schema-registry:8080/apis/ccompat/v7"),
 	}, nil
 }
 

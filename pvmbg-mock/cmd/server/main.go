@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"pvmbg-mock/internal/avrowire"
 	"pvmbg-mock/internal/config"
 	"pvmbg-mock/internal/handlers"
 	"pvmbg-mock/internal/middleware"
@@ -27,6 +28,8 @@ func main() {
 	reports := seed.Build()
 	toggles := state.New()
 	h := handlers.New(reports, toggles, cfg.MinDelayMs, cfg.MaxDelayMs)
+	h.Registry = avrowire.NewClient(cfg.RegistryURL)
+	h.Registry.ConfigureLogging(logger, "pvmbg-mock")
 	router := server.New(logger, cfg.Token, cfg.AdminToken, h, toggles)
 
 	srv := &http.Server{

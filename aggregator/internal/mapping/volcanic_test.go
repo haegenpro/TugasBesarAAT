@@ -29,7 +29,6 @@ func TestVolcanicToHazard_Mapping(t *testing.T) {
 	report := clients.VolcanicReport{
 		ReportID: "rep-1", VolcanoID: "merapi", AlertLevel: "Siaga",
 		EruptionCount24h: 2, AshColumnHeightM: 1500, ReportedAt: reportedAt,
-		Extra: map[string]interface{}{},
 	}
 
 	hazard, err := mapping.VolcanicToHazard(context.Background(), lookup, report)
@@ -42,7 +41,7 @@ func TestVolcanicToHazard_Mapping(t *testing.T) {
 	assert.Equal(t, -7.54, hazard.Latitude)
 	assert.Equal(t, 110.44, hazard.Longitude)
 	assert.Equal(t, domain.SeveritySiaga, hazard.Severity)
-	assert.Equal(t, float64(2), hazard.Attributes["eruption_count_24h"])
+	assert.Equal(t, 2, hazard.Attributes["eruption_count_24h"])
 	assert.Equal(t, float64(1500), hazard.Attributes["ash_column_height_m"])
 }
 
@@ -53,39 +52,57 @@ func TestVolcanicToHazard_AlertLevelMapping(t *testing.T) {
 		"Siaga": domain.SeveritySiaga, "Awas": domain.SeverityAwas,
 	}
 	for source, want := range cases {
-		report := clients.VolcanicReport{ReportID: "r", VolcanoID: "merapi", AlertLevel: source, Extra: map[string]interface{}{}}
+		report := clients.VolcanicReport{ReportID: "r", VolcanoID: "merapi", AlertLevel: source}
 		hazard, err := mapping.VolcanicToHazard(context.Background(), lookup, report)
 		require.NoError(t, err)
 		assert.Equal(t, want, hazard.Severity, "alert level %s", source)
 	}
 }
 
-func TestVolcanicToHazard_ConfidenceLevelSurvivesIntoAttributes(t *testing.T) {
+func TestVolcanicToHazard_ContainsOnlyMappedAttributes(t *testing.T) {
 	lookup := fakeLookup{found: true}
 	report := clients.VolcanicReport{
 		ReportID: "rep-2", VolcanoID: "merapi", AlertLevel: "Awas",
-		Extra: map[string]interface{}{"confidence_level": 0.93},
+		EruptionCount24h: 3, AshColumnHeightM: 1200,
+	}
+	hazard, err := mapping.VolcanicToHazard(context.Background(), lookup, report)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]interface{}{"eruption_count_24h": 3, "ash_column_height_m": float64(1200)}, hazard.Attributes)
+}
+
+func TestVolcanicToHazard_MapsConfidenceWhenPresent(t *testing.T) {
+	lookup := fakeLookup{found: true}
+	report := clients.VolcanicReport{
+		ReportID: "rep-3", VolcanoID: "merapi", AlertLevel: "Awas",
+		EruptionCount24h: 3, AshColumnHeightM: 1200,
+		Attributes: map[string]any{"confidence_level": 0.93},
 	}
 	hazard, err := mapping.VolcanicToHazard(context.Background(), lookup, report)
 	require.NoError(t, err)
 	assert.Equal(t, 0.93, hazard.Attributes["confidence_level"])
 }
 
-func TestVolcanicToHazard_UnknownFieldSurvivesIntoAttributes(t *testing.T) {
+func TestVolcanicToHazard_PreservesUnmappedAttributes(t *testing.T) {
 	lookup := fakeLookup{found: true}
 	report := clients.VolcanicReport{
-		ReportID: "rep-3", VolcanoID: "merapi", AlertLevel: "Normal",
-		Extra: map[string]interface{}{"seismic_tremor_count": float64(12)},
+		ReportID: "rep-3", VolcanoID: "merapi", AlertLevel: "Awas",
+		Attributes: map[string]any{"seismic_tremor_count": float64(12)},
 	}
 	hazard, err := mapping.VolcanicToHazard(context.Background(), lookup, report)
 	require.NoError(t, err)
-	assert.Equal(t, float64(12), hazard.Attributes["seismic_tremor_count"],
-		"unknown fields the Aggregator has never seen before must still reach attributes without a decode failure")
+	assert.Equal(t, float64(12), hazard.Attributes["seismic_tremor_count"])
+}
+
+func TestVolcanicToHazard_UnknownVolcanoFails(t *testing.T) {
+	lookup := fakeLookup{found: false}
+	report := clients.VolcanicReport{ReportID: "rep-4", VolcanoID: "unknown", AlertLevel: "Normal"}
+	_, err := mapping.VolcanicToHazard(context.Background(), lookup, report)
+	require.ErrorContains(t, err, "unknown volcano_id")
 }
 
 func TestVolcanicToHazard_UsesReferenceTableNotHardcodedCoords(t *testing.T) {
 	lookup := fakeLookup{ref: volcano.Reference{AreaName: "Gunung Semeru", Latitude: -8.11, Longitude: 112.92}, found: true}
-	report := clients.VolcanicReport{ReportID: "rep-4", VolcanoID: "semeru", AlertLevel: "Normal", Extra: map[string]interface{}{}}
+	report := clients.VolcanicReport{ReportID: "rep-4", VolcanoID: "semeru", AlertLevel: "Normal"}
 	hazard, err := mapping.VolcanicToHazard(context.Background(), lookup, report)
 	require.NoError(t, err)
 	assert.Equal(t, "Gunung Semeru", hazard.AreaName)

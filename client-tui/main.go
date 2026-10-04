@@ -212,7 +212,11 @@ func (a *app) requestRaw() {
 		var result struct {
 			Data []json.RawMessage `json:"data"`
 		}
-		if json.Unmarshal(data, &result) == nil && len(result.Data) > 0 {
+		if err := requireResponseFields(data, "data"); err != nil {
+			fmt.Println("Respons tidak valid:", err)
+		} else if err := json.Unmarshal(data, &result); err != nil {
+			fmt.Println("Respons tidak valid:", err)
+		} else if len(result.Data) > 0 {
 			fmt.Println("Contoh data raw:")
 			fmt.Println(pretty(result.Data[0]))
 		} else {
@@ -255,19 +259,8 @@ func (a *app) showList(query url.Values) {
 		a.pause()
 		return
 	}
-	var result struct {
-		Data []struct {
-			HazardID   string `json:"hazard_id"`
-			Source     string `json:"source"`
-			HazardType string `json:"hazard_type"`
-			Severity   string `json:"severity"`
-			AreaName   string `json:"area_name"`
-		} `json:"data"`
-		Count        int             `json:"count"`
-		AsOf         string          `json:"as_of"`
-		SourceStatus json.RawMessage `json:"source_status"`
-	}
-	if err := json.Unmarshal(data, &result); err != nil {
+	result, err := decodeHazardList(data)
+	if err != nil {
 		fmt.Println("Respons tidak valid:", err)
 		a.pause()
 		return

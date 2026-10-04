@@ -2,7 +2,7 @@
 
 This repository contains the BMKG and PVMBG mocks, BNPB Aggregator,
 Aggregator-owned Canonical Store, Client API, Auth Service, and an interactive
-downstream client. Broker consumers are still separate work.
+downstream client, and two durable broker consumers.
 
 ## Services
 
@@ -12,9 +12,12 @@ downstream client. Broker consumers are still separate work.
 | PVMBG mock | [`pvmbg-mock/`](pvmbg-mock/) | 8082 | Simulated volcanic-activity source |
 | Aggregator | [`aggregator/`](aggregator/) | internal (8080) | Polls both mocks, maps to canonical `HazardEvent`, owns the Store, publishes to NATS, serves the internal read API |
 | Canonical Store | [`store/`](store/) | internal (5432) | PostgreSQL 16, accessed only by the Aggregator |
+| Schema Registry | [`registry/`](registry/) | 8084 | Apicurio Registry with its own persistent PostgreSQL database |
 | Auth Service | [`auth-service/`](auth-service/) | internal (8083) | Owns persistent sessions, issues and rotates tokens |
 | Client API | [`client-api/`](client-api/) | 8080 | Authenticated downstream reads and server-side field projection |
 | Client TUI | [`client-tui/`](client-tui/) | interactive | One terminal app for Media, Field, and Internal identities |
+| Dashboard consumer | [`consumer-dashboard/`](consumer-dashboard/) | internal (8091) | Durable JetStream subscription and SQLite hazard projection |
+| Notifier consumer | [`consumer-notifier/`](consumer-notifier/) | internal (8092) | Durable JetStream subscription and simulated notification ledger |
 
 Each Go service has its own `go.mod` (no shared workspace module) and its own
 multi-stage Dockerfile (`golang:1.27.1-alpine3.24` builder → `alpine:3.24`
@@ -31,6 +34,10 @@ volume. New `HazardEvent`s and pending publications are saved in one Postgres
 transaction. A dispatcher publishes each pending event to stream `HAZARDS` on
 subject `hazard.events` and removes it from the outbox only after JetStream
 acknowledges it.
+The broker also maintains a separate `HAZARDS_DLQ` stream. Each consumer has
+its own durable cursor and publishes undecodable messages to its own DLQ
+subject after the failure rules below. The broker stores and delivers bytes;
+schema lookup and validation happen in each consumer after delivery.
 
 ## Repository layout
 
@@ -43,7 +50,10 @@ auth-service/     # Go module, :8083 (internal token service + SQLite)
 client-api/       # Go module, :8080 (public API)
 client-tui/       # Go module, interactive terminal client
 broker/           # NATS JetStream + stream initializer
-scripts/          # API smoke test
+registry/         # Apicurio Registry + separate persistent database
+consumer-dashboard/ # durable dashboard projection
+consumer-notifier/  # durable simulated notifications
+scripts/          # smoke test, isolation demo, k6 load test
 docker-compose.yml
 .env.example
 docs/             # Pre-existing team contract docs (wire format, stack, deployment)
@@ -51,7 +61,7 @@ docs/             # Pre-existing team contract docs (wire format, stack, deploym
 
 ## Quick start: Docker Compose
 
-Create the eight service env files manually using the root `.env.example`
+Create the eleven service env files manually using the root `.env.example`
 and the per-service table below. Copy only the variables required by each
 service, including shared variables listed in the template. Then run from
 the repository root:
@@ -91,14 +101,17 @@ needed by that service:
 
 | File | Used by | Configuration |
 | --- | --- | --- |
-| `bmkg-mock/.env` | BMKG mock | Port, API key, delay |
-| `pvmbg-mock/.env` | PVMBG mock | Port, source/admin tokens, delays |
+| `bmkg-mock/.env` | BMKG mock | Port, API key, delay, schema registry URL |
+| `pvmbg-mock/.env` | PVMBG mock | Port, source/admin tokens, delays, schema registry URL |
 | `broker/.env` | Broker and optional broker-init tool | NATS URL, stream, subject, retention |
 | `store/.env` | PostgreSQL | Database name, user, password |
-| `aggregator/.env` | Aggregator | Source URLs/credentials, database URL, NATS publication, polling |
+| `registry/.env` | Schema Registry and its database | Separate database credentials and Apicurio storage settings |
+| `aggregator/.env` | Aggregator | Source URLs/credentials, database URL, NATS publication, schema registry URL, polling |
 | `auth-service/.env` | Auth Service | Three client credentials, internal key, TTLs, SQLite path |
 | `client-api/.env` | Client API | Port, Auth/Aggregator URLs, internal key |
 | `client-tui/.env` | Interactive TUI | API URL and public client IDs; no login secrets |
+| `consumer-dashboard/.env` | Dashboard consumer | Role, durable name, SQLite path, broker and registry URLs, DLQ subject |
+| `consumer-notifier/.env` | Notifier consumer | Role, durable name, SQLite path, broker and registry URLs, DLQ subject |
 
 Compose injects these values through `env_file`; it does not mount the files.
 Build contexts exclude local env files with `.dockerignore`. The root `.env`
@@ -139,6 +152,7 @@ Restarting the Auth container does not remove valid sessions.
 | `AUTH_DB_PATH` | Auth-owned SQLite file inside its container | `/data/auth.db` |
 | `AUTH_PORT` | Auth container HTTP port | `8083` |
 | `CLIENT_API_PORT` | Client API container HTTP port; fixed host mapping | `8080` |
+| `CLIENT_API_MAX_INFLIGHT` | Max concurrent Client API requests; excess gets `429` (`0` disables) | `128` |
 | `AGGREGATOR_PORT` | Internal Aggregator HTTP port | `8080` |
 | `AUTH_BASE_URL`, `AGGREGATOR_BASE_URL` | Internal upstream URLs for standalone Client API runs | Compose service URLs |
 | `BNPB_API_URL` | TUI destination URL | `http://localhost:8080` on host; Compose service URL in Docker |
@@ -173,6 +187,13 @@ then list hazards. The TUI refreshes after the expired token gets `401`,
 retries the read, and its “Uji token lama” action checks that the old token
 gets `401`. The same TUI can run on the host with
 `BNPB_API_URL=http://localhost:8080`.
+
+Concurrency model: Go serves each request on its own goroutine, and the Client
+API caps in-flight requests at `CLIENT_API_MAX_INFLIGHT`. A request over the cap
+is rejected immediately with `429` and `Retry-After: 1`, without queueing and
+before any call to Auth, so overload cannot pile up upstream work. Each upstream
+call is bounded by a 5 s client timeout. `/health` and `/ready` are exempt and
+stay answerable under saturation. Rejections are logged as `request rejected`.
 
 Client API and Auth Service emit JSON logs with `correlation_id`; Client API
 forwards `X-Correlation-ID` to Auth and Aggregator and logs outbound latency.
@@ -283,7 +304,7 @@ admin toggles.
 - **Port:** 8082
 - **Auth:** `Authorization: Bearer <PVMBG_TOKEN>` on `/volcanic-reports` — a **different mechanism** than BMKG's header key, per spec. Admin endpoints require `Authorization: Bearer <PVMBG_ADMIN_TOKEN>` (a separate credential).
 - **Delay:** random delay per request in `[PVMBG_MIN_DELAY_MS, PVMBG_MAX_DELAY_MS]` (default 500–3000ms).
-- **Seed data:** 20 deterministic volcanic reports across all four alert levels (Normal/Waspada/Siaga/Awas), spanning 10 seeded Indonesian volcanoes. Every third record already carries a `confidence_level` value in storage — demonstrating that old/new record shapes coexist independently of the wire-visibility toggle below.
+- **Seed data:** 20 deterministic volcanic reports across all four alert levels (Normal/Waspada/Siaga/Awas), spanning 10 seeded Indonesian volcanoes. Some source reports have a `confidence_level` value, hidden until the toggle is activated.
 
 ### Endpoints
 
@@ -354,8 +375,8 @@ on tracking a last-poll timestamp).
 ### Mapping
 
 `internal/mapping` implements:
-- **Seismic → HazardEvent**: `source=BMKG`, `hazard_type=SEISMIC`, area/lat/lon from the event, severity per the priority rules below, `attributes` = `magnitude`, `depth_km`, `potential_tsunami`, plus the matching tsunami warning's fields (`warning_id`, `related_event_id`, `threat_level`, `affected_zones`, `estimated_arrival`) when one exists.
-- **Volcanic → HazardEvent**: `source=PVMBG`, `hazard_type=VOLCANIC`, area/lat/lon resolved via the `volcano_reference` table (never hardcoded in mapping code), severity from the alert-level mapping, `attributes` = `eruption_count_24h`, `ash_column_height_m`, plus **any other field PVMBG's response carries** (including `confidence_level` once emitted) — decoded generically so a new field never causes a decode failure or gets silently dropped.
+- **Seismic → HazardEvent**: `source=BMKG`, `hazard_type=SEISMIC`, area/lat/lon from the event, severity per the priority rules below, `attributes` = `magnitude`, `depth_km`, `potential_tsunami`, plus the matching tsunami warning's fields (`warning_id`, `related_event_id`, `threat_level`, `affected_zones`, `estimated_arrival`) when one exists. Further source fields without a canonical top-level mapping also enter `attributes`.
+- **Volcanic → HazardEvent**: `source=PVMBG`, `hazard_type=VOLCANIC`, area/lat/lon resolved via the `volcano_reference` table (never hardcoded in mapping code), severity from the alert-level mapping, `attributes` = integer `eruption_count_24h`, `ash_column_height_m`, and `confidence_level` when present. Further source fields without a canonical top-level mapping also enter `attributes`; an unknown volcano ID is rejected rather than given fabricated coordinates.
 
 **Severity rules for seismic events** (priority order):
 1. Any related tsunami warning at `Awas` → `AWAS`, overriding magnitude.
@@ -377,12 +398,38 @@ repository (`SaveDedup`, `GetByID`, `Query`, `LastKnownVolcanic`).
 
 ### Schema evolution
 
-`confidence_level` is never a Postgres column — it flows into the
-`attributes` JSONB column through the generic PVMBG decode path described
-above, so PVMBG can start emitting it (via its schema-version toggle) with
-zero Aggregator redeploy and zero migration. Old rows (no `confidence_level`)
-and new rows (with it) live in the same table, same column, and both are
-queryable/readable at once.
+The BMKG and PVMBG REST endpoints return JSON by default. Requests with
+`Accept: application/avro` receive Confluent-framed Avro bytes (magic byte,
+four-byte schema ID, Avro datum). The Aggregator uses that representation for
+both sources. Schemas are registered in Apicurio under
+`bmkg.seismic-events-value`, `bmkg.tsunami-warnings-value`, and
+`pvmbg.volcanic-reports-value`; each subject uses `FULL_TRANSITIVE`
+compatibility. The PVMBG admin toggle registers its additive v2 schema on
+first activation, then exposes `confidence_level` in both JSON and Avro. Each
+activation also adds one newly identified report carrying the field, so the
+Aggregator's source-ID deduplication keeps existing hazard IDs while updating
+their attributes and stores a new canonical row from the new report. The new
+field remains present in PVMBG's response and is mapped into canonical
+`attributes` when present.
+Unknown schema IDs and unregistered schema versions fail closed. A process can
+continue using schema IDs and codecs it has already cached while the registry
+is unavailable. A cold registry outage returns `503` for Avro source reads and
+the first PVMBG schema activation; JSON source reads and health checks remain
+available. The Aggregator keeps serving stored data and retries polling.
+
+The Aggregator's declared unmapped-field policy is **pass through to
+`attributes`** for BMKG and PVMBG fields without a canonical top-level
+destination. `confidence_level` follows this same rule; the Aggregator has no
+dedicated field or branch for it. PVMBG v2 is decoded without a restart. The Canonical
+Store still uses JSONB for attributes and needs no migration when the source
+schema changes. The new source report created by the toggle gets its own
+canonical row beside earlier reports; both remain readable.
+If a source removes or renames a field required by the mapping, the Aggregator
+rejects that poll and logs a contract violation with the correlation ID. It
+does not save a partial or zero-valued `HazardEvent`. The Client API similarly
+rejects an Aggregator JSON response missing required canonical fields and
+returns `503` rather than serving an incomplete hazard. The TUI reports an
+invalid response if a required field in its summary list disappears.
 
 ### Outage behavior
 
@@ -404,9 +451,11 @@ asserting p95 < 300ms.
 
 ### NATS publishing
 
-Every newly inserted `HazardEvent` is queued in Postgres and published to
-subject `hazard.events` on the durable JetStream stream `HAZARDS`
-(`NATS_STREAM`/`NATS_SUBJECT`, both configurable), wrapped in the envelope:
+Every newly inserted `HazardEvent` is queued as JSON in Postgres and published
+as Avro to the configured JetStream `NATS_STREAM` and `NATS_SUBJECT`. The
+example `.env` uses `HAZARDS` and `hazard.events`; neither value has a code
+default. The subject's registry name is `<NATS_SUBJECT>-value`. The Avro record
+has the following logical envelope:
 
 ```json
 {
@@ -416,6 +465,15 @@ subject `hazard.events` on the durable JetStream stream `HAZARDS`
   "payload": { "...": "canonical HazardEvent" }
 }
 ```
+
+The broker payload uses the same five-byte schema-ID frame as source Avro.
+`payload.attributes` is an Avro `map<string, bytes>`; each value is a JSON
+encoded attribute value, preserving the mixed types used by the Canonical
+Store and Client API. Consumers must resolve the schema ID and decode Avro
+before interpreting the envelope. The Aggregator registers the broker schema
+when it first needs to publish, so a cold registry outage leaves the service
+running and the JSON outbox pending. The Aggregator-to-Client API contract
+remains JSON.
 
 The dispatcher retries pending rows until JetStream acknowledges the write.
 It then removes the row from the outbox. A crash between acknowledgement and
@@ -438,6 +496,103 @@ docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/haza
 
 ---
 
+## Durable consumers and DLQ
+
+Both consumers subscribe to the same `HAZARDS` stream and `hazard.events`
+subject, but use independent durable names. The dashboard records the full
+decoded HazardEvent in its own SQLite volume; the notifier records one local
+notification summary per hazard. Each SQLite transaction commits the projection
+and its `(stream, sequence, payload digest)` processing identity together.
+Redelivery after an ack failure sees the committed identity and only retries a
+confirmed ack. `hazard_id` also remains unique, and a second event with changed
+content for the same hazard halts the consumer until an explicit versioning
+contract exists. Each consumer acknowledges only after its SQLite write succeeds.
+Their `/health`, `/ready`, and `/records` endpoints are reachable only on the
+Compose backend network. `/records` returns the latest 100 processed records
+for demo inspection.
+
+Each consumer reads the five-byte schema-ID frame, retrieves the writer schema
+from Apicurio on a cache miss, and saves validated writer schemas by registry
+URL and ID in SQLite. Cached schemas survive consumer restarts and registry
+outages. JSON-encoded attribute values are decoded individually. A registry
+timeout or 5xx response causes a 30-second fetch cooldown and delayed broker
+redelivery; already cached schemas remain usable after the cooldown. A 404
+starts a persisted five-minute retry window with capped backoff and jitter.
+Ten distinct unknown-schema messages within one minute halt the consumer and
+set `/ready` to 503, preventing a registry misconfiguration from mass-DLQing
+valid events. Corrupt frames/Avro bytes go to the DLQ immediately. An
+additional ten-message-per-minute corrupt-payload guard halts a widespread
+producer or registry mismatch before it fills the DLQ. An unsupported envelope
+or consumer-model incompatibility halts and alerts through the error log and
+readiness endpoint. SQLite busy/locked errors retry; disk, I/O, and
+corruption errors halt; a message-specific constraint error retries three
+times, then goes to the DLQ with `reason_code=sqlite_constraint`. Ten distinct
+constraint failures within a minute halt instead. The DLQ record includes
+original bytes (base64 in JSON), stream sequence, consumer, reason code,
+attempt count, and time; replay is manual.
+
+The consumer fetches one message at a time. Delayed NAKs are held by JetStream,
+so later valid events can proceed while fewer than 64 messages are pending.
+Processing is bounded to 25 seconds under a 60-second ack wait. JetStream
+`MaxDeliver=-1` allows the application policy to finish; a finite broker limit
+could stop delivery before the timed retry or DLQ publication. DLQ publication
+is confirmed before the original message is confirmed as acked. Its deterministic
+message ID reduces duplicate DLQ publications during JetStream's deduplication
+window; downstream DLQ tooling should use `(consumer, original_stream,
+stream_sequence)` as its permanent deduplication key.
+
+On a halt, `/ready` returns 503 and a reason, and Compose marks the container
+unhealthy. The halt persists across restarts. Diagnose the registry, consumer
+code, or SQLite volume, then stop the consumer, remove its `halt_reason` row
+from the local `consumer_control` SQLite table, and start it again. Do this
+before the stream retention window expires. The `/health` endpoint remains a
+liveness check. This consumer treats hazard events as immutable; no per-hazard
+ordering is required for its insert-only projection. A future update event
+must include a version and reject stale writes before enabling updates.
+
+The main stream retains messages for `NATS_STREAM_MAX_AGE` (example: 24h), so
+an offline durable consumer catches up only while the messages remain there.
+The separate DLQ stream retains failures for `NATS_DLQ_MAX_AGE` (example: 168h).
+Set `NATS_DLQ_STREAM`, `NATS_DLQ_SUBJECT_PREFIX`, and `NATS_DLQ_MAX_AGE`
+in `broker/.env`; configure `NATS_DLQ_STREAM` and a distinct
+`NATS_DLQ_SUBJECT` in each consumer env file. The optional third consumer
+uses the dashboard image, a new durable name, and a separate SQLite volume.
+
+```bash
+docker compose exec -T consumer-dashboard wget -qO- http://localhost:8091/records
+docker compose exec -T consumer-notifier wget -qO- http://localhost:8092/records
+docker compose stop consumer-notifier
+# Trigger a new PVMBG report via the schema toggle in Demo B; the dashboard continues.
+docker compose start consumer-notifier
+docker compose --profile consumer-demo up -d consumer-dashboard-demo
+docker compose exec -T consumer-dashboard-demo wget -qO- http://localhost:8093/records
+```
+
+The two main consumers and the optional third one all read the existing
+publisher output; adding the third requires no Aggregator change. Both new
+Go modules can be checked with `go test ./...` from their directories.
+To demonstrate that a bad schema ID does not hold up a later valid event,
+publish a deliberately unknown ID from the broker module, then trigger a
+fresh PVMBG report with Demo B's schema toggle:
+
+```bash
+cd broker
+NATS_URL=nats://localhost:4222 NATS_SUBJECT=hazard.events go run ./cmd/publish-invalid
+cd ..
+docker compose logs consumer-dashboard consumer-notifier | grep 'message quarantined'
+curl -s 'http://localhost:8222/jsz?streams=true' | jq '[.account_details[].stream_detail[] | {name, messages: .state.messages}]'
+cd broker
+NATS_URL=nats://localhost:4222 NATS_DLQ_STREAM=HAZARDS_DLQ go run ./cmd/inspect-dlq hazard.dlq.dashboard
+NATS_URL=nats://localhost:4222 NATS_DLQ_STREAM=HAZARDS_DLQ go run ./cmd/inspect-dlq hazard.dlq.notifier
+cd ..
+```
+
+The unknown ID is retried for at least five minutes before quarantine; a
+registry outage pauses fetching and does not count as another 404. The later
+valid event can be processed while that retry waits. Each of the two consumers
+places its own copy in `HAZARDS_DLQ`. Do not use the fixture against
+a shared or production broker.
+
 ## Demo scenarios
 
 All three commands below assume `docker compose up --build` is running.
@@ -455,9 +610,10 @@ docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/haza
 
 You should see 20 seismic records from BMKG, 20 volcanic reports from
 PVMBG, and both reflected as canonical `HazardEvent`s from the Aggregator.
-NATS receipt can be observed via the container logs
+NATS publish acknowledgements can be observed via the container logs
 (`docker compose logs aggregator | grep "outbound call"` shows the publish
-lines with `target_service":"nats"`), or by running a throwaway subscriber:
+lines with `target_service":"nats"`). A throwaway subscriber receives binary
+Avro bytes, which need the registry schema to decode:
 
 ```bash
 docker run --rm --network tugasbesaraat_backend natsio/nats-box:latest \
@@ -477,12 +633,22 @@ curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:8082/volca
 sleep 5   # let the Aggregator's next poll cycle pick up the new shape
 
 docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | \
-  jq '.data[] | select(.attributes | has("confidence_level")) | .attributes.confidence_level'
+  jq '.data[] | select(.source_ref_id == "rep-00001" or .source_ref_id == "rep-schema-00001") | {source_ref_id, attributes}'
 ```
 
 No restart of any container is needed at any point in this sequence.
-Records ingested before the toggle remain readable via
-`/internal/hazards/{id}` without `confidence_level` in `attributes`.
+The two canonical rows have different source IDs. After the toggle, the
+Aggregator updates previously ingested reports that now include
+`confidence_level` and stores the newly identified report with that attribute.
+
+To trigger a registry failure during the demo, stop it with
+`docker compose stop schema-registry`. A source process that has already
+registered its current schema can still answer Avro requests from its cache.
+Restart `pvmbg-mock` while the registry is stopped to show a cold cache:
+its JSON endpoint and `/health` still answer, while an Avro request returns
+`503` and the first schema toggle cannot activate. Start the registry again
+with `docker compose start schema-registry`; the next Avro request can register
+its schema and the toggle can proceed.
 
 ### Demo C — PVMBG outage
 
@@ -506,20 +672,56 @@ docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/haza
 
 ### Demo D — BMKG stays fast while PVMBG is slow
 
+The mock reads its delay from `pvmbg-mock/.env`, not from the shell, so
+prefixing `docker compose` with `PVMBG_MIN_DELAY_MS=...` has no effect. Edit
+the file and recreate the container:
+
 ```bash
-# Force PVMBG's random delay to a fixed ~3s window
-docker compose stop pvmbg-mock
-PVMBG_MIN_DELAY_MS=3000 PVMBG_MAX_DELAY_MS=3000 docker compose up -d pvmbg-mock
+# In pvmbg-mock/.env set PVMBG_MIN_DELAY_MS=3000 and PVMBG_MAX_DELAY_MS=3000, then:
+docker compose up -d --force-recreate pvmbg-mock
 
 for i in $(seq 1 20); do
   /usr/bin/time -f "%e s" docker compose exec -T aggregator wget -qO /dev/null 'http://localhost:8080/internal/hazards?hazard_type=SEISMIC'
 done
 ```
 
+That loop is sequential. For the concurrent BMKG-only versus PVMBG-path
+comparison, run the k6 mixed mode from Demo F while the delay is 3s. Restore
+the original delay values and recreate the container afterwards.
+
 Or use the Aggregator's own proof: `cd aggregator && go test ./internal/poller/... -run TestConcurrency -v`
 runs exactly this scenario against `httptest` servers (BMKG instant, PVMBG
 3s) and asserts p95 < 300ms for the BMKG-only path — no faked numbers, the
 test actually measures it.
+
+### Demo E — institution credential isolation
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1
+```
+
+Prints one pass/fail line per probe: each institution's own credential gets
+`200`; the BMKG key on PVMBG (data and admin), the PVMBG token on BMKG, the
+PVMBG data token on its admin endpoint all get `403`; no credential gets
+`401`. Reads credentials from the service env files and never prints them.
+
+### Demo F — load test (k6 in Docker)
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode sustained   # 60 VUs, 70s on /hazards
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode mixed -Vus 50 -Duration 65s
+```
+
+`sustained` reports throughput, p50/p95/p99, error rate, and the count of
+`429` responses (`controlled_rejections_429`). At the default cap of 128 and 60
+VUs expect none; raise `-Vus` (for example 300) or lower
+`CLIENT_API_MAX_INFLIGHT` to see controlled rejections.
+`mixed` splits the VUs between `hazard_type=SEISMIC` and `VOLCANIC` and fails
+unless the SEISMIC p95 is under 300 ms; run it with PVMBG's delay at 3s (see
+Demo D). Each VU logs in as Field and logs in again every 45 s, because the
+access token lives 60 s. Volcanic reads come from the Canonical Store, so this
+shows the request path is decoupled from the slow PVMBG poller. It requires Docker and uses
+`host.docker.internal` to reach the Client API on port 8080.
 
 ---
 
@@ -548,5 +750,5 @@ test actually measures it.
   outbox event; a record seen again on a later poll cycle
   updates its mutable columns (severity, area, coordinates, `attributes`)
   in place but keeps its original `hazard_id` and is never re-published.
-  This is what lets PVMBG's schema-version toggle reach already-ingested
-  rows on the very next poll cycle with no restart, matching Demo B.
+  The schema-version toggle creates a fresh source report ID, so Demo B
+  stores a new row alongside pre-toggle rows without changing their IDs.

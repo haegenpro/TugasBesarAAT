@@ -1,5 +1,10 @@
 package main
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 type principal struct {
 	ClientID string `json:"client_id"`
 	Role     string `json:"role"`
@@ -18,6 +23,36 @@ type hazard struct {
 	OccurredAt  string         `json:"occurred_at"`
 	IngestedAt  string         `json:"ingested_at"`
 	Attributes  map[string]any `json:"attributes"`
+}
+
+func requireJSONFields(data []byte, fields ...string) error {
+	var record map[string]json.RawMessage
+	if err := json.Unmarshal(data, &record); err != nil {
+		return err
+	}
+	for _, field := range fields {
+		value, ok := record[field]
+		if !ok || string(value) == "null" {
+			return fmt.Errorf("missing required field %q", field)
+		}
+	}
+	return nil
+}
+
+func (h *hazard) UnmarshalJSON(data []byte) error {
+	if err := requireJSONFields(data, "hazard_id", "source", "source_ref_id", "hazard_type", "severity", "area_name", "latitude", "longitude", "occurred_at", "ingested_at", "attributes"); err != nil {
+		return fmt.Errorf("invalid aggregator hazard: %w", err)
+	}
+	type plain hazard
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if decoded.HazardID == "" || decoded.Source == "" || decoded.SourceRefID == "" || decoded.HazardType == "" || decoded.Severity == "" || decoded.OccurredAt == "" || decoded.IngestedAt == "" {
+		return fmt.Errorf("invalid aggregator hazard: required string is empty")
+	}
+	*h = hazard(decoded)
+	return nil
 }
 
 type summaryHazard struct {
@@ -39,11 +74,46 @@ type sourceStatus struct {
 	StaleSince string `json:"stale_since,omitempty"`
 }
 
+func (status *sourceStatus) UnmarshalJSON(data []byte) error {
+	if err := requireJSONFields(data, "state"); err != nil {
+		return fmt.Errorf("invalid source status: %w", err)
+	}
+	type plain sourceStatus
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if decoded.State != "fresh" && decoded.State != "stale" {
+		return fmt.Errorf("invalid source status: state %q", decoded.State)
+	}
+	if decoded.State == "stale" && decoded.StaleSince == "" {
+		return fmt.Errorf("invalid source status: stale_since is missing")
+	}
+	*status = sourceStatus(decoded)
+	return nil
+}
+
 type aggregatorList struct {
 	Data         []hazard                `json:"data"`
 	Count        int                     `json:"count"`
 	AsOf         string                  `json:"as_of"`
 	SourceStatus map[string]sourceStatus `json:"source_status"`
+}
+
+func (list *aggregatorList) UnmarshalJSON(data []byte) error {
+	if err := requireJSONFields(data, "data", "count", "as_of", "source_status"); err != nil {
+		return fmt.Errorf("invalid aggregator list: %w", err)
+	}
+	type plain aggregatorList
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	if decoded.AsOf == "" {
+		return fmt.Errorf("invalid aggregator list: as_of is empty")
+	}
+	*list = aggregatorList(decoded)
+	return nil
 }
 
 func detailStatus(h hazard) sourceStatus {

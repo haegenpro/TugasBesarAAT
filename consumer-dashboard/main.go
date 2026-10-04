@@ -1,0 +1,561 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/linkedin/goavro/v2"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+)
+
+var errUnknownSchema = errors.New("schema ID not found")
+var errRegistryUnavailable = errors.New("schema registry unavailable")
+
+type config struct {
+	Role, Port, DBPath, NATSURL, Stream, Subject, Durable, RegistryURL, DLQStream, DLQSubject string
+}
+
+func loadConfig() (config, error) {
+	keys := []string{"CONSUMER_ROLE", "CONSUMER_PORT", "CONSUMER_DB_PATH", "NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_DURABLE", "SCHEMA_REGISTRY_URL", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT"}
+	values := map[string]string{}
+	for _, key := range keys {
+		values[key] = os.Getenv(key)
+		if values[key] == "" {
+			return config{}, fmt.Errorf("%s is required", key)
+		}
+	}
+	if values["CONSUMER_ROLE"] != "dashboard" && values["CONSUMER_ROLE"] != "notifier" {
+		return config{}, errors.New("CONSUMER_ROLE must be dashboard or notifier")
+	}
+	return config{Role: values["CONSUMER_ROLE"], Port: values["CONSUMER_PORT"], DBPath: values["CONSUMER_DB_PATH"], NATSURL: values["NATS_URL"], Stream: values["NATS_STREAM"], Subject: values["NATS_SUBJECT"], Durable: values["NATS_DURABLE"], RegistryURL: strings.TrimRight(values["SCHEMA_REGISTRY_URL"], "/"), DLQStream: values["NATS_DLQ_STREAM"], DLQSubject: values["NATS_DLQ_SUBJECT"]}, nil
+}
+
+type schemaClient struct {
+	base   string
+	db     *sql.DB
+	http   *http.Client
+	mu     sync.RWMutex
+	codecs map[int]*goavro.Codec
+}
+
+func newSchemaClient(base string, db *sql.DB) *schemaClient {
+	return &schemaClient{base: base, db: db, http: &http.Client{Timeout: 2 * time.Second}, codecs: map[int]*goavro.Codec{}}
+}
+
+func (s *schemaClient) codec(ctx context.Context, id int) (*goavro.Codec, error) {
+	s.mu.RLock()
+	cached := s.codecs[id]
+	s.mu.RUnlock()
+	if cached != nil {
+		return cached, nil
+	}
+	var schema string
+	err := s.db.QueryRowContext(ctx, `SELECT schema FROM schema_cache WHERE registry=? AND id=?`, s.base, id).Scan(&schema)
+	if err == nil {
+		codec, codecErr := goavro.NewCodec(schema)
+		if codecErr != nil {
+			return nil, fmt.Errorf("%w: cached schema %d: %v", errConsumerIncompatible, id, codecErr)
+		}
+		s.mu.Lock()
+		s.codecs[id] = codec
+		s.mu.Unlock()
+		return codec, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: read schema cache: %w", errLocalStore, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.base+"/schemas/ids/"+strconv.Itoa(id), nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errRegistryUnavailable, err)
+	}
+	start := time.Now()
+	resp, err := s.http.Do(req)
+	if err != nil {
+		slog.Warn("registry lookup failed", "schema_id", id, "latency_ms", time.Since(start).Milliseconds(), "error", err)
+		return nil, fmt.Errorf("%w: %v", errRegistryUnavailable, err)
+	}
+	defer resp.Body.Close()
+	slog.Info("registry lookup", "schema_id", id, "status_code", resp.StatusCode, "latency_ms", time.Since(start).Milliseconds())
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("%w: %d", errUnknownSchema, id)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%w: status %d", errRegistryUnavailable, resp.StatusCode)
+	}
+	var result struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return nil, fmt.Errorf("%w: %v", errRegistryUnavailable, err)
+	}
+	codec, err := goavro.NewCodec(result.Schema)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid registered schema %d: %v", errConsumerIncompatible, id, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO schema_cache(registry,id,schema) VALUES (?,?,?) ON CONFLICT(registry,id) DO NOTHING`, s.base, id, result.Schema); err != nil {
+		return nil, fmt.Errorf("%w: persist schema %d: %w", errLocalStore, id, err)
+	}
+	var stored string
+	if err := s.db.QueryRowContext(ctx, `SELECT schema FROM schema_cache WHERE registry=? AND id=?`, s.base, id).Scan(&stored); err != nil {
+		return nil, fmt.Errorf("%w: verify schema %d: %w", errLocalStore, id, err)
+	}
+	if stored != result.Schema {
+		return nil, fmt.Errorf("%w: schema ID %d changed in registry %s", errConsumerIncompatible, id, s.base)
+	}
+	s.mu.Lock()
+	s.codecs[id] = codec
+	s.mu.Unlock()
+	return codec, nil
+}
+
+type envelope struct {
+	CorrelationID string
+	HazardID      string
+	Payload       hazardEvent
+}
+
+type hazardEvent struct {
+	HazardID    string         `json:"hazard_id"`
+	Source      string         `json:"source"`
+	SourceRefID string         `json:"source_ref_id"`
+	HazardType  string         `json:"hazard_type"`
+	Severity    string         `json:"severity"`
+	AreaName    string         `json:"area_name"`
+	Latitude    float64        `json:"latitude"`
+	Longitude   float64        `json:"longitude"`
+	OccurredAt  string         `json:"occurred_at"`
+	IngestedAt  string         `json:"ingested_at"`
+	Attributes  map[string]any `json:"attributes"`
+}
+
+func (s *schemaClient) decode(ctx context.Context, data []byte) (envelope, error) {
+	if len(data) < 5 || data[0] != 0 {
+		return envelope{}, fmt.Errorf("%w: invalid schema ID frame", errCorruptPayload)
+	}
+	id := int(binary.BigEndian.Uint32(data[1:5]))
+	codec, err := s.codec(ctx, id)
+	if err != nil {
+		return envelope{}, err
+	}
+	native, rest, err := codec.NativeFromBinary(data[5:])
+	if err != nil {
+		return envelope{}, fmt.Errorf("%w: invalid Avro payload: %v", errCorruptPayload, err)
+	}
+	if len(rest) != 0 {
+		return envelope{}, fmt.Errorf("%w: trailing Avro bytes", errCorruptPayload)
+	}
+	outer, ok := native.(map[string]any)
+	if !ok || outer["envelope_version"] != int32(1) {
+		return envelope{}, fmt.Errorf("%w: unsupported envelope", errConsumerIncompatible)
+	}
+	cid, ok := outer["correlation_id"].(string)
+	if !ok || cid == "" {
+		return envelope{}, fmt.Errorf("%w: missing correlation ID", errCorruptPayload)
+	}
+	payload, ok := outer["payload"].(map[string]any)
+	if !ok {
+		return envelope{}, fmt.Errorf("%w: missing hazard payload", errConsumerIncompatible)
+	}
+	idValue, ok := payload["hazard_id"].(string)
+	if !ok || idValue == "" {
+		return envelope{}, fmt.Errorf("%w: missing hazard ID", errCorruptPayload)
+	}
+	for _, key := range []string{"source", "source_ref_id", "hazard_type", "severity", "area_name", "occurred_at", "ingested_at"} {
+		value, ok := payload[key].(string)
+		if !ok {
+			return envelope{}, fmt.Errorf("%w: invalid %s type", errConsumerIncompatible, key)
+		}
+		if value == "" {
+			return envelope{}, fmt.Errorf("%w: empty %s", errCorruptPayload, key)
+		}
+	}
+	for _, key := range []string{"latitude", "longitude"} {
+		if _, ok := payload[key].(float64); !ok {
+			return envelope{}, fmt.Errorf("%w: invalid %s type", errConsumerIncompatible, key)
+		}
+	}
+	attrs, ok := payload["attributes"].(map[string]any)
+	if !ok {
+		return envelope{}, fmt.Errorf("%w: invalid attributes type", errConsumerIncompatible)
+	}
+	decodedAttrs := make(map[string]any, len(attrs))
+	for key, value := range attrs {
+		bytes, ok := value.([]byte)
+		if !ok {
+			return envelope{}, fmt.Errorf("%w: invalid attribute %s type", errConsumerIncompatible, key)
+		}
+		var decoded any
+		if err := json.Unmarshal(bytes, &decoded); err != nil {
+			return envelope{}, fmt.Errorf("%w: invalid attribute %s: %v", errCorruptPayload, key, err)
+		}
+		decodedAttrs[key] = decoded
+	}
+	payload["attributes"] = decodedAttrs
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return envelope{}, fmt.Errorf("%w: encode payload: %v", errConsumerIncompatible, err)
+	}
+	var hazard hazardEvent
+	if err := json.Unmarshal(encoded, &hazard); err != nil {
+		return envelope{}, fmt.Errorf("%w: decode consumer model: %v", errConsumerIncompatible, err)
+	}
+	return envelope{CorrelationID: cid, HazardID: idValue, Payload: hazard}, nil
+}
+
+type app struct {
+	cfg        config
+	db         *sql.DB
+	schemas    *schemaClient
+	ready      atomic.Bool
+	halted     atomic.Bool
+	haltSticky atomic.Bool
+	pauseUntil atomic.Int64
+}
+
+type deadLetter struct {
+	OriginalStream  string `json:"original_stream"`
+	OriginalSubject string `json:"original_subject"`
+	StreamSequence  uint64 `json:"stream_sequence"`
+	Consumer        string `json:"consumer"`
+	Attempts        uint64 `json:"attempts"`
+	Reason          string `json:"reason"`
+	ReasonCode      string `json:"reason_code"`
+	FailedAt        string `json:"failed_at"`
+	Raw             []byte `json:"raw"`
+}
+
+func (a *app) quarantine(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg, meta *jetstream.MsgMetadata, code string, reason error) error {
+	entry := deadLetter{OriginalStream: meta.Stream, OriginalSubject: msg.Subject(), StreamSequence: meta.Sequence.Stream, Consumer: a.cfg.Durable, Attempts: meta.NumDelivered, Reason: reason.Error(), ReasonCode: code, FailedAt: time.Now().UTC().Format(time.RFC3339Nano), Raw: msg.Data()}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err = js.Publish(pubCtx, a.cfg.DLQSubject, data, jetstream.WithMsgID(fmt.Sprintf("%s:%d", a.cfg.Durable, meta.Sequence.Stream)))
+	if err != nil {
+		return err
+	}
+	ackCtx, ackCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer ackCancel()
+	if err := msg.DoubleAck(ackCtx); err != nil {
+		return err
+	}
+	if err := a.clearRetries(ctx, meta); err != nil {
+		slog.Warn("retry cleanup failed", "service", a.cfg.Role, "error", err)
+	}
+	slog.Error("message quarantined", "service", a.cfg.Role, "consumer", a.cfg.Durable, "stream_sequence", meta.Sequence.Stream, "attempts", meta.NumDelivered, "reason_code", code, "reason", reason.Error())
+	return nil
+}
+
+func (a *app) delayedRetry(msg jetstream.Msg, delay time.Duration, cause error) bool {
+	slog.Warn("message delayed", "service", a.cfg.Role, "delay", delay, "error", cause)
+	if err := msg.NakWithDelay(delay); err != nil {
+		slog.Error("delayed NAK failed; reconnecting", "service", a.cfg.Role, "error", err)
+		return false
+	}
+	return true
+}
+
+func (a *app) confirmedAck(ctx context.Context, msg jetstream.Msg, meta *jetstream.MsgMetadata) bool {
+	ackCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := msg.DoubleAck(ackCtx); err != nil {
+		slog.Error("confirmed ack failed; redelivery will be deduplicated", "service", a.cfg.Role, "stream_sequence", meta.Sequence.Stream, "error", err)
+		return false
+	}
+	if err := a.clearRetries(ctx, meta); err != nil {
+		slog.Warn("retry cleanup failed", "service", a.cfg.Role, "error", err)
+	}
+	return true
+}
+
+func (a *app) haltFor(reason string, meta *jetstream.MsgMetadata, err error) {
+	slog.Error("consumer halted; operator action required", "service", a.cfg.Role, "stream_sequence", meta.Sequence.Stream, "reason", reason, "error", err)
+	a.halt(reason + ": " + err.Error())
+}
+
+func (a *app) quarantineOrRetry(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg, meta *jetstream.MsgMetadata, code string, cause error) bool {
+	if err := a.quarantine(ctx, js, msg, meta, code, cause); err != nil {
+		slog.Error("DLQ publish or ack failed", "service", a.cfg.Role, "error", err)
+		return a.delayedRetry(msg, 10*time.Second, err)
+	}
+	return true
+}
+
+func (a *app) handleStoreFailure(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg, meta *jetstream.MsgMetadata, err error, messageWrite bool) bool {
+	if errors.Is(err, errConsumerIncompatible) {
+		a.haltFor("consumer_incompatible", meta, err)
+		return false
+	}
+	switch classifyStoreFailure(err) {
+	case storeTransient:
+		return a.delayedRetry(msg, 5*time.Second, err)
+	case storeConstraint:
+		if !messageWrite {
+			a.haltFor("consumer_state_constraint", meta, err)
+			return false
+		}
+		state, countErr := a.recordConstraint(ctx, meta, time.Now())
+		if countErr != nil {
+			a.haltFor("constraint_tracking_failed", meta, countErr)
+			return false
+		}
+		if state.Recent >= constraintStormLimit {
+			a.haltFor("constraint_failure_storm", meta, err)
+			return false
+		}
+		if state.Attempts < constraintLimit {
+			return a.delayedRetry(msg, retryDelay(state.Attempts, meta.Sequence.Stream), err)
+		}
+		return a.quarantineOrRetry(ctx, js, msg, meta, "sqlite_constraint", err)
+	default:
+		a.haltFor("sqlite_environmental_failure", meta, err)
+		return false
+	}
+}
+
+// process returns false when the connection should be closed or fetching must stop.
+func (a *app) process(parent context.Context, js jetstream.JetStream, msg jetstream.Msg) bool {
+	ctx, cancel := context.WithTimeout(parent, 25*time.Second)
+	defer cancel()
+	meta, err := msg.Metadata()
+	if err != nil {
+		return a.delayedRetry(msg, 5*time.Second, err)
+	}
+	processed, err := a.alreadyProcessed(ctx, meta, msg.Data())
+	if err != nil {
+		return a.handleStoreFailure(ctx, js, msg, meta, err, false)
+	}
+	if processed {
+		return a.confirmedAck(ctx, msg, meta)
+	}
+	e, err := a.schemas.decode(ctx, msg.Data())
+	if err != nil {
+		if errors.Is(err, errRegistryUnavailable) {
+			a.pauseUntil.Store(time.Now().Add(30 * time.Second).UnixNano())
+			return a.delayedRetry(msg, 30*time.Second, err)
+		}
+		if errors.Is(err, errUnknownSchema) {
+			id := int(binary.BigEndian.Uint32(msg.Data()[1:5]))
+			state, countErr := a.recordUnknown(ctx, meta, id, time.Now())
+			if countErr != nil {
+				return a.handleStoreFailure(ctx, js, msg, meta, countErr, false)
+			}
+			if state.Recent >= unknownStormLimit {
+				a.haltFor("unknown_schema_storm", meta, err)
+				return false
+			}
+			if time.Since(state.FirstSeen) < unknownSchemaWindow {
+				return a.delayedRetry(msg, retryDelay(state.Attempts, meta.Sequence.Stream), err)
+			}
+			return a.quarantineOrRetry(ctx, js, msg, meta, "schema_not_found", err)
+		}
+		if errors.Is(err, errLocalStore) {
+			return a.handleStoreFailure(ctx, js, msg, meta, err, false)
+		}
+		if errors.Is(err, errCorruptPayload) {
+			recent, countErr := a.recordCorrupt(ctx, meta, time.Now())
+			if countErr != nil {
+				return a.handleStoreFailure(ctx, js, msg, meta, countErr, false)
+			}
+			if recent >= corruptStormLimit {
+				a.haltFor("corrupt_payload_storm", meta, err)
+				return false
+			}
+			return a.quarantineOrRetry(ctx, js, msg, meta, "corrupt_payload", err)
+		}
+		a.haltFor("consumer_incompatible", meta, err)
+		return false
+	}
+	if err := a.save(ctx, meta, msg.Data(), e); err != nil {
+		return a.handleStoreFailure(ctx, js, msg, meta, err, true)
+	}
+	if !a.confirmedAck(ctx, msg, meta) {
+		return false
+	}
+	slog.Info("event processed", "service", a.cfg.Role, "correlation_id", e.CorrelationID, "hazard_id", e.HazardID, "stream_sequence", meta.Sequence.Stream)
+	return true
+}
+
+func (a *app) run(ctx context.Context) {
+	for ctx.Err() == nil {
+		nc, err := nats.Connect(a.cfg.NATSURL, nats.Name(a.cfg.Durable), nats.Timeout(3*time.Second))
+		if err != nil {
+			slog.Warn("broker unavailable", "service", a.cfg.Role, "error", err)
+			sleep(ctx, 2*time.Second)
+			continue
+		}
+		js, err := jetstream.New(nc)
+		if err != nil {
+			nc.Close()
+			sleep(ctx, 2*time.Second)
+			continue
+		}
+		setupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		stream, err := js.Stream(setupCtx, a.cfg.Stream)
+		if err == nil {
+			_, err = js.Stream(setupCtx, a.cfg.DLQStream)
+		}
+		var consumer jetstream.Consumer
+		if err == nil {
+			consumer, err = stream.CreateOrUpdateConsumer(setupCtx, jetstream.ConsumerConfig{Durable: a.cfg.Durable, FilterSubject: a.cfg.Subject, DeliverPolicy: jetstream.DeliverAllPolicy, AckPolicy: jetstream.AckExplicitPolicy, AckWait: 60 * time.Second, MaxDeliver: -1, MaxAckPending: 64})
+		}
+		cancel()
+		if err != nil {
+			slog.Warn("consumer setup failed", "service", a.cfg.Role, "error", err)
+			nc.Close()
+			sleep(ctx, 2*time.Second)
+			continue
+		}
+		slog.Info("consumer ready", "service", a.cfg.Role, "durable", a.cfg.Durable, "stream", a.cfg.Stream)
+		for ctx.Err() == nil && !nc.IsClosed() {
+			if err := a.refreshHalt(ctx); err != nil {
+				slog.Error("cannot read consumer halt state", "service", a.cfg.Role, "error", err)
+				a.ready.Store(false)
+				sleep(ctx, 5*time.Second)
+				continue
+			}
+			if a.halted.Load() {
+				a.ready.Store(false)
+				sleep(ctx, 5*time.Second)
+				continue
+			}
+			if until := time.Unix(0, a.pauseUntil.Load()); time.Now().Before(until) {
+				a.ready.Store(false)
+				sleep(ctx, 5*time.Second)
+				continue
+			}
+			a.ready.Store(true)
+			batch, err := consumer.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
+			if err != nil {
+				slog.Warn("fetch failed", "service", a.cfg.Role, "error", err)
+				break
+			}
+			continueFetch := true
+			for msg := range batch.Messages() {
+				if !a.process(ctx, js, msg) {
+					continueFetch = false
+					break
+				}
+			}
+			if !continueFetch {
+				break
+			}
+			if err := batch.Error(); err != nil && !errors.Is(err, nats.ErrTimeout) && !errors.Is(err, jetstream.ErrNoMessages) {
+				slog.Warn("fetch batch failed", "service", a.cfg.Role, "error", err)
+				break
+			}
+		}
+		a.ready.Store(false)
+		nc.Close()
+		sleep(ctx, 2*time.Second)
+	}
+}
+
+func sleep(ctx context.Context, d time.Duration) {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
+}
+
+func (a *app) serve(ctx context.Context) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"status": "ok", "service": "consumer-" + a.cfg.Role})
+	})
+	mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
+		ready := a.ready.Load() && !a.halted.Load() && time.Now().UnixNano() >= a.pauseUntil.Load()
+		body := map[string]any{"ready": ready, "halted": a.halted.Load()}
+		if a.halted.Load() {
+			var reason string
+			if err := a.db.QueryRowContext(r.Context(), `SELECT value FROM consumer_control WHERE key='halt_reason'`).Scan(&reason); err == nil {
+				body["reason"] = reason
+			}
+		}
+		if until := a.pauseUntil.Load(); time.Now().UnixNano() < until {
+			body["registry_retry_after"] = time.Unix(0, until).UTC().Format(time.RFC3339)
+		}
+		if !ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		writeJSON(w, body)
+	})
+	mux.HandleFunc("GET /records", func(w http.ResponseWriter, r *http.Request) {
+		rows, err := a.db.QueryContext(r.Context(), `SELECT hazard_id,payload,correlation_id,processed_at FROM records ORDER BY processed_at DESC LIMIT 100`)
+		if err != nil {
+			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		defer rows.Close()
+		items := []map[string]any{}
+		for rows.Next() {
+			var id, payload, cid, at string
+			if err := rows.Scan(&id, &payload, &cid, &at); err != nil {
+				http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			items = append(items, map[string]any{"hazard_id": id, "payload": json.RawMessage(payload), "correlation_id": cid, "processed_at": at})
+		}
+		if err := rows.Err(); err != nil {
+			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, map[string]any{"data": items, "count": len(items)})
+	})
+	srv := &http.Server{Addr: ":" + a.cfg.Port, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	return srv.ListenAndServe()
+}
+
+func writeJSON(w http.ResponseWriter, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	cfg, err := loadConfig()
+	if err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+	db, err := openDB(cfg.DBPath)
+	if err != nil {
+		slog.Error("store unavailable", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	a := &app{cfg: cfg, db: db, schemas: newSchemaClient(cfg.RegistryURL, db)}
+	go a.run(ctx)
+	if err := a.serve(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("http server failed", "error", err)
+		os.Exit(1)
+	}
+}

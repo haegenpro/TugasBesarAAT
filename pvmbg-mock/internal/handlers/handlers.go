@@ -1,23 +1,30 @@
 package handlers
 
 import (
+	"fmt"
 	"math/rand"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"pvmbg-mock/internal/avrowire"
 	"pvmbg-mock/internal/domain"
+	"pvmbg-mock/internal/middleware"
 	"pvmbg-mock/internal/state"
 	"pvmbg-mock/internal/timeutil"
 )
 
 type Handler struct {
-	Reports    []domain.VolcanicReport
-	Toggles    *state.Toggles
-	MinDelayMs int
-	MaxDelayMs int
-	rng        *rand.Rand
+	Reports     []domain.VolcanicReport
+	Toggles     *state.Toggles
+	MinDelayMs  int
+	MaxDelayMs  int
+	rng         *rand.Rand
+	Registry    *avrowire.Client
+	schemaMu    sync.RWMutex
+	activations int
 }
 
 func New(reports []domain.VolcanicReport, toggles *state.Toggles, minDelayMs, maxDelayMs int) *Handler {
@@ -68,6 +75,8 @@ func (h *Handler) VolcanicReports(c *gin.Context) {
 		return
 	}
 
+	h.schemaMu.RLock()
+	defer h.schemaMu.RUnlock()
 	since := parseSince(c)
 	showConfidence := h.Toggles.ShowConfidence()
 	out := make([]domain.VolcanicReport, 0, len(h.Reports))
@@ -75,6 +84,19 @@ func (h *Handler) VolcanicReports(c *gin.Context) {
 		if since.IsZero() || r.ReportedAt.Time.After(since) {
 			out = append(out, r.WireCopy(showConfidence))
 		}
+	}
+	if c.GetHeader("Accept") == avrowire.MediaType {
+		if h.Registry == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			return
+		}
+		data, err := h.encodeVolcanic(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), out, showConfidence)
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			return
+		}
+		c.Data(http.StatusOK, avrowire.MediaType, data)
+		return
 	}
 	c.JSON(http.StatusOK, out)
 }
@@ -88,15 +110,39 @@ type schemaVersionResponse struct {
 	ConfidenceLevelVisible bool   `json:"confidence_level_visible"`
 }
 
-func AdminSchemaVersion(toggles *state.Toggles) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		visible := toggles.ToggleSchema()
-		version := "v1"
-		if visible {
-			version = "v2"
+func (h *Handler) AdminSchemaVersion(c *gin.Context) {
+	h.schemaMu.Lock()
+	defer h.schemaMu.Unlock()
+	if !h.Toggles.ShowConfidence() && h.Registry != nil {
+		// Register v1 first so the registry checks v2 against it. A failed
+		// registration leaves the source's visible schema unchanged.
+		registryCtx := avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c))
+		if _, err := h.Registry.Register(registryCtx, volcanicSubject, volcanicV1); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			return
 		}
-		c.JSON(http.StatusOK, schemaVersionResponse{SchemaVersion: version, ConfidenceLevelVisible: visible})
+		if _, err := h.Registry.Register(registryCtx, volcanicSubject, volcanicV2()); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registration failed"})
+			return
+		}
 	}
+	visible := h.Toggles.ToggleSchema()
+	version := "v1"
+	if visible {
+		version = "v2"
+		// Existing report IDs are already stored by the Aggregator. Emit a
+		// fresh source record to demonstrate ingestion after the schema change.
+		if len(h.Reports) > 0 {
+			h.activations++
+			report := h.Reports[0]
+			report.ReportID = fmt.Sprintf("rep-schema-%05d", h.activations)
+			report.ReportedAt = timeutil.New(time.Now().UTC())
+			confidence := 0.88
+			report.ConfidenceLevel = &confidence
+			h.Reports = append(h.Reports, report)
+		}
+	}
+	c.JSON(http.StatusOK, schemaVersionResponse{SchemaVersion: version, ConfidenceLevelVisible: visible})
 }
 
 type outageRequest struct {

@@ -26,7 +26,7 @@ func New(logger *slog.Logger, token, adminToken string, h *handlers.Handler, tog
 
 	admin := r.Group("/admin")
 	admin.Use(auth.RequireBearer(adminToken))
-	admin.POST("/schema-version", handlers.AdminSchemaVersion(toggles))
+	admin.POST("/schema-version", h.AdminSchemaVersion)
 	admin.POST("/outage", handlers.AdminOutage(toggles))
 
 	return r

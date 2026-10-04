@@ -36,6 +36,14 @@ Everything else (Auth internals, Consumer internals) stays inside one person's o
 
 `source_status.PVMBG` becomes `{"state":"stale","stale_since":"<ISO8601>"}` during an outage, including when the result has no volcanic rows. Client-API forwards this metadata outside the hazard objects, so Media can see availability without seeing raw `attributes`.
 
+Renaming or removing a required field is a breaking contract change. The
+Client API rejects an Aggregator response missing a required canonical field
+and returns `503`; it does not substitute a Go zero value. Likewise, the
+Aggregator rejects source records missing fields its mapping requires. Extra
+source fields without a canonical top-level mapping enter `attributes`, so
+additive source fields do not require an Aggregator redeploy. Client API
+projects Media responses from an explicit summary field list.
+
 **Pagination:** not required for M1's data volumes (≥20 seed records per source, low event rate) — explicitly out of scope. If the list grows large during testing, add `limit`/`offset` later without breaking existing callers (additive query params only).
 
 ## Contract 1: staleness & degraded-state representation
@@ -111,13 +119,13 @@ Both examples forward the correlation ID per the logging conventions doc — thi
 
 **Decision: NATS + JetStream.** NATS has the lowest setup and resource footprint in the comparison above, while JetStream provides the durable stream, replay, and explicit-ack behavior required for at-least-once delivery. The broker image extends official `nats:2.15.0-alpine3.22`, mounts `broker/nats.conf` read-only to enable JetStream, and initializes the stream on each start. The separate `broker-init` service remains available for manual reinitialization. The Go client is `github.com/nats-io/nats.go`.
 
-**Subject name:** `hazard.events` (single subject; consumers filter by `hazard_type` client-side rather than using separate subjects per hazard type — keeps the fan-out story simple for P5's "add a consumer without touching the producer" requirement).
+**Subject name:** configured by `NATS_SUBJECT` (the example is `hazard.events`). Consumers filter by `hazard_type` after decoding. The stream name is configured by `NATS_STREAM`; neither has a code default.
 
-**Stream and subject structure:** create one durable JetStream stream for `hazard.events`; no partitioning is required for M1's event rate. If ordering per-area ever matters later, subjects such as `hazard.events.<hazard_type>` allow wildcard subscriptions without changing the producer contract.
+**Stream and subject structure:** create one durable JetStream stream for the configured subject; no partitioning is required for M1's event rate.
 
 ## Contract 2: message envelope
 
-Publish the raw `HazardEvent` (exact shape from the wire format spec) wrapped in a thin envelope carrying delivery metadata that isn't part of the domain object itself:
+Publish the `HazardEvent` in an Avro record wrapped in a thin envelope carrying delivery metadata. The registry subject is `<NATS_SUBJECT>-value` and uses `FULL_TRANSITIVE` compatibility. Each NATS message starts with a zero magic byte and a four-byte schema ID, followed by an Avro datum. Resolve the ID through Apicurio's Confluent-compatible API before decoding. The logical value is:
 
 ```json
 {
@@ -131,7 +139,7 @@ Publish the raw `HazardEvent` (exact shape from the wire format spec) wrapped in
 - `envelope_version`: lets the envelope shape change later without guessing from message content — start at `1`, bump only on a breaking envelope change (not on `HazardEvent` field additions, which are already handled by the wire spec's additive-field policy)
 - `published_at`: broker-level publish timestamp, distinct from the event's own `ingested_at`
 - `correlation_id`: propagates the ID from whichever poll cycle produced this event, so a consumer's log line can be grepped against the Aggregator's log for the same event
-- `payload`: unwrapped, it's byte-identical to a `HazardEvent` documented in the wire format spec — consumers reuse the exact same `HazardEvent` struct/model from that spec to deserialize it, no separate parsing logic
+- `payload`: the canonical `HazardEvent` fields; `attributes` is an Avro `map<string, bytes>` whose values are individual JSON-encoded attribute values. Consumers decode each value to recover its string, number, or boolean type. The Aggregator read API and Client API continue to use the JSON representation in the wire format spec.
 
 ## Contract 2: delivery semantics & idempotency
 
@@ -139,64 +147,41 @@ Publish the raw `HazardEvent` (exact shape from the wire format spec) wrapped in
 
 Why at-least-once over at-most-once: P5's criterion 3 explicitly requires explaining what happens to events published while a consumer was down ("tersusul atau hilang sesuai konfigurasi broker") — at-least-once with a durable JetStream stream and consumer means a reconnecting consumer catches up on missed events, which is both the safer default for a disaster-coordination system (losing a tsunami warning silently is bad) and gives a clean, demoable answer to that criterion.
 
-**Consequence: every consumer must be idempotent.** A message can be delivered more than once (e.g. consumer acks, then crashes before committing its own side-effect, broker redelivers). Both consumers should key on `payload.hazard_id` to detect duplicates:
+**Consequence: every consumer must be idempotent.** A message can be delivered more than once (e.g. the SQLite commit succeeds, then the consumer crashes before its ack is confirmed). Both consumers persist the broker stream sequence and payload digest in the same SQLite transaction as their local effect. They also keep `payload.hazard_id` unique:
 
-- **Dashboard updater:** upsert by `hazard_id` (safe by construction — applying the same update twice is a no-op)
-- **Notifier:** keep a small "already notified" set/table keyed by `hazard_id` (+ maybe `envelope.published_at` if the same hazard can legitimately update twice) and skip sending a duplicate notification
+- **Dashboard updater:** insert each immutable hazard once; a changed event with the same ID requires a versioning contract
+- **Notifier:** record one local notification summary per hazard; a future external sender requires an outbox and receiver-side idempotency
 
 This is worth stating explicitly in the report per P5's criterion 5 ("apakah consumer perlu bersifat idempoten dan bagaimana kelompok menyikapinya") — it's a direct rubric line, not just good practice.
 
-## Contract 2: publish/consume examples
+## Contract 2: publish/consume sequence
 
-**Go (Aggregator publishing, Anggota 1):**
+The Aggregator serializes the envelope with its registered Avro schema and
+publishes it on `NATS_SUBJECT`, using `hazard_id` as the JetStream message ID.
+If the registry has never been available, the publisher keeps the JSON outbox
+row pending and retries registration. Once registered, it can continue using
+its cached ID and codec during a registry outage.
 
-```go
-type Envelope struct {
-	EnvelopeVersion int         `json:"envelope_version"`
-	PublishedAt     time.Time   `json:"published_at"`
-	CorrelationID   string      `json:"correlation_id"`
-	Payload         HazardEvent `json:"payload"`
-}
+A consumer reads the frame's schema ID, resolves the writer schema from the
+registry (or a previously cached copy), decodes the Avro record, then decodes
+each `attributes` value as JSON. It deduplicates by stream sequence and hazard ID and acknowledges
+only after its own processing succeeds. An unknown ID during a registry outage
+must remain unacknowledged for retry.
 
-func PublishHazard(ctx context.Context, js jetstream.JetStream, event HazardEvent, cid string) error {
-	env := Envelope{
-		EnvelopeVersion: 1,
-		PublishedAt:     time.Now().UTC(),
-		CorrelationID:   cid,
-		Payload:         event,
-	}
-	data, _ := json.Marshal(env)
-	_, err := js.Publish(ctx, "hazard.events", data)
-	return err
-}
-```
-
-**Go (Consumer, Anggota 3):**
-
-```go
-func HandleMessage(ctx context.Context, msg jetstream.Msg) error {
-    var envelope Envelope
-    if err := json.Unmarshal(msg.Data(), &envelope); err != nil {
-        return err // leave unacked so the failure is visible and retryable
-    }
-
-    hazard := envelope.Payload
-    if alreadyProcessed(hazard.HazardID) {
-        return msg.Ack() // duplicate; settle it after the idempotency check
-    }
-
-    if err := upsertDashboardRow(ctx, hazard); err != nil {
-        return err // no ack; JetStream redelivers it
-    }
-    if err := markProcessed(ctx, hazard.HazardID); err != nil {
-        return err // no ack; JetStream redelivers it
-    }
-    return msg.Ack() // explicit ack only after successful processing
-    // Consumer configuration uses a durable name and AckExplicit policy.
-}
-```
-
-Both sides depend only on the envelope shape and the `HazardEvent` shape from the wire format spec — neither needs to know anything about the other's internal code.
+The dashboard and notifier are separate durable JetStream consumers with their
+own SQLite volumes. Each commits `(stream, sequence, payload digest)` in the
+same transaction as its projection and confirms the JetStream ack; redelivery
+only repeats the ack. Validated writer schemas are cached in SQLite by registry
+URL and ID. A registry outage triggers a fetch cooldown and delayed retry.
+Unknown IDs have a persisted five-minute retry window with capped backoff; a
+burst of ten distinct unknown messages per minute pauses the consumer for
+operator investigation. Corrupt Avro is sent to the consumer's DLQ subject;
+unsupported registered schemas halt the consumer. SQLite busy/locked retries,
+environmental failures halt, and isolated constraints have a bounded DLQ
+policy. The original delivery is acknowledged only after JetStream confirms
+the DLQ publication. Later valid messages can be processed while a single
+unknown ID waits, up to the durable consumer's pending limit. `MaxDeliver=-1`
+keeps broker delivery attempts from ending before the application policy does.
 
 ## Open decisions to confirm as a team
 
@@ -208,7 +193,7 @@ Both sides depend only on the envelope shape and the `HazardEvent` shape from th
 
 - [ ] Anggota 2's Client-API can call `GET /internal/hazards` against a running Aggregator and parse the `data`/`count`/`as_of` envelope
 - [ ] Anggota 2's Client-API correctly surfaces `attributes.stale`/`stale_since` as an explicit client-facing status, not passed through silently
-- [ ] Anggota 1's Aggregator publishes to `hazard.events` in the envelope shape above, verified by Anggota 3 subscribing with a throwaway test consumer
-- [ ] Anggota 3's consumers deserialize `payload` using the same `HazardEvent` model from the wire format spec (no separate ad hoc parsing)
-- [ ] Both consumers (dashboard updater, notifier) key on `hazard_id` for dedup and can be shown handling a redelivered/duplicate message without double-applying it
-- [ ] Correlation ID from the envelope shows up in both the Aggregator's publish log line and the consumer's processing log line for the same event
+- [x] Anggota 1's Aggregator publishes Avro to `NATS_SUBJECT` in the envelope shape above, verified by a consumer that resolves the schema ID
+- [x] Anggota 3's consumers deserialize `payload` using the same `HazardEvent` model from the wire format spec (no separate ad hoc parsing)
+- [x] Both consumers (dashboard updater, notifier) key on `hazard_id` for dedup and can be shown handling a redelivered/duplicate message without double-applying it
+- [x] Correlation ID from the envelope shows up in both the Aggregator's publish log line and the consumer's processing log line for the same event

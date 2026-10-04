@@ -43,6 +43,35 @@ services:
       retries: 10
     networks: [store]
 
+  registry-db:
+    image: postgres:16-alpine3.24
+    env_file:
+      - ./registry/.env
+    volumes:
+      - registry-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [registry]
+
+  schema-registry:
+    build: ./registry
+    env_file:
+      - ./registry/.env
+    depends_on:
+      registry-db:
+        condition: service_healthy
+    ports:
+      - "8084:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:9000/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [backend, registry]
+
   bmkg-mock:
     build: ./bmkg-mock
     ports: ["8081:8081"]
@@ -112,12 +141,62 @@ services:
       - ./client-tui/.env
     networks: [client]
 
+  consumer-dashboard:
+    build: ./consumer-dashboard
+    env_file:
+      - ./consumer-dashboard/.env
+    volumes:
+      - dashboard-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$CONSUMER_PORT/ready\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+
+  consumer-notifier:
+    build: ./consumer-notifier
+    env_file:
+      - ./consumer-notifier/.env
+    volumes:
+      - notifier-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$CONSUMER_PORT/ready\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+
+  consumer-dashboard-demo:
+    build: ./consumer-dashboard
+    profiles: [consumer-demo]
+    env_file:
+      - ./consumer-dashboard/.env
+    environment:
+      NATS_DURABLE: dashboard-demo-v1
+      CONSUMER_PORT: "8093"
+      CONSUMER_DB_PATH: /data/demo.db
+      NATS_DLQ_SUBJECT: hazard.dlq.dashboard-demo
+    volumes:
+      - dashboard-demo-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8093/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [backend]
+
 volumes:
   nats-data:
   postgres-data:
   auth-data:
+  registry-data:
+  dashboard-data:
+  notifier-data:
+  dashboard-demo-data:
 
 networks:
   backend:
   store:
   client:
+  registry:

@@ -6,6 +6,7 @@ package poller
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -66,12 +67,12 @@ func (p *Poller) PollBMKGOnce(ctx context.Context) {
 
 	events, err := p.BMKG.FetchSeismicEvents(ctx, cid, time.Time{})
 	if err != nil {
-		p.Logger.Warn("bmkg poll failed", "service", "aggregator", "correlation_id", cid, "error", err.Error())
+		p.logSourceFailure("bmkg", cid, err)
 		return
 	}
 	warnings, err := p.BMKG.FetchTsunamiWarnings(ctx, cid, time.Time{})
 	if err != nil {
-		p.Logger.Warn("bmkg poll failed", "service", "aggregator", "correlation_id", cid, "error", err.Error())
+		p.logSourceFailure("bmkg", cid, err)
 		return
 	}
 
@@ -92,8 +93,7 @@ func (p *Poller) PollPVMBGOnce(ctx context.Context) {
 		// A PVMBG outage/timeout is a handled, expected degradation: warn,
 		// not error. BMKG polling above is entirely unaffected by this.
 		p.Status.MarkUnhealthy(domain.Now())
-		p.Logger.Warn("pvmbg unreachable, serving last-known volcanic data",
-			"service", "aggregator", "correlation_id", cid, "error", err.Error())
+		p.logSourceFailure("pvmbg", cid, err)
 		return
 	}
 	p.Status.MarkHealthy()
@@ -109,6 +109,14 @@ func (p *Poller) PollPVMBGOnce(ctx context.Context) {
 	}
 	p.Logger.Info("polled pvmbg", "service", "aggregator", "correlation_id", cid,
 		"fetched", len(reports), "new_hazards", inserted)
+}
+
+func (p *Poller) logSourceFailure(source, correlationID string, err error) {
+	if errors.Is(err, clients.ErrContractViolation) {
+		p.Logger.Error("source contract violation; poll rejected", "service", "aggregator", "source", source, "correlation_id", correlationID, "error", err.Error())
+		return
+	}
+	p.Logger.Warn("source unavailable; poll skipped", "service", "aggregator", "source", source, "correlation_id", correlationID, "error", err.Error())
 }
 
 // saveAndQueue deduplicates on (source, source_ref_id). The Store atomically

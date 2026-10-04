@@ -23,6 +23,7 @@ type api struct {
 type logger interface {
 	Info(string, ...any)
 	Warn(string, ...any)
+	Error(string, ...any)
 }
 
 var errUpstream = errors.New("upstream unavailable")
@@ -63,6 +64,7 @@ func (a *api) call(c *gin.Context, service, method, endpoint string, payload any
 	if output != nil && resp.StatusCode == http.StatusOK {
 		decoder := json.NewDecoder(io.LimitReader(resp.Body, 4<<20))
 		if err := decoder.Decode(output); err != nil {
+			a.log.Error("upstream contract violation", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "error", err.Error())
 			return resp.StatusCode, fmt.Errorf("decode %s response: %w", service, err)
 		}
 	}
