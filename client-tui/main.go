@@ -217,8 +217,10 @@ func (a *app) requestRaw() {
 		} else if err := json.Unmarshal(data, &result); err != nil {
 			fmt.Println("Respons tidak valid:", err)
 		} else if len(result.Data) > 0 {
-			fmt.Println("Contoh data raw:")
-			fmt.Println(pretty(result.Data[0]))
+			fmt.Printf("Data raw: %d hazard\n", len(result.Data))
+			for i, item := range result.Data {
+				fmt.Printf("\n[%d/%d]\n%s\n", i+1, len(result.Data), pretty(item))
+			}
 		} else {
 			fmt.Println("Data kosong")
 		}
