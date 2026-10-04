@@ -1,9 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 	"pvmbg-mock/internal/avrowire"
 	"pvmbg-mock/internal/domain"
 	"pvmbg-mock/internal/middleware"
+	"pvmbg-mock/internal/seed"
 	"pvmbg-mock/internal/state"
 	"pvmbg-mock/internal/timeutil"
 )
@@ -23,8 +27,9 @@ type Handler struct {
 	MaxDelayMs  int
 	rng         *rand.Rand
 	Registry    *avrowire.Client
-	schemaMu    sync.RWMutex
+	schemaMu    sync.RWMutex // guards Reports, activations, liveIDs
 	activations int
+	liveIDs     []string
 }
 
 func New(reports []domain.VolcanicReport, toggles *state.Toggles, minDelayMs, maxDelayMs int) *Handler {
@@ -34,6 +39,48 @@ func New(reports []domain.VolcanicReport, toggles *state.Toggles, minDelayMs, ma
 		MinDelayMs: minDelayMs,
 		MaxDelayMs: maxDelayMs,
 		rng:        rand.New(rand.NewSource(time.Now().UnixNano())),
+	}
+}
+
+// maxLive bounds the generated reports kept in memory. The Aggregator
+// re-fetches the whole dataset on every poll, so it must not grow forever;
+// evicted reports have already been ingested. Seed and schema-toggle
+// reports are never evicted.
+const maxLive = 100
+
+// AddReport appends a generated report, evicting the oldest generated one
+// once maxLive is exceeded.
+func (h *Handler) AddReport(r domain.VolcanicReport) {
+	h.schemaMu.Lock()
+	defer h.schemaMu.Unlock()
+	h.Reports = append(h.Reports, r)
+	h.liveIDs = append(h.liveIDs, r.ReportID)
+	if len(h.liveIDs) <= maxLive {
+		return
+	}
+	oldest := h.liveIDs[0]
+	h.liveIDs = h.liveIDs[1:]
+	h.Reports = slices.DeleteFunc(h.Reports, func(r domain.VolcanicReport) bool { return r.ReportID == oldest })
+}
+
+// RunGenerator adds one new volcanic report per interval until ctx is
+// cancelled. It keeps running during an outage, which only blocks the data
+// endpoint, so the Aggregator catches up once the outage ends.
+func (h *Handler) RunGenerator(ctx context.Context, interval time.Duration, logger *slog.Logger) {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	boot := time.Now().Unix()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for n := 1; ; n++ {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			r := seed.NextReport(boot, n, now.UTC(), rng)
+			h.AddReport(r)
+			logger.Info("generated volcanic report", "service", "pvmbg-mock",
+				"report_id", r.ReportID, "volcano_id", r.VolcanoID)
+		}
 	}
 }
 

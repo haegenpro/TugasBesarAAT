@@ -2,6 +2,7 @@ package handlers_test
 
 import (
 	"encoding/json"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -125,4 +126,45 @@ func TestDelayBehavior(t *testing.T) {
 	elapsed := time.Since(start)
 
 	assert.GreaterOrEqual(t, elapsed.Milliseconds(), int64(60))
+}
+
+func getSeismic(t *testing.T, r http.Handler, query string) []map[string]any {
+	req := httptest.NewRequest(http.MethodGet, "/seismic-events"+query, nil)
+	req.Header.Set("X-BMKG-Key", testKey)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	var events []map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &events))
+	return events
+}
+
+func TestGeneratedEvents_VisibleAndBounded(t *testing.T) {
+	events, warnings := seed.Build()
+	h := handlers.New(events, warnings, 0)
+	r := server.New(middleware.NewLogger(), testKey, h)
+	rng := rand.New(rand.NewSource(1))
+	now := time.Now().UTC()
+
+	first, warning := seed.NextEvent(1700000000, 1, now, rng)
+	h.AddEvent(first, warning)
+	assert.Len(t, getSeismic(t, r, ""), 21)
+
+	recent := getSeismic(t, r, "?since="+now.Add(-time.Minute).Format(time.RFC3339))
+	require.Len(t, recent, 1)
+	assert.Equal(t, first.EventID, recent[0]["event_id"])
+
+	// Past the cap the oldest generated event is evicted; seed events stay.
+	for n := 2; n <= 105; n++ {
+		ev, w := seed.NextEvent(1700000000, n, now, rng)
+		h.AddEvent(ev, w)
+	}
+	all := getSeismic(t, r, "")
+	assert.Len(t, all, 120)
+	ids := map[string]bool{}
+	for _, e := range all {
+		ids[e["event_id"].(string)] = true
+	}
+	assert.False(t, ids[first.EventID])
+	assert.True(t, ids["evt-00001"])
 }

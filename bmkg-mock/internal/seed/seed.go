@@ -1,8 +1,11 @@
-// Package seed builds deterministic historical BMKG data at boot.
+// Package seed builds deterministic historical BMKG data at boot and the
+// live events generated while the mock runs.
 package seed
 
 import (
 	"fmt"
+	"math"
+	"math/rand"
 	"time"
 
 	"bmkg-mock/internal/domain"
@@ -25,6 +28,46 @@ var zones = [][]string{
 
 // Base epoch for deterministic seed timestamps: 2026-08-01T00:00:00Z.
 var base = time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+
+// NextEvent builds the n-th live seismic event occurring at now, plus its
+// tsunami warning when the event has tsunami potential. boot (the process
+// start time) keeps IDs unique across restarts, since the Aggregator
+// deduplicates on event_id.
+func NextEvent(boot int64, n int, now time.Time, rng *rand.Rand) (domain.SeismicEvent, *domain.TsunamiWarning) {
+	// Squaring skews the distribution toward small quakes.
+	x := rng.Float64()
+	mag := math.Round((3.0+4.5*x*x)*10) / 10
+	region := rng.Intn(len(regions))
+
+	ev := domain.SeismicEvent{
+		EventID:          fmt.Sprintf("evt-%d-%05d", boot, n),
+		Magnitude:        mag,
+		DepthKM:          10 + float64(rng.Intn(8))*7.5,
+		EpicenterLat:     -6.0 - float64(rng.Intn(10))*0.35,
+		EpicenterLon:     104.5 + float64(rng.Intn(12))*1.1,
+		RegionName:       regions[region],
+		OccurredAt:       timeutil.New(now),
+		PotentialTsunami: mag >= 6.0 && rng.Intn(3) != 0,
+	}
+	if !ev.PotentialTsunami {
+		return ev, nil
+	}
+
+	level := domain.ThreatWaspada
+	switch {
+	case mag >= 7.0:
+		level = domain.ThreatAwas
+	case mag >= 6.5:
+		level = domain.ThreatSiaga
+	}
+	return ev, &domain.TsunamiWarning{
+		WarningID:        fmt.Sprintf("warn-%d-%05d", boot, n),
+		RelatedEventID:   ev.EventID,
+		ThreatLevel:      level,
+		AffectedZones:    zones[region%len(zones)],
+		EstimatedArrival: timeutil.New(now.Add(45 * time.Minute)),
+	}
+}
 
 // Build returns 20 deterministic seismic events and a set of tsunami warnings
 // related to some of them, spanning magnitudes below 5.0, 5.0-6.5, and >=6.5,
