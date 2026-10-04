@@ -21,6 +21,8 @@ export const options = {
   summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
   thresholds: {
     unexpected_errors: ['count>=0'],
+    controlled_rejections_429: ['count>=0'],   // forces the counter to print even when 0
+    ...(MODE === 'mixed' ? { 'http_req_duration{kind:volcanic}': ['p(95)>=0'] } : {}), // forces a volcanic line in the summary
     ...(MODE === 'mixed' ? { 'http_req_duration{kind:seismic}': ['p(95)<300'] } : {}),
     http_req_failed: ['rate<0.01'],
   },

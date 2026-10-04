@@ -22,8 +22,11 @@ Every step has:
 | 6. Concurrency & availability | P2.1 to P2.3 | edits `pvmbg-mock/.env`, toggles outage |
 | 7. Reset | - | restores config |
 
-Evidence: everything piped through `tee` / `Tee-Object` goes to `evidence/`.
-Add `evidence/` to `.gitignore` (it will contain log excerpts and tokens' metadata).
+Evidence: **every numbered step is captured to `evidence/<step>.txt` as UTF-8** by running
+`step <id>` first (see 0.3). Some steps also write named files (`1.3-volcanic-before.json`,
+`*-started-before/after.txt`, ...) that later steps compare against. Add `evidence/` to
+`.gitignore` (log excerpts; never print login JSON, it contains tokens). Appendix C lists
+every file a complete run must produce.
 
 ---
 
@@ -148,11 +151,44 @@ echo '{"a":{"b":[1,2]}}' | jget a.b.1                            # => 2
 $BmkgKey.Length; $Creds.FIELD.id                                 # non-empty
 ```
 
+### 0.3 Evidence capture (paste once per terminal, after 0.2)
+
+Windows PowerShell's `Tee-Object` and `>` write **UTF-16**, which breaks `grep`/diff and
+turns box-drawing tables into garbage. It also prints a red `NativeCommandError` for
+docker's progress output (stderr) when you use `2>&1`; the containers are fine, but it
+pollutes the evidence. The helpers below fix both and make `step <id>` capture a whole step.
+
+**Bash**:
+
+```bash
+exec 3>&1 4>&2                                                   # remember the real terminal
+step(){ exec 1>&3 2>&4; sleep 0.3; exec > >(tee "evidence/$1.txt") 2>&1; echo "### step $1  $(date -Is)"; }
+endstep(){ exec 1>&3 2>&4; }                                     # stop capturing
+```
+
+**PowerShell**:
+
+```powershell
+function Tee8($f){ begin{ $p="evidence/$f"; '' | Out-File $p -Encoding utf8 -NoNewline }       # UTF-8 tee
+                   process{ $_ | Out-File $p -Append -Encoding utf8; $_ } }
+function Step($id){ try{Stop-Transcript | Out-Null}catch{}; Start-Transcript -Path "evidence/$id.txt" -Force | Out-Null; "### step $id" }
+function EndStep { try{Stop-Transcript | Out-Null}catch{} }
+```
+
+`Step` uses a PowerShell transcript (UTF-8, records native-command output). If a transcript
+file comes out empty, wrap the step with `Tee8` instead. Run `endstep` / `EndStep` when
+finished; every `Step` call closes the previous capture.
+
+**Desired state:** after `step 1.1` (or `Step 1.1`) the file `evidence/1.1.txt` exists, opens
+as readable text in any editor, and the header line `### step 1.1` is the first line.
+
 ---
 
 ## Phase 1: Clean boot & baseline (Ketentuan 3 and 7, P1.1)
 
 ### 1.1 Start the whole system with one command
+
+> Capture: run `step 1.1` first. Output is saved to `evidence/1.1.txt`.
 
 > Only run `down -v` if you want a pristine database (it **deletes all volumes**:
 > canonical store, auth sessions, consumer SQLite, registry). Skip it to keep data.
@@ -165,9 +201,9 @@ docker compose ps --format 'table {{.Service}}\t{{.Status}}' | tee evidence/1.1-
 ```
 ```powershell
 docker compose down -v
-docker compose up -d --build 2>&1 | Tee-Object evidence/1.1-up.txt
+docker compose up -d --build 2>&1 | ForEach-Object { "$_" } | Tee8 1.1-up.txt
 do { Start-Sleep 3; $bad = docker compose ps --format '{{.Health}}' | Where-Object { $_ -ne 'healthy' } } while ($bad)
-docker compose ps --format 'table {{.Service}}\t{{.Status}}' | Tee-Object evidence/1.1-ps.txt
+docker compose ps --format 'table {{.Service}}\t{{.Status}}' | Tee8 1.1-ps.txt
 ```
 
 **Desired state:** exactly 11 containers, all `healthy`: `broker, postgres,
@@ -176,6 +212,8 @@ client-api, consumer-dashboard, consumer-notifier`. The one command is
 `docker compose up -d --build`. **Criterion:** Ketentuan 3.
 
 ### 1.2 Health endpoints
+
+> Capture: run `step 1.2` first. Output is saved to `evidence/1.2.txt`.
 
 ```bash
 for u in $BMKG/health $PVMBG/health $API/health $API/ready; do echo "$u -> $(code $u)"; done
@@ -188,6 +226,8 @@ foreach ($u in "$BmkgUrl/health","$PvmbgUrl/health","$API/health","$API/ready") 
 are reachable. **Criterion:** Ketentuan 7.
 
 ### 1.3 P1.1: normal aggregation on the *old* PVMBG schema
+
+> Capture: run `step 1.3` first. Output is saved to `evidence/1.3.txt`.
 
 Save a snapshot of the volcanic data **before** any schema change; Phase 2 and
 Phase 5 compare against it.
@@ -208,7 +248,7 @@ $v = Invoke-RestMethod -Uri "$PvmbgUrl/volcanic-reports" -Headers @{Authorizatio
 $v.Count                                                                                                    # => 20
 $v[0] | ConvertTo-Json                                                                                      # no confidence_level
 (Agg '/internal/hazards').count                                                                             # => 40
-$vb = Agg '/internal/hazards?hazard_type=VOLCANIC'; $vb | ConvertTo-Json -Depth 8 | Set-Content evidence/1.3-volcanic-before.json
+$vb = Agg '/internal/hazards?hazard_type=VOLCANIC'; $vb | ConvertTo-Json -Depth 8 | Set-Content evidence/1.3-volcanic-before.json -Encoding utf8
 $vb.data[0] | ConvertTo-Json -Depth 5
 (Agg '/internal/hazards?hazard_type=SEISMIC').data[0] | ConvertTo-Json -Depth 5
 ```
@@ -224,6 +264,8 @@ $vb.data[0] | ConvertTo-Json -Depth 5
 
 ### 1.4 Correlation ID flows across services (Ketentuan 7)
 
+> Capture: run `step 1.4` first. Output is saved to `evidence/1.4.txt`.
+
 ```bash
 CID=demo-corr-$(date +%s)
 T=$(login "$FIELD_ID" "$FIELD_SECRET" "$CID" | jget access_token)
@@ -234,7 +276,7 @@ docker compose logs client-api auth-service aggregator 2>&1 | grep "$CID" | tee 
 $cid = "demo-corr-$([int](Get-Date -UFormat %s))"
 $t = (Login $Creds.FIELD.id $Creds.FIELD.secret $cid).access_token
 $null = Hz $t '/hazards' $cid
-docker compose logs client-api auth-service aggregator 2>&1 | Select-String $cid | Tee-Object evidence/1.4-correlation.txt
+docker compose logs client-api auth-service aggregator 2>&1 | Select-String $cid | Tee8 1.4-correlation.txt
 ```
 
 **Desired state:** JSON log lines containing the **same** `correlation_id` from
@@ -250,16 +292,20 @@ phase, first run Phase 1 again (the toggle is in-memory).
 
 ### 2.1 Record process start times (to prove "no restart")
 
+> Capture: run `step 2.1` first. Output is saved to `evidence/2.1.txt`.
+
 ```bash
 started | tee evidence/2.1-started-before.txt
 ```
 ```powershell
-Started | Tee-Object evidence/2.1-started-before.txt
+Started | Tee8 2.1-started-before.txt
 ```
 
 **Desired state:** one line per container with its `StartedAt`.
 
 ### 2.2 Trigger the schema change while the system runs
+
+> Capture: run `step 2.2` first. Output is saved to `evidence/2.2.txt`.
 
 ```bash
 curl -s -X POST -H "Authorization: Bearer $PVMBG_ADMIN" $PVMBG/admin/schema-version
@@ -277,6 +323,8 @@ PVMBG now emits `confidence_level`; the response also contains a new report
 
 ### 2.3 Aggregator still produces valid HazardEvents, with the new field policy
 
+> Capture: run `step 2.3` first. Output is saved to `evidence/2.3.txt`.
+
 ```bash
 sleep 8
 agg '/internal/hazards?hazard_type=VOLCANIC' | jfind data source_ref_id rep-schema-00001 | tee evidence/2.3-new-report.json
@@ -285,7 +333,7 @@ agg '/internal/hazards?hazard_type=VOLCANIC' | jget count
 ```powershell
 Start-Sleep 8
 $va = Agg '/internal/hazards?hazard_type=VOLCANIC'
-$va.data | Where-Object source_ref_id -eq 'rep-schema-00001' | ConvertTo-Json -Depth 6 | Tee-Object evidence/2.3-new-report.json
+$va.data | Where-Object source_ref_id -eq 'rep-schema-00001' | ConvertTo-Json -Depth 6 | Tee8 2.3-new-report.json
 $va.count
 ```
 
@@ -300,6 +348,8 @@ $va.count
 
 ### 2.4 No crash, no restart, no manual code change
 
+> Capture: run `step 2.4` first. Output is saved to `evidence/2.4.txt`.
+
 ```bash
 started > evidence/2.4-started-after.txt
 diff evidence/2.1-started-before.txt evidence/2.4-started-after.txt && echo "NO RESTART"
@@ -307,7 +357,7 @@ docker compose logs aggregator --since 3m 2>&1 | grep -ci 'contract violation'  
 docker compose ps --format '{{.Service}} {{.Health}}' | grep -v healthy || echo "ALL HEALTHY"
 ```
 ```powershell
-Started | Set-Content evidence/2.4-started-after.txt
+Started | Set-Content evidence/2.4-started-after.txt -Encoding utf8
 if (-not (Compare-Object (Get-Content evidence/2.1-started-before.txt) (Get-Content evidence/2.4-started-after.txt))) { 'NO RESTART' }
 (docker compose logs aggregator --since 3m 2>&1 | Select-String 'contract violation').Count               # => 0
 docker compose ps --format '{{.Service}} {{.Health}}' | Where-Object { $_ -notmatch 'healthy' }          # => (nothing)
@@ -322,10 +372,12 @@ violations, nothing unhealthy. **Criterion:** P1.2, P1.3.
 
 ### 3.1 Credentials are isolated per institution (P3.1)
 
+> Capture: run `step 3.1` first. Output is saved to `evidence/3.1.txt`.
+
 Automated, one PASS/FAIL line per probe (Windows):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1 | Tee-Object evidence/3.1-isolation.txt
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1 | Tee8 3.1-isolation.txt
 ```
 
 Manual equivalent:
@@ -356,6 +408,8 @@ no-credential probe `401` or `403`; script ends `RESULT: PASS`. **Criterion:** P
 
 ### 3.2 Three genuinely different client identities
 
+> Capture: run `step 3.2` first. Output is saved to `evidence/3.2.txt`.
+
 ```bash
 MEDIA_J=$(login "$MEDIA_ID" "$MEDIA_SECRET");  FIELD_J=$(login "$FIELD_ID" "$FIELD_SECRET");  INT_J=$(login "$INTERNAL_ID" "$INTERNAL_SECRET")
 echo "$MEDIA_J" | jget role;  echo "$FIELD_J" | jget role;  echo "$INT_J" | jget role      # media / field / internal
@@ -372,6 +426,8 @@ $Media.role; $Field.role; $Internal.role                                        
 mixing one identity's ID with another's secret returns `401`. **Criterion:** P3 requirement 1.
 
 ### 3.3 Media sees only "Ringkasan" fields; raw is refused server-side (P3.2)
+
+> Capture: run `step 3.3` first. Output is saved to `evidence/3.3.txt`.
 
 ```bash
 echo "media keys:";    hz "$MEDIA_AT" '/hazards' | jkeys data.0
@@ -408,6 +464,8 @@ $hid = (Hz $Media.access_token '/hazards').data[0].hazard_id
 **Criterion:** P3.2.
 
 ### 3.4 Token expiry and refresh without manual re-login (P3.3)
+
+> Capture: run `step 3.4` first. Output is saved to `evidence/3.4.txt`.
 
 This step takes about 65 seconds on purpose (default TTL 60 s). Run it as one block.
 
@@ -458,6 +516,8 @@ Desired: final line `PASS: ...`. Note `-TestOutage` toggles PVMBG outage and res
 
 ### 3.5 No hardcoded or committed credentials (P3.4)
 
+> Capture: run `step 3.5` first. Output is saved to `evidence/3.5.txt`.
+
 ```bash
 git ls-files | grep -E '(^|/)\.env$' || echo "no .env tracked"                 # => no .env tracked
 test -f .env.example && echo ".env.example present"
@@ -492,13 +552,15 @@ Starting state: system healthy, schema toggle currently ON (v2) from Phase 2.
 
 ### 4.1 Two independent durable subscribers on one stream (P5.1, P5.2)
 
+> Capture: run `step 4.1` first. Output is saved to `evidence/4.1.txt`.
+
 ```bash
 nats stream info HAZARDS | head -30
 nats consumer report HAZARDS | tee evidence/4.1-consumers.txt
 ```
 ```powershell
 Nats stream info HAZARDS | Select-Object -First 30
-Nats consumer report HAZARDS | Tee-Object evidence/4.1-consumers.txt
+Nats consumer report HAZARDS | Tee8 4.1-consumers.txt
 ```
 
 **Desired state:** stream `HAZARDS` on subject `hazard.events`; two consumers
@@ -507,6 +569,8 @@ with **different durable names** (`dashboard-v1`, `notifier-v1`), both with
 references the consumers. **Criterion:** P5.1, P5.2.
 
 ### 4.2 One published event reaches both consumers
+
+> Capture: run `step 4.2` first. Output is saved to `evidence/4.2.txt`.
 
 ```bash
 B1=$(rec consumer-dashboard 8091 | jget count); B2=$(rec consumer-notifier 8092 | jget count); echo "before: dashboard=$B1 notifier=$B2"
@@ -528,6 +592,8 @@ you are near the cap compare `data.0.hazard_id` instead); the newest `hazard_id`
 **Criterion:** P5.2.
 
 ### 4.3 Stop one consumer: producer and the other consumer carry on (P5.3)
+
+> Capture: run `step 4.3` first. Output is saved to `evidence/4.3.txt`.
 
 ```bash
 docker compose stop consumer-notifier
@@ -557,6 +623,8 @@ durable cursor. **Criterion:** P5.3 (first half).
 
 ### 4.4 Restart it: backlog is delivered (no loss)
 
+> Capture: run `step 4.4` first. Output is saved to `evidence/4.4.txt`.
+
 ```bash
 docker compose start consumer-notifier
 until [ "$(docker compose ps consumer-notifier --format '{{.Health}}')" = healthy ]; do sleep 2; done; sleep 5
@@ -566,7 +634,7 @@ echo "dashboard=$(rec consumer-dashboard 8091 | jget count) notifier=$(rec consu
 ```powershell
 docker compose start consumer-notifier
 do { Start-Sleep 2 } until ((docker compose ps consumer-notifier --format '{{.Health}}') -eq 'healthy'); Start-Sleep 5
-Nats consumer report HAZARDS | Tee-Object evidence/4.4-consumers-after.txt
+Nats consumer report HAZARDS | Tee8 4.4-consumers-after.txt
 "dashboard=$((Rec consumer-dashboard 8091).count) notifier=$((Rec consumer-notifier 8092).count)"                  # equal
 ```
 
@@ -579,6 +647,8 @@ Semantics to state in the report: **at-least-once**, so consumers dedupe by
 
 ### 4.5 Add a third consumer without touching the producer (P5.4)
 
+> Capture: run `step 4.5` first. Output is saved to `evidence/4.5.txt`.
+
 ```bash
 started > evidence/4.5-started-before.txt
 docker compose --profile consumer-demo up -d consumer-dashboard-demo
@@ -590,7 +660,7 @@ started | grep -E 'aggregator' ; grep aggregator evidence/4.5-started-before.txt
 nats consumer report HAZARDS
 ```
 ```powershell
-Started | Set-Content evidence/4.5-started-before.txt
+Started | Set-Content evidence/4.5-started-before.txt -Encoding utf8
 docker compose --profile consumer-demo up -d consumer-dashboard-demo
 do { Start-Sleep 2 } until ((docker compose ps consumer-dashboard-demo --format '{{.Health}}') -eq 'healthy'); Start-Sleep 5
 "demo consumer records: $((Rec consumer-dashboard-demo 8093).count)"
@@ -613,11 +683,13 @@ Optional cleanup of the demo consumer: `docker compose --profile consumer-demo s
 
 ### 5.1 One container per component (P4.1, part 1)
 
+> Capture: run `step 5.1` first. Output is saved to `evidence/5.1.txt`.
+
 ```bash
 docker compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | tee evidence/5.1-containers.txt
 ```
 ```powershell
-docker compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | Tee-Object evidence/5.1-containers.txt
+docker compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' | Tee8 5.1-containers.txt
 ```
 
 **Desired state:** every component is its own container/image. Host-published ports are
@@ -626,6 +698,8 @@ only `8080` (client-api), `8081`, `8082`, `4222/8222` (broker), `8084` (registry
 
 ### 5.2 Stop, rebuild, restart ONE container, nothing else restarts (P4.1, part 2)
 
+> Capture: run `step 5.2` first. Output is saved to `evidence/5.2.txt`.
+
 Use two terminals. First make a trivial edit (e.g. a comment in
 `consumer-notifier/main.go`) so a **new image** is built.
 
@@ -633,11 +707,11 @@ Use two terminals. First make a trivial edit (e.g. a comment in
 
 ```bash
 while true; do T=$(login "$FIELD_ID" "$FIELD_SECRET" | jget access_token)
-  echo "$(date +%T) /hazards=$(code -H "Authorization: Bearer $T" $API/hazards) /health=$(code $API/health)"; sleep 2; done
+  echo "$(date +%T) /hazards=$(code -H "Authorization: Bearer $T" $API/hazards) /health=$(code $API/health)"; sleep 2; done | tee evidence/5.2-probe.txt
 ```
 ```powershell
-while ($true) { $t = (Login $Creds.FIELD.id $Creds.FIELD.secret).access_token
-  "$(Get-Date -f HH:mm:ss) /hazards=$(Code "$API/hazards" 'GET' @{Authorization="Bearer $t"}) /health=$(Code "$API/health")"; Start-Sleep 2 }
+& { while ($true) { $t = (Login $Creds.FIELD.id $Creds.FIELD.secret).access_token
+  "$(Get-Date -f HH:mm:ss) /hazards=$(Code "$API/hazards" 'GET' @{Authorization="Bearer $t"}) /health=$(Code "$API/health")"; Start-Sleep 2 } } | Tee8 5.2-probe.txt
 ```
 
 **Terminal B: rebuild only the notifier**
@@ -651,11 +725,11 @@ docker compose images consumer-notifier; started > evidence/5.2-started-after.tx
 diff evidence/5.2-started-before.txt evidence/5.2-started-after.txt          # ONLY consumer-notifier differs
 ```
 ```powershell
-Started | Set-Content evidence/5.2-started-before.txt; docker compose images consumer-notifier
+Started | Set-Content evidence/5.2-started-before.txt -Encoding utf8; docker compose images consumer-notifier
 docker compose stop consumer-notifier
 docker compose build consumer-notifier
 docker compose up -d --no-deps consumer-notifier
-docker compose images consumer-notifier; Started | Set-Content evidence/5.2-started-after.txt
+docker compose images consumer-notifier; Started | Set-Content evidence/5.2-started-after.txt -Encoding utf8
 Compare-Object (Get-Content evidence/5.2-started-before.txt) (Get-Content evidence/5.2-started-after.txt)   # ONLY consumer-notifier
 ```
 
@@ -668,6 +742,8 @@ Stop Terminal A with Ctrl+C. **Criterion:** P4.1.
 
 ### 5.3 Dynamic attributes stored without a migration (P4.2)
 
+> Capture: run `step 5.3` first. Output is saved to `evidence/5.3.txt`.
+
 ```bash
 sql "SELECT column_name, data_type FROM information_schema.columns WHERE table_name='hazard_events' ORDER BY ordinal_position;"
 sql "SELECT source_ref_id, (attributes ? 'confidence_level') AS has_confidence, attributes->>'confidence_level' AS confidence FROM hazard_events WHERE hazard_type='VOLCANIC' ORDER BY ingested_at;" | tee evidence/5.3-side-by-side.txt
@@ -677,7 +753,7 @@ git log --oneline -- store/init.sql                                      # no co
 ```
 ```powershell
 Sql "SELECT column_name, data_type FROM information_schema.columns WHERE table_name='hazard_events' ORDER BY ordinal_position;"
-Sql "SELECT source_ref_id, (attributes ? 'confidence_level') AS has_confidence, attributes->>'confidence_level' AS confidence FROM hazard_events WHERE hazard_type='VOLCANIC' ORDER BY ingested_at;" | Tee-Object evidence/5.3-side-by-side.txt
+Sql "SELECT source_ref_id, (attributes ? 'confidence_level') AS has_confidence, attributes->>'confidence_level' AS confidence FROM hazard_events WHERE hazard_type='VOLCANIC' ORDER BY ingested_at;" | Tee8 5.3-side-by-side.txt
 Sql "SELECT hazard_type, (attributes ? 'confidence_level') AS has_confidence, count(*) FROM hazard_events GROUP BY 1,2 ORDER BY 1,2;"
 git ls-files | Select-String -Pattern 'migrat'; 'checked migrations'
 git log --oneline -- store/init.sql
@@ -695,6 +771,8 @@ and updated, per the README), compare with the pre-toggle snapshot
 **Criterion:** P4.2.
 
 ### 5.4 Only the Aggregator can reach the Canonical Store (P4.3)
+
+> Capture: run `step 5.4` first. Output is saved to `evidence/5.4.txt`.
 
 ```bash
 docker network ls -q -f name=_store | xargs docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}'    # aggregator + postgres ONLY
@@ -727,6 +805,8 @@ toggles** (schema back to v1, outage off). Phase 7 restores the original values.
 
 ### 6.0 Force PVMBG to a fixed 3 s delay
 
+> Capture: run `step 6.0` first. Output is saved to `evidence/6.0.txt`.
+
 ```bash
 ORIG_MIN=$(envget pvmbg-mock/.env PVMBG_MIN_DELAY_MS); ORIG_MAX=$(envget pvmbg-mock/.env PVMBG_MAX_DELAY_MS); echo "original: $ORIG_MIN..$ORIG_MAX"
 sed -i.bak -e 's/^PVMBG_MIN_DELAY_MS=.*/PVMBG_MIN_DELAY_MS=3000/' -e 's/^PVMBG_MAX_DELAY_MS=.*/PVMBG_MAX_DELAY_MS=3000/' pvmbg-mock/.env && rm -f pvmbg-mock/.env.bak
@@ -746,8 +826,12 @@ Start-Sleep 5
 
 **Desired state:** PVMBG answers in about 3.0 s, BMKG in 0.05 to 0.15 s. Only `pvmbg-mock`
 was recreated. (Edit the file by hand if you prefer; the mock reads its delay from the file, not the shell.)
+**Keep `evidence/6.0.txt`**: it is the only proof that 6.1 ran against a 3 s PVMBG delay. If the
+PVMBG line shows anything other than about 3 s, stop and fix it before running k6.
 
 ### 6.1 P2.1: BMKG-only stays fast while PVMBG is slow
+
+> Capture: run `step 6.1` first. Output is saved to `evidence/6.1.txt`.
 
 **Quick manual look**: fire PVMBG-path requests and time a BMKG-only request in parallel:
 
@@ -777,7 +861,7 @@ docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal
 echo "k6 exit code: ${PIPESTATUS[0]}"
 ```
 ```powershell
-.\scripts\load-test.ps1 -Mode mixed -Vus 50 -Duration 65s 2>&1 | Tee-Object evidence/6.1-k6-mixed.txt
+.\scripts\load-test.ps1 -Mode mixed -Vus 50 -Duration 65s 2>&1 | ForEach-Object { "$_" } | Tee8 6.1-k6-mixed.txt
 "k6 exit code: $LASTEXITCODE"
 ```
 
@@ -785,7 +869,20 @@ echo "k6 exit code: ${PIPESTATUS[0]}"
 **`p(95) < 300ms`**, the threshold line is marked passed (`✓`), and k6 exits `0`.
 Record: p50/p95/p99 for `kind:seismic` and `kind:volcanic`, `http_reqs` rate. **Criterion:** P2.1.
 
+Notes from the first run (seismic p95 was 278 ms, only 22 ms under the limit):
+- **Thin margin.** Seismic and volcanic latencies are nearly equal because both read the Canonical
+  Store; what you measure is the Client API pipeline under load (auth introspection + aggregator),
+  not PVMBG isolation. Run it **twice** and keep both summaries (`6.1.txt`, then
+  `6.1-rerun.txt` via `step 6.1-rerun`). If p95 exceeds ~290 ms on the demo machine, lower `VUS`
+  (50 is the spec minimum) rather than demo at the edge.
+- **Negative `min` duration** (e.g. `min=-653984225ns`) in the k6 summary is a clock artifact of
+  Docker on Windows/WSL2 (VM clock drift), not an application fault; p95/p99 are unaffected. If it
+  shows up, mention it in the report. It is gone after `wsl --shutdown` and a Docker restart.
+- The summary now prints a `kind:volcanic` line as well as `kind:seismic` (see `scripts/load-test.js`).
+
 ### 6.2 P2.2: sustained load, 60 VUs for 70 s
+
+> Capture: run `step 6.2` first. Output is saved to `evidence/6.2.txt`.
 
 ```bash
 docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
@@ -794,7 +891,7 @@ docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal
 docker compose ps --format '{{.Service}} {{.Status}}' | grep -v healthy || echo "NO CRASH"
 ```
 ```powershell
-.\scripts\load-test.ps1 -Mode sustained -Vus 60 -Duration 70s 2>&1 | Tee-Object evidence/6.2-k6-sustained.txt
+.\scripts\load-test.ps1 -Mode sustained -Vus 60 -Duration 70s 2>&1 | ForEach-Object { "$_" } | Tee8 6.2-k6-sustained.txt
 docker compose ps --format '{{.Service}} {{.Health}}' | Where-Object { $_ -notmatch 'healthy' }     # => (nothing)
 ```
 
@@ -804,13 +901,49 @@ docker compose ps --format '{{.Service}} {{.Health}}' | Where-Object { $_ -notma
 **≥ 50** concurrent VUs. `unexpected_errors` is `0` (or negligible). No container restarted or
 became unhealthy.
 
-Optional, to *show* controlled rejection (P2.2 note): lower `CLIENT_API_MAX_INFLIGHT` in
-`client-api/.env` (e.g. `5`), `docker compose up -d --force-recreate --no-deps client-api`,
-repeat 6.2 with `VUS=300`/`-Vus 300`, and report the `429` count; error rate must still be < 1 %
-and `/health` must still answer. Restore the value afterwards.
 **Criterion:** P2.2.
 
+### 6.2b P2.2: show the controlled-rejection (429) path
+
+> Capture: run `step 6.2b` first. Output is saved to `evidence/6.2b.txt`.
+
+The first run produced no 429s, so the report had no evidence that overload is rejected
+instead of queued. Lower the in-flight cap, overload it, and report the count (the spec only
+excuses 429s if they are reported).
+
+```bash
+CAP_ORIG=$(envget client-api/.env CLIENT_API_MAX_INFLIGHT)
+sed -i.bak 's/^CLIENT_API_MAX_INFLIGHT=.*/CLIENT_API_MAX_INFLIGHT=5/' client-api/.env && rm -f client-api/.env.bak
+docker compose up -d --force-recreate --no-deps client-api; sleep 8
+docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
+  -e MODE=sustained -e VUS=300 -e DURATION=30s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
+  grafana/k6 run /scripts/load-test.js 2>&1 | tail -40
+echo "health under saturation: $(code $API/health)"                               # 200
+docker compose logs client-api --since 2m 2>&1 | grep -c 'request rejected'       # > 0
+# restore
+sed -i.bak "s/^CLIENT_API_MAX_INFLIGHT=.*/CLIENT_API_MAX_INFLIGHT=$CAP_ORIG/" client-api/.env && rm -f client-api/.env.bak
+docker compose up -d --force-recreate --no-deps client-api
+```
+```powershell
+$CapOrig = Get-EnvVal client-api/.env CLIENT_API_MAX_INFLIGHT
+(Get-Content client-api/.env) -replace '^CLIENT_API_MAX_INFLIGHT=.*','CLIENT_API_MAX_INFLIGHT=5' | Set-Content client-api/.env
+docker compose up -d --force-recreate --no-deps client-api; Start-Sleep 8
+.\scripts\load-test.ps1 -Mode sustained -Vus 300 -Duration 30s 2>&1 | ForEach-Object { "$_" } | Select-Object -Last 40
+"health under saturation: $(Code "$API/health")"                                  # 200
+(docker compose logs client-api --since 2m 2>&1 | Select-String 'request rejected').Count     # > 0
+(Get-Content client-api/.env) -replace '^CLIENT_API_MAX_INFLIGHT=.*',"CLIENT_API_MAX_INFLIGHT=$CapOrig" | Set-Content client-api/.env
+docker compose up -d --force-recreate --no-deps client-api
+```
+
+**Desired state:** k6 prints `controlled_rejections_429` **greater than 0** (that line is now
+always shown, even at 0); `http_req_failed` stays **< 1 %** (429 is an expected status in the
+script) and `unexpected_errors` is `0`; `/health` answers `200` during saturation; the Client API
+logs `request rejected`; no container crashes. The original cap is restored afterwards (check
+with `envget client-api/.env CLIENT_API_MAX_INFLIGHT`). **Criterion:** P2.2 (controlled rejection reported).
+
 ### 6.3 P2.3: PVMBG outage, graceful degradation, recovery without restart
+
+> Capture: run `step 6.3` first. Output is saved to `evidence/6.3.txt`.
 
 ```bash
 started > evidence/6.3-started-before.txt
@@ -819,7 +952,7 @@ echo "before: $(hz "$T" '/hazards?hazard_type=VOLCANIC' | jget source_status.PVM
 curl -s -X POST -H "Authorization: Bearer $PVMBG_ADMIN" -H 'Content-Type: application/json' -d '{"enabled":true}' $PVMBG/admin/outage     # {"outage":true}
 echo "PVMBG data direct: $(code -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports)  health: $(code $PVMBG/health)"   # 503 / 200
 sleep 12                                                                         # let the poller notice (<= poll interval + 3s delay)
-curl -s -w '\nHTTP %{http_code} in %{time_total}s\n' -H "Authorization: Bearer $T" "$API/hazards?hazard_type=VOLCANIC" | tee evidence/6.3-volcanic-during.txt | tail -3
+curl -s -w '\nHTTP %{http_code} in %{time_total}s\n' -H "Authorization: Bearer $T" "$API/hazards?hazard_type=VOLCANIC" | tee evidence/6.3-volcanic-during.json | tail -3
 curl -s -w '\nHTTP %{http_code} in %{time_total}s\n' -H "Authorization: Bearer $T" "$API/hazards?hazard_type=SEISMIC"  | tail -2
 hz "$T" '/hazards?hazard_type=VOLCANIC' | jget source_status
 docker compose logs aggregator --since 1m 2>&1 | grep '"level":"warn"' | grep -i pvmbg | head -3
@@ -831,22 +964,28 @@ hz "$T" '/hazards?hazard_type=VOLCANIC' | jget source_status.PVMBG.state        
 started > evidence/6.3-started-after.txt; diff evidence/6.3-started-before.txt evidence/6.3-started-after.txt && echo "NO RESTART"
 ```
 ```powershell
-Started | Set-Content evidence/6.3-started-before.txt
+Started | Set-Content evidence/6.3-started-before.txt -Encoding utf8
 $mt = (Login $Creds.MEDIA.id $Creds.MEDIA.secret).access_token
 "before: $((Hz $mt '/hazards?hazard_type=VOLCANIC').source_status.PVMBG.state)"                                       # fresh
 Invoke-RestMethod -Method Post -Uri "$PvmbgUrl/admin/outage" -Headers $AdminH -ContentType 'application/json' -Body '{"enabled":true}' | ConvertTo-Json -Compress   # {"outage":true}
 "PVMBG data direct: $(Code "$PvmbgUrl/volcanic-reports" 'GET' @{Authorization="Bearer $PvmbgToken"})  health: $(Code "$PvmbgUrl/health")"   # 503 / 200
 Start-Sleep 12
+$mh = @{Authorization="Bearer $mt"}
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$during = Hz $mt '/hazards?hazard_type=VOLCANIC'; "volcanic answered in $($sw.ElapsedMilliseconds) ms, count=$($during.count)"
-$during.source_status | ConvertTo-Json -Depth 4 | Tee-Object evidence/6.3-volcanic-during.txt
-$sw.Restart(); $seis = Hz $mt '/hazards?hazard_type=SEISMIC'; "seismic answered in $($sw.ElapsedMilliseconds) ms, count=$($seis.count)"
+$during = Invoke-WebRequest -UseBasicParsing -Uri "$API/hazards?hazard_type=VOLCANIC" -Headers $mh
+"volcanic: HTTP $($during.StatusCode) in $($sw.ElapsedMilliseconds) ms"            # 200, well under 1 s
+$during.Content | Out-File evidence/6.3-volcanic-during.json -Encoding utf8     # keep the full body (stale_since, rows)
+($during.Content | ConvertFrom-Json).source_status | ConvertTo-Json -Depth 4
+$sw.Restart(); $seis = Invoke-WebRequest -UseBasicParsing -Uri "$API/hazards?hazard_type=SEISMIC" -Headers $mh
+"seismic:  HTTP $($seis.StatusCode) in $($sw.ElapsedMilliseconds) ms"
+($seis.Content | ConvertFrom-Json).source_status | ConvertTo-Json -Depth 4
 docker compose logs aggregator --since 1m 2>&1 | Select-String '"level":"warn"' | Select-String -SimpleMatch -Pattern 'pvmbg' | Select-Object -First 3
 (docker compose logs aggregator --since 1m 2>&1 | Select-String '"level":"error"').Count                              # => 0
 Invoke-RestMethod -Method Post -Uri "$PvmbgUrl/admin/outage" -Headers $AdminH -ContentType 'application/json' -Body '{"enabled":false}' | ConvertTo-Json -Compress   # {"outage":false}
 Start-Sleep 12
-"after: $((Hz $mt '/hazards?hazard_type=VOLCANIC').source_status.PVMBG.state)"                                         # fresh
-Started | Set-Content evidence/6.3-started-after.txt
+"after: $((Hz $mt '/hazards?hazard_type=VOLCANIC').source_status.PVMBG.state)"     # fresh
+"seismic after: $(Code "$API/hazards?hazard_type=SEISMIC" 'GET' $mh)"            # 200
+Started | Set-Content evidence/6.3-started-after.txt -Encoding utf8
 if (-not (Compare-Object (Get-Content evidence/6.3-started-before.txt) (Get-Content evidence/6.3-started-after.txt))) { 'NO RESTART' }
 ```
 
@@ -894,26 +1033,26 @@ docker compose down -v     # also delete all volumes (fresh start next time)
 
 | Spec criterion | Step(s) | Key evidence file |
 | --- | --- | --- |
-| Ketentuan 3 (one-command start) | 1.1 | `1.1-up.txt`, `1.1-ps.txt` |
-| Ketentuan 7 (health, correlation ID, latency log) | 1.2, 1.4 | `1.4-correlation.txt` |
+| Ketentuan 3 (one-command start) | 1.1 | `1.1.txt` |
+| Ketentuan 7 (health, correlation ID, latency log) | 1.2, 1.4 | `1.4.txt` |
 | P1.1 mapping, old schema | 1.3 | `1.3-volcanic-before.json` |
 | P1.2 toggle without restart | 2.2, 2.4 | `2.1-started-before.txt`, `2.4-started-after.txt` |
 | P1.3 valid HazardEvent after change | 2.3, 2.4 | `2.3-new-report.json` |
 | P1.4 unknown-field policy (pass to `attributes`) | 2.3 | `2.3-new-report.json` |
-| P2.1 BMKG p95 < 300 ms at 3 s PVMBG | 6.0, 6.1 | `6.1-k6-mixed.txt` |
-| P2.2 ≥ 50 conns, ≥ 60 s, p50/p95/p99, errors < 1 % | 6.2 | `6.2-k6-sustained.txt` |
-| P2.3 outage -> stale/unavailable, recover | 6.3 | `6.3-volcanic-during.txt` |
+| P2.1 BMKG p95 < 300 ms at 3 s PVMBG | 6.0, 6.1 | `6.0.txt`, `6.1.txt`, `6.1-rerun.txt` |
+| P2.2 ≥ 50 conns, ≥ 60 s, p50/p95/p99, errors < 1 % | 6.2 | `6.2.txt`, `6.2b.txt` |
+| P2.3 outage -> stale/unavailable, recover | 6.3 | `6.3.txt`, `6.3-volcanic-during.json` |
 | P3.1 cross-institution rejection | 3.1 | `3.1-isolation.txt` |
-| P3.2 Media redaction, raw -> 403 | 3.2, 3.3 | terminal capture |
-| P3.3 expiry + refresh + old token rejected | 3.4 | terminal capture |
-| P3.4 no hardcoded secrets, `.env.example` | 3.5 | terminal capture |
-| P4.1 independent container rebuild | 5.1, 5.2 | `5.2-started-*.txt` |
+| P3.2 Media redaction, raw -> 403 | 3.2, 3.3 | `3.2.txt`, `3.3.txt` |
+| P3.3 expiry + refresh + old token rejected | 3.4 | `3.4.txt` |
+| P3.4 no hardcoded secrets, `.env.example` | 3.5 | `3.5.txt` |
+| P4.1 independent container rebuild | 5.1, 5.2 | `5.2.txt`, `5.2-started-*.txt` |
 | P4.2 JSONB, no migration, old+new side by side | 5.3 | `5.3-side-by-side.txt` |
-| P4.3 store only reachable by Aggregator | 5.4 | terminal capture |
-| P5.1 broker publish | 4.1 | `4.1-consumers.txt` |
-| P5.2 two independent consumers | 4.1, 4.2 | terminal capture |
-| P5.3 consumer down, others unaffected, catch-up | 4.3, 4.4 | `4.4-consumers-after.txt` |
-| P5.4 new consumer, producer untouched | 4.5 | `4.5-started-before.txt` |
+| P4.3 store only reachable by Aggregator | 5.4 | `5.4.txt` |
+| P5.1 broker publish | 4.1 | `4.1.txt` |
+| P5.2 two independent consumers | 4.1, 4.2 | `4.2.txt` |
+| P5.3 consumer down, others unaffected, catch-up | 4.3, 4.4 | `4.3.txt`, `4.4.txt` |
+| P5.4 new consumer, producer untouched | 4.5 | `4.5.txt` |
 
 ## Appendix B: troubleshooting
 
@@ -928,3 +1067,39 @@ docker compose down -v     # also delete all volumes (fresh start next time)
 | 4.2 counts don't change | `/records` is capped at 100 rows | compare `data.0.hazard_id` instead of `count` |
 | `Code` returns `-1` in PowerShell | connection refused / timeout, not an HTTP error | check `docker compose ps` |
 | Phase 6 numbers look odd after Phase 2 | `--force-recreate pvmbg-mock` reset toggles | expected; schema back to v1, outage off |
+| Evidence file is unreadable / `grep` finds nothing / tables show `Γöé` | PowerShell `Tee-Object`, `>` and `Set-Content` write UTF-16 / ANSI | use `Tee8` and `Step` (0.3); for existing files: `iconv -f UTF-16 -t UTF-8 file` or `Get-Content file \| Set-Content -Encoding utf8 new` |
+| Red `NativeCommandError` / `RemoteException` in `1.1.txt` | Windows PowerShell 5.1 turns docker's stderr progress lines into error records when `2>&1` is used | harmless (check `docker compose ps`); the runbook's `ForEach-Object { "$_" }` wrapper removes it; PowerShell 7 does not do this |
+| Transcript file from `Step` is empty | host does not record native-command output | wrap the step's commands in `Tee8 <file>` instead, or run in Windows Terminal with PowerShell 7 |
+| k6 `min=-...ns` for `http_req_duration` | Docker VM clock drift (WSL2) | cosmetic; see 6.1 notes. `wsl --shutdown` + restart Docker, then rerun |
+| `controlled_rejections_429` missing from the k6 summary | old script version (counter only shown once incremented) | use the current `scripts/load-test.js`; it now declares a threshold so the line always prints |
+
+## Appendix C: evidence checklist (a complete run produces all of these)
+
+Tick each file off before the demo. "Must show" is what a reviewer will look for. Rows marked
+**(missing on the first run)** are the gaps found when the first evidence set was reviewed.
+
+| Step | File(s) | Must show |
+| --- | --- | --- |
+| 1.1 | `1.1.txt` | 11 containers `healthy` |
+| 1.3 | `1.3.txt`, `1.3-volcanic-before.json` | counts 20/20/40; no `confidence_level` before the toggle; **seismic sample row too** |
+| 1.4 | `1.4.txt` | one `correlation_id` in client-api, auth-service **and** aggregator, with `latency_ms` |
+| 2.x | `2.1-started-before.txt`, `2.3-new-report.json`, `2.4-started-after.txt`, `2.2.txt`, `2.3.txt`, `2.4.txt` | toggle returns `v2`; new row has the field in `attributes`; `NO RESTART`; 0 contract violations |
+| 3.1 | `3.1.txt` | `RESULT: PASS` |
+| 3.2 | `3.2.txt` **(missing)** | roles `media`/`field`/`internal`; mixed id+secret -> `401`. Do not print the login JSON (tokens). |
+| 3.3 | `3.3.txt` **(missing)** | Media key list = 7 summary fields; Field/Internal also have `source_ref_id, latitude, longitude, attributes`; `?view=raw` -> `403`; no token -> `401` |
+| 3.4 | `3.4.txt` **(missing)** | `200 -> 401 -> refresh 200 -> old 401`, reused refresh token rejected |
+| 3.5 | `3.5.txt` **(missing)** | no tracked `.env`; `.env.example` present; no `HARDCODED:` / `IN HISTORY:` lines |
+| 4.1 | `4.1.txt` | two durables, 0 pending |
+| 4.2 | `4.2.txt` **(missing)** | both counts +1; identical newest `hazard_id` |
+| 4.3 | `4.3.txt` **(missing)** | notifier stopped; dashboard +2; `outbox_pending = 0`; aggregator healthy, 0 errors; notifier Unprocessed >= 2 |
+| 4.4 | `4.4.txt` | Unprocessed 0 after restart; equal record counts (use the UTF-8 file, not the old garbled one) |
+| 4.5 | `4.5.txt`, `4.5-started-before.txt` **(per-consumer id comparison was missing)** | three identical `hazard_id`s; aggregator `StartedAt` unchanged |
+| 5.1 | `5.1.txt` | one image per component; only 8080/8081/8082/4222/8222/8084 published |
+| 5.2 | `5.2.txt`, `5.2-started-before.txt`, `5.2-started-after.txt`, Terminal-A probe log (`5.2-probe.txt`) **(all missing)** | image ID of the notifier changes; only its `StartedAt` differs; probe prints `200 / 200` throughout. Capture Terminal A with `... \| tee evidence/5.2-probe.txt` / `\| Tee8 5.2-probe.txt`. |
+| 5.3 | `5.3.txt`, `5.3-side-by-side.txt` | `attributes` is `jsonb`; rows with and without `confidence_level`; no migration files |
+| 5.4 | `5.4.txt` **(missing)** | `store` network = postgres + aggregator only; others cannot resolve `postgres`; no host port |
+| 6.0 | `6.0.txt` **(missing)** | PVMBG about 3.0 s, BMKG 0.05 to 0.15 s |
+| 6.1 | `6.1.txt`, `6.1-rerun.txt` | `kind:seismic` p95 < 300 ms (record the margin), `kind:volcanic` line, exit code 0 |
+| 6.2 | `6.2.txt` | ≥ 50 VUs, ≥ 60 s, throughput, p50/p95/p99, `http_req_failed` < 1 %, no unhealthy container |
+| 6.2b | `6.2b.txt` **(missing)** | `controlled_rejections_429` > 0, error rate < 1 %, `/health` 200, `request rejected` logs |
+| 6.3 | `6.3.txt`, `6.3-volcanic-during.json`, `6.3-started-*.txt` | volcanic **HTTP 200** during outage with `state=stale` + `stale_since` (not 5xx, not a hang); seismic 200; `warn` not `error` logs; back to `fresh`; `NO RESTART` |
