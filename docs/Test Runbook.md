@@ -99,8 +99,9 @@ rec(){ docker compose exec -T "$1" wget -qO- "http://localhost:$2/records"; }   
 sql(){ echo "$1" | docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; }
 nats(){ docker run --rm --network "$NET" natsio/nats-box nats -s nats://broker:4222 "$@"; }
 started(){ docker inspect -f '{{.Name}} {{.State.StartedAt}}' $(docker compose ps -q); }  # container start times
-# PVMBG only emits a NEW report when the schema toggle goes OFF->ON, so: toggle until it reports v2.
-new_event(){ for i in 1 2; do r=$(curl -s -X POST -H "Authorization: Bearer $PVMBG_ADMIN" "$PVMBG/admin/schema-version"); echo "$r"; case "$r" in *'"v2"'*) return;; esac; done; }
+# Both mocks emit a new event every 10 s on their own, so tests follow one specific event instead of counting.
+latest(){ agg '/internal/hazards' | jget data.0.hazard_id; }                  # newest hazard in the Aggregator
+wait_has(){ for i in $(seq 1 30); do rec "$1" "$2" | grep -q "$3" && { echo "$1 has $3"; return 0; }; sleep 2; done; echo "$1 MISSING $3"; return 1; }   # wait_has <service> <port> <hazard_id>
 ```
 
 **PowerShell** (Windows PowerShell 5.1 or PowerShell 7; no external tools):
@@ -136,9 +137,10 @@ function Rec($svc,$port){ docker compose exec -T $svc wget -qO- "http://localhos
 function Sql($q){ $q | docker compose exec -T postgres sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB' }
 function Nats { docker run --rm --network $NET natsio/nats-box nats -s nats://broker:4222 @args }
 function Started { docker inspect -f '{{.Name}} {{.State.StartedAt}}' (docker compose ps -q) }
-function New-Event { for($i=0;$i -lt 2;$i++){            # PVMBG only emits a new report on schema OFF->ON
-  $r = Invoke-RestMethod -Method Post -Uri "$PvmbgUrl/admin/schema-version" -Headers $AdminH
-  $r | ConvertTo-Json -Compress; if($r.schema_version -eq 'v2'){return} } }
+# Both mocks emit a new event every 10 s on their own, so tests follow one specific event instead of counting.
+function Latest { (Agg '/internal/hazards').data[0].hazard_id }             # newest hazard in the Aggregator
+function Wait-Has($svc,$port,$id){ for($i=0;$i -lt 30;$i++){                # Wait-Has <service> <port> <hazard_id>
+  if((Rec $svc $port).data.hazard_id -contains $id){ "$svc has $id"; return }; Start-Sleep 2 }; "$svc MISSING $id" }
 ```
 
 **Desired state:** no output, no errors. Quick self-check:
@@ -234,28 +236,36 @@ Phase 5 compare against it.
 
 ```bash
 sleep 8                                                    # a few poll cycles
-curl -s -H "X-BMKG-Key: $BMKG_KEY" $BMKG/seismic-events | jlen .                         # => 20
-curl -s -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports | jlen .         # => 20
+S1=$(curl -s -H "X-BMKG-Key: $BMKG_KEY" $BMKG/seismic-events | jlen .)
+V1=$(curl -s -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports | jlen .)
+A1=$(agg '/internal/hazards' | jget count); echo "seismic=$S1 volcanic=$V1 aggregator=$A1"   # >= 20, >= 20, >= 40
 curl -s -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports | jget 0         # no confidence_level
-agg '/internal/hazards' | jget count                                                      # => 40
 agg '/internal/hazards?hazard_type=VOLCANIC' | tee evidence/1.3-volcanic-before.json | jget data.0
 agg '/internal/hazards?hazard_type=SEISMIC'  | jget data.0
+sleep 25                                                   # each mock adds one record every 10 s
+S2=$(curl -s -H "X-BMKG-Key: $BMKG_KEY" $BMKG/seismic-events | jlen .)
+V2=$(curl -s -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports | jlen .)
+A2=$(agg '/internal/hazards' | jget count); echo "seismic=$S2 volcanic=$V2 aggregator=$A2"   # each higher than before
 ```
 ```powershell
 Start-Sleep 8
-(Invoke-RestMethod -Uri "$BmkgUrl/seismic-events" -Headers @{'X-BMKG-Key'=$BmkgKey}).Count                 # => 20
+function Counts { $s = (Invoke-RestMethod -Uri "$BmkgUrl/seismic-events" -Headers @{'X-BMKG-Key'=$BmkgKey}).Count
+  $p = (Invoke-RestMethod -Uri "$PvmbgUrl/volcanic-reports" -Headers @{Authorization="Bearer $PvmbgToken"}).Count
+  "seismic=$s volcanic=$p aggregator=$((Agg '/internal/hazards').count)" }
+Counts                                                                                                      # >= 20, >= 20, >= 40
 $v = Invoke-RestMethod -Uri "$PvmbgUrl/volcanic-reports" -Headers @{Authorization="Bearer $PvmbgToken"}
-$v.Count                                                                                                    # => 20
 $v[0] | ConvertTo-Json                                                                                      # no confidence_level
-(Agg '/internal/hazards').count                                                                             # => 40
 $vb = Agg '/internal/hazards?hazard_type=VOLCANIC'; $vb | ConvertTo-Json -Depth 8 | Set-Content evidence/1.3-volcanic-before.json -Encoding utf8
 $vb.data[0] | ConvertTo-Json -Depth 5
 (Agg '/internal/hazards?hazard_type=SEISMIC').data[0] | ConvertTo-Json -Depth 5
+Start-Sleep 25                                                                                              # each mock adds one record every 10 s
+Counts                                                                                                      # each higher than before
 ```
 
 **Desired state:**
-- BMKG returns 20 seismic events; PVMBG returns 20 reports **without** `confidence_level`.
-- Aggregator count is **40** (20 `SEISMIC` + 20 `VOLCANIC`); it may be higher only if events were added since boot.
+- BMKG returns **at least 20** seismic events and PVMBG **at least 20** reports (20 seed records plus one new record every 10 s), all **without** `confidence_level`.
+- Aggregator count is **at least 40**. The exact numbers depend on how long the stack has been up.
+- The second reading, 25 s later, is **higher for all three**: each mock produced at least two new records and the Aggregator ingested them. This is the "1 new event per 10 s per institution" rule from the spec.
 - Each hazard has canonical top-level keys `hazard_id, source, source_ref_id, hazard_type, severity, area_name, latitude, longitude, occurred_at, ingested_at, attributes`.
 - A seismic row: `source=BMKG`, `area_name` = region, `attributes` holds `magnitude, depth_km, potential_tsunami` (plus warning fields when one exists); severity follows the tsunami/magnitude rule.
 - A volcanic row: `source=PVMBG`, `area_name` is a volcano name (from `volcano_reference`), `severity` matches `alert_level`, `attributes` holds `eruption_count_24h, ash_column_height_m` and **no** `confidence_level`.
@@ -340,7 +350,8 @@ $va.count
 **Desired state:**
 - `rep-schema-00001` exists as a new canonical row with `attributes.confidence_level = 0.88`.
 - Its top-level keys are the **same canonical set** as in 1.3 (no new top-level column, so the field went to `attributes`).
-- Count is one higher than the pre-toggle count.
+- Count is higher than the pre-toggle count. Do not expect exactly one more: the toggle adds `rep-schema-00001`, and the mock keeps generating a report every 10 s.
+- Reports generated after the toggle (`rep-<boot>-<n>`) also carry `attributes.confidence_level`.
 - Earlier rows are unchanged in identity (same `hazard_id`s as `evidence/1.3-volcanic-before.json`); their `attributes` may now include `confidence_level` where the source report has one.
 
 **Declared policy (state it in the report):** unknown/new source fields are
@@ -547,8 +558,15 @@ secrets, matches in README are expected, but none may appear in code, compose, o
 ## Phase 4: Pub/sub fan-out (P5.1 to P5.4)
 
 Starting state: system healthy, schema toggle currently ON (v2) from Phase 2.
-`new_event` / `New-Event` creates one fresh PVMBG report, which becomes one fresh
-`HazardEvent` published to the broker.
+Leave the toggle alone in this phase: turning it off would strip
+`confidence_level` from stored rows and spoil the evidence for 5.3.
+
+No step here triggers an event by hand. Both mocks emit one every 10 s, so
+events keep flowing and **record counts are not comparable** between two
+moments (`/records` also shows only the latest 100). Each step therefore
+follows one specific `hazard_id`: `latest` / `Latest` reads the newest hazard
+from the Aggregator, and `wait_has` / `Wait-Has` waits up to 60 s for that ID
+to show up in a consumer.
 
 ### 4.1 Two independent durable subscribers on one stream (P5.1, P5.2)
 
@@ -565,7 +583,7 @@ Nats consumer report HAZARDS | Tee8 4.1-consumers.txt
 
 **Desired state:** stream `HAZARDS` on subject `hazard.events`; two consumers
 with **different durable names** (`dashboard-v1`, `notifier-v1`), both with
-`Unprocessed/Pending = 0`. The Aggregator publishes to the broker only; it never
+`Unprocessed/Pending` at 0 (a 1 can appear for a moment when an event has just arrived). The Aggregator publishes to the broker only; it never
 references the consumers. **Criterion:** P5.1, P5.2.
 
 ### 4.2 One published event reaches both consumers
@@ -573,22 +591,22 @@ references the consumers. **Criterion:** P5.1, P5.2.
 > Capture: run `step 4.2` first. Output is saved to `evidence/4.2.txt`.
 
 ```bash
-B1=$(rec consumer-dashboard 8091 | jget count); B2=$(rec consumer-notifier 8092 | jget count); echo "before: dashboard=$B1 notifier=$B2"
-new_event; sleep 8
-echo "after:  dashboard=$(rec consumer-dashboard 8091 | jget count) notifier=$(rec consumer-notifier 8092 | jget count)"
-rec consumer-dashboard 8091 | jget data.0.hazard_id;  rec consumer-notifier 8092 | jget data.0.hazard_id     # identical IDs
-rec consumer-dashboard 8091 | jget data.0.correlation_id                                                     # matches aggregator log
+H0=$(latest); sleep 12; H=$(latest); echo "previous=$H0 new=$H"            # different: a new event arrived on its own
+wait_has consumer-dashboard 8091 "$H"; wait_has consumer-notifier 8092 "$H"
+CID=$(rec consumer-dashboard 8091 | jfind data hazard_id "$H" | jget 0.correlation_id); echo "correlation_id=$CID"
+docker compose logs aggregator 2>&1 | grep "$CID" | tail -3 | tee evidence/4.2-correlation.txt
 ```
 ```powershell
-$b1=(Rec consumer-dashboard 8091).count; $b2=(Rec consumer-notifier 8092).count; "before: dashboard=$b1 notifier=$b2"
-New-Event; Start-Sleep 8
-"after:  dashboard=$((Rec consumer-dashboard 8091).count) notifier=$((Rec consumer-notifier 8092).count)"
-(Rec consumer-dashboard 8091).data[0].hazard_id; (Rec consumer-notifier 8092).data[0].hazard_id            # identical IDs
+$h0 = Latest; Start-Sleep 12; $h = Latest; "previous=$h0 new=$h"            # different: a new event arrived on its own
+Wait-Has consumer-dashboard 8091 $h; Wait-Has consumer-notifier 8092 $h
+$cid = ((Rec consumer-dashboard 8091).data | Where-Object hazard_id -eq $h).correlation_id; "correlation_id=$cid"
+docker compose logs aggregator 2>&1 | Select-String $cid | Select-Object -Last 3 | Tee8 4.2-correlation.txt
 ```
 
-**Desired state:** both counts increase by 1 (the records list is capped at 100, so if
-you are near the cap compare `data.0.hazard_id` instead); the newest `hazard_id` is
-**identical** in both consumers; `correlation_id` appears in the aggregator log.
+**Desired state:** `new` differs from `previous`, so a fresh event was published
+without any manual trigger; both consumers print `... has <hazard_id>` for that
+**same** ID; the event's `correlation_id` from the consumer also appears in the
+Aggregator log (its poll and publish lines). A `MISSING` line is a failure.
 **Criterion:** P5.2.
 
 ### 4.3 Stop one consumer: producer and the other consumer carry on (P5.3)
@@ -597,29 +615,29 @@ you are near the cap compare `data.0.hazard_id` instead); the newest `hazard_id`
 
 ```bash
 docker compose stop consumer-notifier
-D0=$(rec consumer-dashboard 8091 | jget count)
-new_event; new_event; sleep 8                                   # 2 more events while notifier is down
-echo "dashboard: $D0 -> $(rec consumer-dashboard 8091 | jget count)"          # +2, not blocked
+sleep 25; MISSED=$(latest); echo "published while notifier is down: $MISSED"   # several events arrive in 25 s
+wait_has consumer-dashboard 8091 "$MISSED"                                      # dashboard not blocked
 sql "SELECT count(*) AS outbox_pending FROM hazard_outbox;"                     # 0  (producer not stuck)
 docker compose ps --format '{{.Service}} {{.Health}}' | grep -E 'aggregator|dashboard'
-nats consumer report HAZARDS                                                    # notifier-v1 Unprocessed >= 2
+nats consumer report HAZARDS | tee evidence/4.3-consumers-during.txt            # notifier-v1 Unprocessed > 0
 docker compose logs aggregator --since 1m 2>&1 | grep -ci '"level":"error"'     # => 0
 ```
 ```powershell
 docker compose stop consumer-notifier
-$d0 = (Rec consumer-dashboard 8091).count
-New-Event; New-Event; Start-Sleep 8
-"dashboard: $d0 -> $((Rec consumer-dashboard 8091).count)"                      # +2, not blocked
+Start-Sleep 25; $missed = Latest; "published while notifier is down: $missed"   # several events arrive in 25 s
+Wait-Has consumer-dashboard 8091 $missed                                         # dashboard not blocked
 Sql "SELECT count(*) AS outbox_pending FROM hazard_outbox;"                      # 0
 docker compose ps --format '{{.Service}} {{.Health}}' | Select-String 'aggregator|dashboard'
-Nats consumer report HAZARDS                                                     # notifier-v1 Unprocessed >= 2
+Nats consumer report HAZARDS | Tee8 4.3-consumers-during.txt      # notifier-v1 Unprocessed > 0
 (docker compose logs aggregator --since 1m 2>&1 | Select-String '"level":"error"').Count   # => 0
 ```
 
-**Desired state:** dashboard receives both new events; `hazard_outbox` is empty
-(Aggregator published without waiting for the dead consumer); Aggregator healthy
-with zero error logs; the broker keeps the notifier's two events as *pending* for its
-durable cursor. **Criterion:** P5.3 (first half).
+**Desired state:** the dashboard has the event published during the stop;
+`hazard_outbox` is empty, or shows 1 for a moment if an event was just inserted
+(the Aggregator publishes without waiting for the dead consumer); Aggregator healthy
+with zero error logs; `notifier-v1` shows `Unprocessed` above 0 and growing, because the
+broker keeps those events for its durable cursor. Keep `MISSED` / `$missed` for 4.4.
+**Criterion:** P5.3 (first half).
 
 ### 4.4 Restart it: backlog is delivered (no loss)
 
@@ -627,19 +645,20 @@ durable cursor. **Criterion:** P5.3 (first half).
 
 ```bash
 docker compose start consumer-notifier
-until [ "$(docker compose ps consumer-notifier --format '{{.Health}}')" = healthy ]; do sleep 2; done; sleep 5
-nats consumer report HAZARDS | tee evidence/4.4-consumers-after.txt            # notifier-v1 Unprocessed = 0
-echo "dashboard=$(rec consumer-dashboard 8091 | jget count) notifier=$(rec consumer-notifier 8092 | jget count)"   # equal
+until [ "$(docker compose ps consumer-notifier --format '{{.Health}}')" = healthy ]; do sleep 2; done
+wait_has consumer-notifier 8092 "$MISSED"                                       # the event it missed is delivered
+nats consumer report HAZARDS | tee evidence/4.4-consumers-after.txt            # notifier-v1 Unprocessed back to 0 (or 1)
 ```
 ```powershell
 docker compose start consumer-notifier
-do { Start-Sleep 2 } until ((docker compose ps consumer-notifier --format '{{.Health}}') -eq 'healthy'); Start-Sleep 5
+do { Start-Sleep 2 } until ((docker compose ps consumer-notifier --format '{{.Health}}') -eq 'healthy')
+Wait-Has consumer-notifier 8092 $missed                                          # the event it missed is delivered
 Nats consumer report HAZARDS | Tee8 4.4-consumers-after.txt
-"dashboard=$((Rec consumer-dashboard 8091).count) notifier=$((Rec consumer-notifier 8092).count)"                  # equal
 ```
 
-**Desired state:** notifier **catches up**: pending drops to 0 and both consumers hold
-the same number of records. Events were **not lost** because JetStream retains messages
+**Desired state:** notifier **catches up**: it now has the `hazard_id` that was
+published while it was down, and its `Unprocessed` drops back to 0 (a 1 can appear
+for a moment when a new event has just arrived). Events were **not lost** because JetStream retains messages
 for `NATS_STREAM_MAX_AGE` (24 h) and the durable cursor resumes where it stopped.
 Semantics to state in the report: **at-least-once**, so consumers dedupe by
 `hazard_id` / stream sequence (the SQLite `records.hazard_id` primary key does this).
@@ -652,28 +671,31 @@ Semantics to state in the report: **at-least-once**, so consumers dedupe by
 ```bash
 started > evidence/4.5-started-before.txt
 docker compose --profile consumer-demo up -d consumer-dashboard-demo
-until [ "$(docker compose ps consumer-dashboard-demo --format '{{.Health}}')" = healthy ]; do sleep 2; done; sleep 5
-echo "demo consumer records: $(rec consumer-dashboard-demo 8093 | jget count)"
-new_event; sleep 8
-for s in "consumer-dashboard 8091" "consumer-notifier 8092" "consumer-dashboard-demo 8093"; do echo "$s -> $(rec $s | jget data.0.hazard_id)"; done   # same ID x3
+until [ "$(docker compose ps consumer-dashboard-demo --format '{{.Health}}')" = healthy ]; do sleep 2; done
+sleep 12; H=$(latest); echo "event published after the third consumer joined: $H"
+for s in "consumer-dashboard 8091" "consumer-notifier 8092" "consumer-dashboard-demo 8093"; do wait_has $s "$H"; done   # all three have it
+echo "demo consumer records: $(rec consumer-dashboard-demo 8093 | jget count)"                                          # history replayed
 started | grep -E 'aggregator' ; grep aggregator evidence/4.5-started-before.txt                                      # same StartedAt
 nats consumer report HAZARDS
 ```
 ```powershell
 Started | Set-Content evidence/4.5-started-before.txt -Encoding utf8
 docker compose --profile consumer-demo up -d consumer-dashboard-demo
-do { Start-Sleep 2 } until ((docker compose ps consumer-dashboard-demo --format '{{.Health}}') -eq 'healthy'); Start-Sleep 5
-"demo consumer records: $((Rec consumer-dashboard-demo 8093).count)"
-New-Event; Start-Sleep 8
-foreach ($s in @(@('consumer-dashboard',8091),@('consumer-notifier',8092),@('consumer-dashboard-demo',8093))) { "$($s[0]) -> $((Rec $s[0] $s[1]).data[0].hazard_id)" }   # same ID x3
+do { Start-Sleep 2 } until ((docker compose ps consumer-dashboard-demo --format '{{.Health}}') -eq 'healthy')
+Start-Sleep 12; $h = Latest; "event published after the third consumer joined: $h"
+foreach ($s in @(@('consumer-dashboard',8091),@('consumer-notifier',8092),@('consumer-dashboard-demo',8093))) { Wait-Has $s[0] $s[1] $h }   # all three have it
+"demo consumer records: $((Rec consumer-dashboard-demo 8093).count)"                                              # history replayed
 Started | Select-String aggregator; Select-String aggregator evidence/4.5-started-before.txt                    # same StartedAt
 Nats consumer report HAZARDS
 ```
 
-**Desired state:** a third durable (`dashboard-demo-v1`) appears; it receives the new
-event with the **same** `hazard_id` as the other two; the Aggregator's `StartedAt` is
-unchanged and no code/config of the producer was edited. Record whether the new
-consumer also replayed history (depends on the durable's deliver policy). **Criterion:** P5.4.
+**Desired state:** a third durable (`dashboard-demo-v1`) appears; all three consumers
+print `... has <hazard_id>` for the **same** event published after it joined; the
+Aggregator's `StartedAt` is unchanged and no code/config of the producer was edited.
+The new consumer starts from the beginning of the stream, so it first replays the
+retained history and its record count is far above 1. `wait_has` allows for that:
+the new ID shows up once the replay has caught up, so do not compare the newest
+row across consumers at one instant. **Criterion:** P5.4.
 
 Optional cleanup of the demo consumer: `docker compose --profile consumer-demo stop consumer-dashboard-demo`.
 
@@ -1063,8 +1085,9 @@ docker compose down -v     # also delete all volumes (fresh start next time)
 | `k6` cannot reach `host.docker.internal` (Linux) | no host alias | add `--add-host=host.docker.internal:host-gateway` |
 | `nats` helper: `network not found` / empty `$NET` | project network name differs | `docker network ls` and set `NET` manually to the one ending in `_backend` |
 | All `/hazards` calls return `401` mid-run | access token TTL is 60 s | re-login (`login`/`Login`) |
-| `new_event` prints v1 twice | schema state already toggled by an earlier run | run it once more; it only emits a report on the OFF->ON edge |
-| 4.2 counts don't change | `/records` is capped at 100 rows | compare `data.0.hazard_id` instead of `count` |
+| `wait_has` / `Wait-Has` prints `MISSING` | the consumer is stopped, halted, or still replaying a long history | check `docker compose ps` and the consumer's `/ready`; for a fresh third consumer, run the same `wait_has` again |
+| `latest` returns the same ID twice in 4.2 | no new event was ingested in the 12 s window | check `docker compose logs bmkg-mock pvmbg-mock \| grep generated` and that `*_INTERVAL_MS` is at most 10000 |
+| Consumer record counts look stuck at 100 | `/records` returns only the latest 100 rows | follow a specific `hazard_id` with `wait_has`, do not compare counts |
 | `Code` returns `-1` in PowerShell | connection refused / timeout, not an HTTP error | check `docker compose ps` |
 | Phase 6 numbers look odd after Phase 2 | `--force-recreate pvmbg-mock` reset toggles | expected; schema back to v1, outage off |
 | Evidence file is unreadable / `grep` finds nothing / tables show `Γöé` | PowerShell `Tee-Object`, `>` and `Set-Content` write UTF-16 / ANSI | use `Tee8` and `Step` (0.3); for existing files: `iconv -f UTF-16 -t UTF-8 file` or `Get-Content file \| Set-Content -Encoding utf8 new` |
@@ -1081,7 +1104,7 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 | Step | File(s) | Must show |
 | --- | --- | --- |
 | 1.1 | `1.1.txt` | 11 containers `healthy` |
-| 1.3 | `1.3.txt`, `1.3-volcanic-before.json` | counts 20/20/40; no `confidence_level` before the toggle; **seismic sample row too** |
+| 1.3 | `1.3.txt`, `1.3-volcanic-before.json` | counts at least 20/20/40 and higher on the second reading 25 s later; no `confidence_level` before the toggle; **seismic sample row too** |
 | 1.4 | `1.4.txt` | one `correlation_id` in client-api, auth-service **and** aggregator, with `latency_ms` |
 | 2.x | `2.1-started-before.txt`, `2.3-new-report.json`, `2.4-started-after.txt`, `2.2.txt`, `2.3.txt`, `2.4.txt` | toggle returns `v2`; new row has the field in `attributes`; `NO RESTART`; 0 contract violations |
 | 3.1 | `3.1.txt` | `RESULT: PASS` |
@@ -1089,11 +1112,11 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 | 3.3 | `3.3.txt` **(missing)** | Media key list = 7 summary fields; Field/Internal also have `source_ref_id, latitude, longitude, attributes`; `?view=raw` -> `403`; no token -> `401` |
 | 3.4 | `3.4.txt` **(missing)** | `200 -> 401 -> refresh 200 -> old 401`, reused refresh token rejected |
 | 3.5 | `3.5.txt` **(missing)** | no tracked `.env`; `.env.example` present; no `HARDCODED:` / `IN HISTORY:` lines |
-| 4.1 | `4.1.txt` | two durables, 0 pending |
-| 4.2 | `4.2.txt` **(missing)** | both counts +1; identical newest `hazard_id` |
-| 4.3 | `4.3.txt` **(missing)** | notifier stopped; dashboard +2; `outbox_pending = 0`; aggregator healthy, 0 errors; notifier Unprocessed >= 2 |
-| 4.4 | `4.4.txt` | Unprocessed 0 after restart; equal record counts (use the UTF-8 file, not the old garbled one) |
-| 4.5 | `4.5.txt`, `4.5-started-before.txt` **(per-consumer id comparison was missing)** | three identical `hazard_id`s; aggregator `StartedAt` unchanged |
+| 4.1 | `4.1.txt` | two durables, pending 0 (or briefly 1) |
+| 4.2 | `4.2.txt` **(missing)** | `new` differs from `previous`; both consumers print `has <hazard_id>` for the same ID; its `correlation_id` is in the aggregator log |
+| 4.3 | `4.3.txt` **(missing)** | notifier stopped; dashboard has the event published during the stop; `outbox_pending = 0`; aggregator healthy, 0 errors; notifier Unprocessed above 0 |
+| 4.4 | `4.4.txt` | notifier prints `has <hazard_id>` for the event it missed; Unprocessed back to 0 (or briefly 1) (use the UTF-8 file, not the old garbled one) |
+| 4.5 | `4.5.txt`, `4.5-started-before.txt` **(per-consumer id comparison was missing)** | all three consumers print `has <hazard_id>` for the same new event; aggregator `StartedAt` unchanged |
 | 5.1 | `5.1.txt` | one image per component; only 8080/8081/8082/4222/8222/8084 published |
 | 5.2 | `5.2.txt`, `5.2-started-before.txt`, `5.2-started-after.txt`, Terminal-A probe log (`5.2-probe.txt`) **(all missing)** | image ID of the notifier changes; only its `StartedAt` differs; probe prints `200 / 200` throughout. Capture Terminal A with `... \| tee evidence/5.2-probe.txt` / `\| Tee8 5.2-probe.txt`. |
 | 5.3 | `5.3.txt`, `5.3-side-by-side.txt` | `attributes` is `jsonb`; rows with and without `confidence_level`; no migration files |
