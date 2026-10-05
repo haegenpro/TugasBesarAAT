@@ -46,10 +46,14 @@ func main() {
 	frame[5] = 0
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ack, err := js.Publish(ctx, subject, frame)
+	correlationID := fmt.Sprintf("demo-invalid-%d", time.Now().UnixNano())
+	msg := nats.NewMsg(subject)
+	msg.Header.Set("X-Correlation-ID", correlationID)
+	msg.Data = frame
+	ack, err := js.PublishMsg(ctx, msg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Printf("published unknown schema ID %d at stream sequence %d\n", id, ack.Sequence)
+	fmt.Printf("published unknown schema ID %d at stream sequence %d, correlation ID %s\n", id, ack.Sequence, correlationID)
 }

@@ -158,6 +158,8 @@ This is worth stating explicitly in the report per P5's criterion 5 ("apakah con
 
 The Aggregator serializes the envelope with its registered Avro schema and
 publishes it on `NATS_SUBJECT`, using `hazard_id` as the JetStream message ID.
+It also copies `correlation_id` into the `X-Correlation-ID` NATS header, allowing
+consumers to trace an uncached schema lookup before the Avro envelope is decoded.
 If the registry has never been available, the publisher keeps the JSON outbox
 row pending and retries registration. Once registered, it can continue using
 its cached ID and codec during a registry outage.
@@ -179,8 +181,11 @@ operator investigation. Corrupt Avro is sent to the consumer's DLQ subject;
 unsupported registered schemas halt the consumer. SQLite busy/locked retries,
 environmental failures halt, and isolated constraints have a bounded DLQ
 policy. The original delivery is acknowledged only after JetStream confirms
-the DLQ publication. Later valid messages can be processed while a single
-unknown ID waits, up to the durable consumer's pending limit. `MaxDeliver=-1`
+the DLQ publication or the consumer verifies the matching entry already stored
+under its deterministic DLQ subject. The DLQ stream retains one entry per
+subject while that entry remains within its retention period. Later valid
+messages can be processed while a single unknown ID waits, up to the durable
+consumer's pending limit. `MaxDeliver=-1`
 keeps broker delivery attempts from ending before the application policy does.
 
 ## Open decisions to confirm as a team

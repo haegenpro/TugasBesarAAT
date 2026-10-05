@@ -1,4 +1,4 @@
-// Command inspect-dlq prints the latest dead-letter record for one consumer.
+// Command inspect-dlq prints the latest dead-letter record under one consumer prefix.
 package main
 
 import (
@@ -15,7 +15,7 @@ import (
 func main() {
 	url, stream := os.Getenv("NATS_URL"), os.Getenv("NATS_DLQ_STREAM")
 	if url == "" || stream == "" || len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: NATS_URL=... NATS_DLQ_STREAM=... go run ./cmd/inspect-dlq <DLQ subject>")
+		fmt.Fprintln(os.Stderr, "usage: NATS_URL=... NATS_DLQ_STREAM=... go run ./cmd/inspect-dlq <consumer DLQ prefix>")
 		os.Exit(2)
 	}
 	nc, err := nats.Connect(url, nats.Timeout(3*time.Second))
@@ -36,7 +36,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	msg, err := s.GetLastMsgForSubject(ctx, os.Args[1])
+	msg, err := latestForPrefix(ctx, s, os.Args[1])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -53,4 +53,25 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println(string(encoded))
+}
+
+func latestForPrefix(ctx context.Context, s jetstream.Stream, prefix string) (*jetstream.RawStreamMsg, error) {
+	info, err := s.Info(ctx, jetstream.WithSubjectFilter(prefix+".>"))
+	if err != nil {
+		return nil, err
+	}
+	var msg *jetstream.RawStreamMsg
+	for subject := range info.State.Subjects {
+		candidate, lookupErr := s.GetLastMsgForSubject(ctx, subject)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if msg == nil || candidate.Sequence > msg.Sequence {
+			msg = candidate
+		}
+	}
+	if msg == nil {
+		return nil, fmt.Errorf("no DLQ entries under prefix %q", prefix)
+	}
+	return msg, nil
 }
