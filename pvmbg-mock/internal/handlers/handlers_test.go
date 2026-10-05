@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -216,4 +217,22 @@ func TestGeneratedReports_Bounded(t *testing.T) {
 	}
 	assert.Len(t, h.Reports, 120)
 	assert.Equal(t, "rep-00001", h.Reports[0].ReportID)
+}
+
+// Concurrent requests share one rand source; run with -race to catch unsynchronised use.
+func TestVolcanicReports_ConcurrentRandomDelay(t *testing.T) {
+	r, _ := newTestServer(1, 5)
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodGet, "/volcanic-reports", nil)
+			req.Header.Set("Authorization", "Bearer "+testToken)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusOK, w.Code)
+		}()
+	}
+	wg.Wait()
 }

@@ -25,6 +25,7 @@ type Handler struct {
 	Toggles     *state.Toggles
 	MinDelayMs  int
 	MaxDelayMs  int
+	rngMu       sync.Mutex // guards rng: requests run concurrently and *rand.Rand is not goroutine-safe
 	rng         *rand.Rand
 	Registry    *avrowire.Client
 	schemaMu    sync.RWMutex // guards Reports, activations, liveIDs
@@ -90,7 +91,9 @@ func (h *Handler) randomDelay() {
 		time.Sleep(time.Duration(lo) * time.Millisecond)
 		return
 	}
+	h.rngMu.Lock()
 	d := lo + h.rng.Intn(hi-lo+1)
+	h.rngMu.Unlock()
 	time.Sleep(time.Duration(d) * time.Millisecond)
 }
 

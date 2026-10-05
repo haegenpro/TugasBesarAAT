@@ -1,14 +1,27 @@
 # Runs scripts/load-test.js with k6 in Docker. Reads the Field client credentials from auth-service/.env.
 # Usage: scripts/load-test.ps1 [-Mode sustained|mixed] [-Vus 60] [-Duration 70s]
-# For -Mode mixed, first set PVMBG delay to 3s:
-#   docker compose stop pvmbg-mock
-#   $env:PVMBG_MIN_DELAY_MS=3000; $env:PVMBG_MAX_DELAY_MS=3000; docker compose up -d pvmbg-mock
+# For -Mode mixed, first set PVMBG's delay to 3 s. The mock reads its delay from pvmbg-mock/.env
+# (Compose env_file), not from your shell, so $env:PVMBG_MIN_DELAY_MS=... has no effect. Instead:
+#   1. In pvmbg-mock/.env set PVMBG_MIN_DELAY_MS=3000 and PVMBG_MAX_DELAY_MS=3000
+#   2. docker compose up -d --force-recreate pvmbg-mock
+# (README, Demo D). Restore the original values and recreate the container afterwards.
+# Linux/macOS: use scripts/load-test.sh instead.
 param([ValidateSet('sustained','mixed')][string]$Mode = 'sustained', [int]$Vus = 60, [string]$Duration = '70s')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$env_ = @{}
-foreach ($l in Get-Content (Join-Path $root 'auth-service/.env')) {
-    if ($l -match '^\s*([A-Z_]+)\s*=\s*(.*?)\s*$' -and -not $l.TrimStart().StartsWith('#')) { $env_[$Matches[1]] = $Matches[2].Trim("'",'"') }
+function Read-Env($p) {
+    $h = @{}
+    foreach ($l in Get-Content $p) {
+        if ($l -match '^\s*([A-Z_]+)\s*=\s*(.*?)\s*$' -and -not $l.TrimStart().StartsWith('#')) { $h[$Matches[1]] = $Matches[2].Trim("'",'"') }
+    }
+    $h
+}
+$env_ = Read-Env (Join-Path $root 'auth-service/.env')
+if ($Mode -eq 'mixed') {
+    $pv = Read-Env (Join-Path $root 'pvmbg-mock/.env')
+    if ($pv['PVMBG_MIN_DELAY_MS'] -ne '3000' -or $pv['PVMBG_MAX_DELAY_MS'] -ne '3000') {
+        Write-Warning "pvmbg-mock/.env has PVMBG delay $($pv['PVMBG_MIN_DELAY_MS'])..$($pv['PVMBG_MAX_DELAY_MS']) ms, not 3000. The mixed run only proves P2.1 with a 3 s delay (README, Demo D)."
+    }
 }
 docker run --rm -i `
     -v "${PSScriptRoot}:/scripts:ro" `

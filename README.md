@@ -967,6 +967,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode 
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode mixed -Vus 50 -Duration 65s
 ```
 
+On Linux, macOS or Git Bash use the shell twin, which takes the same options as
+positional arguments:
+
+```bash
+scripts/load-test.sh sustained            # 60 VUs, 70s on /hazards
+scripts/load-test.sh mixed 50 65s
+```
+
+In `mixed` mode both wrappers warn when `pvmbg-mock/.env` does not hold a 3000 ms
+delay. Set that delay by editing the file, as in Demo D, not through the shell.
+
 `sustained` reports throughput, p50/p95/p99, error rate, and the number of
 `429` responses (`controlled_rejections_429`). With the default cap of 128
 and 60 VUs you should see none. To see controlled rejections, raise `-Vus`
