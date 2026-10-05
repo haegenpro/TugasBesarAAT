@@ -310,7 +310,13 @@ to Auth and to the Aggregator, and logs the latency of every outbound call.
 The database network contains only PostgreSQL and the Aggregator, and the
 Aggregator's port is not published to the host.
 
-On Windows there is a smoke test that covers most of this in one go:
+Run the smoke test to check most of this in one go:
+
+```bash
+scripts/smoke.sh --restart-auth --wait-for-expiry --test-outage
+```
+
+On Windows, use PowerShell:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage
@@ -319,7 +325,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAu
 It checks institution credential isolation, the three client identities,
 Media redaction, token rotation, natural expiry, PVMBG outage status, and
 session persistence across an Auth restart. It reads the demo credentials
-from the service env files and prints only a pass or fail line.
+from the service env files and prints only a pass or fail line. The Bash
+version requires `curl` and Python 3; `API_URL`, `BMKG_URL`, and `PVMBG_URL`
+can override the default localhost endpoints.
 
 ## Standalone (non-Docker) run
 
@@ -836,8 +844,8 @@ your own.
 | P2 | Sustained load, controlled `429` | Demo F (`sustained`) |
 | P2 | PVMBG outage and recovery | Demo C |
 | P3 | Institution credentials rejected across institutions | Demo E |
-| P3 | Media gets summary fields only, raw request gets `403` | [Client API and TUI](#client-api-and-tui), `scripts/smoke.ps1` |
-| P3 | Natural token expiry, refresh, old token rejected | [Client API and TUI](#client-api-and-tui), `scripts/smoke.ps1 -WaitForExpiry` |
+| P3 | Media gets summary fields only, raw request gets `403` | [Client API and TUI](#client-api-and-tui), `scripts/smoke.sh` or `scripts/smoke.ps1` |
+| P3 | Natural token expiry, refresh, old token rejected | [Client API and TUI](#client-api-and-tui), `scripts/smoke.sh --wait-for-expiry` or `scripts/smoke.ps1 -WaitForExpiry` |
 | P4 | One container rebuilt without touching the others | Demo G |
 | P4 | Old and new record shapes side by side, Store reachable only by the Aggregator | Demo H |
 | P5 | Two consumers, one stopped and catching up, a third added | [Durable consumers and DLQ](#durable-consumers-and-dlq) |
@@ -946,6 +954,12 @@ It runs against `httptest` servers, with BMKG answering instantly and PVMBG
 taking 3 seconds, and asserts that the BMKG-only p95 stays under 300 ms.
 
 ### Demo E: institution credential isolation
+
+```bash
+scripts/isolation-demo.sh
+```
+
+On Windows, use PowerShell:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1

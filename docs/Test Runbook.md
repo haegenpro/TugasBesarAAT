@@ -409,7 +409,13 @@ violations, nothing unhealthy. **Criterion:** P1.2, P1.3.
 
 > Capture: run `step 3.1` first. Output is saved to `evidence/3.1.txt`.
 
-Automated, one PASS/FAIL line per probe (Windows):
+Automated, one PASS/FAIL line per probe (Linux, macOS, or Git Bash):
+
+```bash
+scripts/isolation-demo.sh | tee 3.1-isolation.txt
+```
+
+On Windows, use PowerShell:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1 | Tee8 3.1-isolation.txt
@@ -543,11 +549,18 @@ Visual alternative for the demo: `docker compose run --rm --build client-tui`,
 log in as Field, wait over 60 s, list hazards. The TUI refreshes by itself and
 "Uji token lama" confirms the old token gets `401`.
 
-Full automated variant (Windows, ~70 s):
+Full automated variant (Linux, macOS, or Git Bash, ~70 s):
+
+```bash
+scripts/smoke.sh --restart-auth --wait-for-expiry --test-outage
+```
+
+On Windows, use PowerShell:
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage
 ```
-Desired: final line `PASS: ...`. Note `-TestOutage` toggles PVMBG outage and restores it.
+Desired: final line `PASS: ...`. The outage option restores PVMBG afterward.
 
 ### 3.5 No hardcoded or committed credentials (P3.4)
 
