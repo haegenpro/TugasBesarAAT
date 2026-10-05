@@ -117,7 +117,10 @@ func (p *Publisher) Publish(ctx context.Context, event domain.HazardEvent, corre
 	}
 
 	start := time.Now()
-	_, err = p.js.Publish(ctx, p.subject, data, jetstream.WithMsgID(event.HazardID))
+	msg := nats.NewMsg(p.subject)
+	msg.Header.Set("X-Correlation-ID", correlationID)
+	msg.Data = data
+	_, err = p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(event.HazardID))
 	latency := time.Since(start).Milliseconds()
 
 	success := err == nil

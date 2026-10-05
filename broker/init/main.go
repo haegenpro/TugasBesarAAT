@@ -46,8 +46,8 @@ func loadConfig() (Config, error) {
 	}
 
 	maxAge, err := time.ParseDuration(maxAgeRaw)
-	if err != nil {
-		return Config{}, fmt.Errorf("Invalid NATS_STREAM_MAX_AGE %q: %w", maxAgeRaw, err)
+	if err != nil || maxAge <= 0 {
+		return Config{}, fmt.Errorf("invalid NATS_STREAM_MAX_AGE %q", maxAgeRaw)
 	}
 	dlqStream, err := requireEnv("NATS_DLQ_STREAM")
 	if err != nil {
@@ -64,6 +64,9 @@ func loadConfig() (Config, error) {
 	dlqAge, err := time.ParseDuration(dlqAgeRaw)
 	if err != nil || dlqAge <= 0 {
 		return Config{}, fmt.Errorf("invalid NATS_DLQ_MAX_AGE %q", dlqAgeRaw)
+	}
+	if dlqAge < maxAge {
+		return Config{}, fmt.Errorf("NATS_DLQ_MAX_AGE must be at least NATS_STREAM_MAX_AGE")
 	}
 
 	return Config{
@@ -110,6 +113,7 @@ func ensureStream(parent context.Context, js jetstream.JetStream, cfg Config) er
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name: cfg.DLQStream, Subjects: []string{cfg.DLQPrefix + ".>"},
 		Storage: jetstream.FileStorage, MaxAge: cfg.DLQMaxAge,
+		Discard: jetstream.DiscardNew, DiscardNewPerSubject: true, MaxMsgsPerSubject: 1,
 	})
 	if err != nil {
 		return fmt.Errorf("create/update DLQ stream %q: %w", cfg.DLQStream, err)
@@ -155,6 +159,7 @@ func checkStream(parent context.Context, cfg Config) error {
 		return err
 	}
 	if dlqInfo.Config.Storage != jetstream.FileStorage || dlqInfo.Config.MaxAge != cfg.DLQMaxAge ||
+		dlqInfo.Config.Discard != jetstream.DiscardNew || !dlqInfo.Config.DiscardNewPerSubject || dlqInfo.Config.MaxMsgsPerSubject != 1 ||
 		len(dlqInfo.Config.Subjects) != 1 || dlqInfo.Config.Subjects[0] != cfg.DLQPrefix+".>" {
 		return fmt.Errorf("DLQ stream %q has unexpected configuration", cfg.DLQStream)
 	}

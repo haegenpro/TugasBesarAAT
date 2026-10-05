@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +25,7 @@ import (
 type testMsg struct {
 	meta     *jetstream.MsgMetadata
 	raw      []byte
+	header   nats.Header
 	ackErr   error
 	nakErr   error
 	ackCalls int
@@ -29,7 +34,7 @@ type testMsg struct {
 
 func (m *testMsg) Metadata() (*jetstream.MsgMetadata, error) { return m.meta, nil }
 func (m *testMsg) Data() []byte                              { return m.raw }
-func (m *testMsg) Headers() nats.Header                      { return nil }
+func (m *testMsg) Headers() nats.Header                      { return m.header }
 func (m *testMsg) Subject() string                           { return "hazard.events" }
 func (m *testMsg) Reply() string                             { return "" }
 func (m *testMsg) Ack() error                                { return nil }
@@ -393,5 +398,203 @@ func TestHaltPersistsAcrossRestart(t *testing.T) {
 	restarted := &app{db: reopened}
 	if err := restarted.refreshHalt(context.Background()); err != nil || !restarted.halted.Load() {
 		t.Fatalf("halt lost after restart: halted=%v error=%v", restarted.halted.Load(), err)
+	}
+}
+
+func TestUnknownSchemaCarriesCorrelationIntoRegistryAndLogs(t *testing.T) {
+	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	seenHeader := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeader = r.Header.Get(correlationHeader)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	header := nats.Header{}
+	header.Set(correlationHeader, "cid-unknown")
+	msg := &testMsg{meta: &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 41}}, raw: testFrame(t), header: header}
+	a := &app{cfg: config{Role: "dashboard"}, db: db, schemas: newSchemaClient(server.URL, db)}
+	if !a.process(context.Background(), nil, msg) || msg.nakCalls != 1 {
+		t.Fatal("unknown schema should be delayed")
+	}
+	if seenHeader != "cid-unknown" {
+		t.Fatalf("registry correlation header = %q", seenHeader)
+	}
+	for _, want := range []string{`"correlation_id":"cid-unknown"`, `"operation":"registry_lookup"`, `"status_code":404`, `"operation":"delayed_nak"`, `"latency_ms":`} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs missing %s: %s", want, logs.String())
+		}
+	}
+}
+
+func TestCorrelationHeaderMustMatchDecodedEnvelope(t *testing.T) {
+	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"schema": testSchema})
+	}))
+	defer server.Close()
+	header := nats.Header{}
+	header.Set(correlationHeader, "different-id")
+	msg := &testMsg{meta: &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 41}}, header: header}
+	ctx := withMessageTrace(context.Background(), "dashboard", msg, msg.meta)
+	_, err = newSchemaClient(server.URL, db).decode(ctx, testFrame(t))
+	if !errors.Is(err, errCorruptPayload) {
+		t.Fatalf("header/envelope mismatch = %v", err)
+	}
+}
+
+func TestSuccessfulMessageKeepsCorrelationThroughLookupAndAck(t *testing.T) {
+	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	seenHeader := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeader = r.Header.Get(correlationHeader)
+		_ = json.NewEncoder(w).Encode(map[string]string{"schema": testSchema})
+	}))
+	defer server.Close()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	header := nats.Header{}
+	header.Set(correlationHeader, "cid-1")
+	msg := &testMsg{meta: &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 41}}, raw: testFrame(t), header: header}
+	a := &app{cfg: config{Role: "dashboard"}, db: db, schemas: newSchemaClient(server.URL, db)}
+	if !a.process(context.Background(), nil, msg) || msg.ackCalls != 1 {
+		t.Fatalf("valid message must be stored and acked: ack_calls=%d", msg.ackCalls)
+	}
+	if seenHeader != "cid-1" {
+		t.Fatalf("registry correlation header = %q", seenHeader)
+	}
+	for _, want := range []string{`"operation":"registry_lookup"`, `"operation":"original_double_ack"`, `"msg":"event processed"`, `"correlation_id":"cid-1"`} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs missing %s: %s", want, logs.String())
+		}
+	}
+}
+
+type ambiguousPublishJS struct {
+	jetstream.JetStream
+	failLookup bool
+}
+
+func (j ambiguousPublishJS) Publish(ctx context.Context, subject string, data []byte, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+	ack, err := j.JetStream.Publish(ctx, subject, data, opts...)
+	if err != nil {
+		return ack, err
+	}
+	return nil, errors.New("publish confirmation lost")
+}
+
+func (j ambiguousPublishJS) Stream(ctx context.Context, name string) (jetstream.Stream, error) {
+	if j.failLookup {
+		return nil, errors.New("DLQ lookup unavailable")
+	}
+	return j.JetStream.Stream(ctx, name)
+}
+
+func TestDLQRetainsOneEntryAfterLostAckAndAmbiguousPublish(t *testing.T) {
+	url := os.Getenv("TEST_NATS_URL")
+	if url == "" {
+		t.Skip("set TEST_NATS_URL for JetStream integration test")
+	}
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+	streamName := "DLQ_TEST_" + suffix
+	prefix := "dlqtest." + suffix
+	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{
+		Name: streamName, Subjects: []string{prefix + ".>"}, Storage: jetstream.FileStorage,
+		Discard: jetstream.DiscardNew, DiscardNewPerSubject: true, MaxMsgsPerSubject: 1,
+		MaxAge: time.Hour, Duplicates: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), streamName) })
+	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	a := &app{cfg: config{Role: "dashboard", Durable: "dashboard-v1", DLQStream: streamName, DLQSubject: prefix + ".dashboard"}, db: db}
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+	meta := &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 41}}
+	header := nats.Header{}
+	header.Set(correlationHeader, "cid-41")
+	first := &testMsg{meta: meta, raw: []byte("failed bytes"), header: header, ackErr: errors.New("ack lost")}
+	firstCtx := withMessageTrace(ctx, "dashboard", first, meta)
+	if err := a.quarantine(firstCtx, js, first, meta, "corrupt_payload", errCorruptPayload); err == nil || first.ackCalls != 1 {
+		t.Fatalf("first publish must succeed before lost ack: ack_calls=%d err=%v", first.ackCalls, err)
+	}
+	// Let the ordinary message-ID deduplication window expire. The unique
+	// subject must still reject the second publication after redelivery.
+	time.Sleep(1200 * time.Millisecond)
+	redelivered := &testMsg{meta: meta, raw: first.raw, header: header}
+	if err := a.quarantine(firstCtx, js, redelivered, meta, "corrupt_payload", errCorruptPayload); err != nil || redelivered.ackCalls != 1 {
+		t.Fatalf("verified duplicate must ack original: ack_calls=%d err=%v", redelivered.ackCalls, err)
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.State.Msgs != 1 {
+		t.Fatalf("retained DLQ messages=%d, want 1", info.State.Msgs)
+	}
+	secondMeta := &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 42}}
+	ambiguous := &testMsg{meta: secondMeta, raw: []byte("other bytes"), header: header}
+	ambiguousCtx := withMessageTrace(ctx, "dashboard", ambiguous, secondMeta)
+	if err := a.quarantine(ambiguousCtx, ambiguousPublishJS{JetStream: js}, ambiguous, secondMeta, "corrupt_payload", errCorruptPayload); err != nil || ambiguous.ackCalls != 1 {
+		t.Fatalf("verified ambiguous publish must ack: ack_calls=%d err=%v", ambiguous.ackCalls, err)
+	}
+	thirdMeta := &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 43}}
+	unverified := &testMsg{meta: thirdMeta, raw: []byte("third bytes"), header: header}
+	unverifiedCtx := withMessageTrace(ctx, "dashboard", unverified, thirdMeta)
+	if err := a.quarantine(unverifiedCtx, ambiguousPublishJS{JetStream: js, failLookup: true}, unverified, thirdMeta, "corrupt_payload", errCorruptPayload); err == nil || unverified.ackCalls != 0 {
+		t.Fatalf("unverified publish must remain unacked: ack_calls=%d err=%v", unverified.ackCalls, err)
+	}
+	fourthMeta := &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 44}}
+	wrongSubject := a.dlqSubject(fourthMeta)
+	wrongEntry, err := json.Marshal(deadLetter{Consumer: a.cfg.Durable, OriginalStream: "HAZARDS", OriginalSubject: "hazard.events", StreamSequence: 44, Raw: []byte("different bytes")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.Publish(ctx, wrongSubject, wrongEntry); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := &testMsg{meta: fourthMeta, raw: []byte("actual bytes"), header: header}
+	conflictCtx := withMessageTrace(ctx, "dashboard", conflicting, fourthMeta)
+	if a.quarantineOrRetry(conflictCtx, js, conflicting, fourthMeta, "corrupt_payload", errCorruptPayload) || conflicting.ackCalls != 0 || !a.halted.Load() {
+		t.Fatalf("conflicting DLQ entry must halt without ack: ack_calls=%d halted=%v", conflicting.ackCalls, a.halted.Load())
+	}
+	for _, want := range []string{`"operation":"dlq_publish"`, `"operation":"original_double_ack"`, `"operation":"dlq_subject_lookup"`, `"latency_ms":`, `"correlation_id":"cid-41"`} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs missing %s: %s", want, logs.String())
+		}
 	}
 }

@@ -84,14 +84,21 @@ func (s *schemaClient) codec(ctx context.Context, id int) (*goavro.Codec, error)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errRegistryUnavailable, err)
 	}
+	if cid := correlationFromContext(ctx); cid != "" {
+		req.Header.Set(correlationHeader, cid)
+	}
 	start := time.Now()
 	resp, err := s.http.Do(req)
 	if err != nil {
-		slog.Warn("registry lookup failed", "schema_id", id, "latency_ms", time.Since(start).Milliseconds(), "error", err)
+		logOutbound(ctx, "registry_lookup", "schema-registry", 0, start, err)
 		return nil, fmt.Errorf("%w: %v", errRegistryUnavailable, err)
 	}
 	defer resp.Body.Close()
-	slog.Info("registry lookup", "schema_id", id, "status_code", resp.StatusCode, "latency_ms", time.Since(start).Milliseconds())
+	var lookupErr error
+	if resp.StatusCode >= 400 {
+		lookupErr = fmt.Errorf("registry status %d", resp.StatusCode)
+	}
+	logOutbound(ctx, "registry_lookup", "schema-registry", resp.StatusCode, start, lookupErr)
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("%w: %d", errUnknownSchema, id)
 	}
@@ -168,6 +175,9 @@ func (s *schemaClient) decode(ctx context.Context, data []byte) (envelope, error
 	if !ok || cid == "" {
 		return envelope{}, fmt.Errorf("%w: missing correlation ID", errCorruptPayload)
 	}
+	if headerCID := correlationFromContext(ctx); headerCID != "" && headerCID != cid {
+		return envelope{}, fmt.Errorf("%w: correlation header and envelope differ", errCorruptPayload)
+	}
 	payload, ok := outer["payload"].(map[string]any)
 	if !ok {
 		return envelope{}, fmt.Errorf("%w: missing hazard payload", errConsumerIncompatible)
@@ -233,6 +243,7 @@ type deadLetter struct {
 	OriginalSubject string `json:"original_subject"`
 	StreamSequence  uint64 `json:"stream_sequence"`
 	Consumer        string `json:"consumer"`
+	CorrelationID   string `json:"correlation_id,omitempty"`
 	Attempts        uint64 `json:"attempts"`
 	Reason          string `json:"reason"`
 	ReasonCode      string `json:"reason_code"`
@@ -241,33 +252,44 @@ type deadLetter struct {
 }
 
 func (a *app) quarantine(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg, meta *jetstream.MsgMetadata, code string, reason error) error {
-	entry := deadLetter{OriginalStream: meta.Stream, OriginalSubject: msg.Subject(), StreamSequence: meta.Sequence.Stream, Consumer: a.cfg.Durable, Attempts: meta.NumDelivered, Reason: reason.Error(), ReasonCode: code, FailedAt: time.Now().UTC().Format(time.RFC3339Nano), Raw: msg.Data()}
+	entry := deadLetter{OriginalStream: meta.Stream, OriginalSubject: msg.Subject(), StreamSequence: meta.Sequence.Stream, Consumer: a.cfg.Durable, CorrelationID: correlationFromContext(ctx), Attempts: meta.NumDelivered, Reason: reason.Error(), ReasonCode: code, FailedAt: time.Now().UTC().Format(time.RFC3339Nano), Raw: msg.Data()}
 	data, err := json.Marshal(entry)
 	if err != nil {
 		return err
 	}
+	subject := a.dlqSubject(meta)
 	pubCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, err = js.Publish(pubCtx, a.cfg.DLQSubject, data, jetstream.WithMsgID(fmt.Sprintf("%s:%d", a.cfg.Durable, meta.Sequence.Stream)))
-	if err != nil {
-		return err
+	started := time.Now()
+	ack, err := js.Publish(pubCtx, subject, data, jetstream.WithMsgID(fmt.Sprintf("%s:%s:%d", a.cfg.Durable, meta.Stream, meta.Sequence.Stream)))
+	logOutbound(ctx, "dlq_publish", "nats", 0, started, err)
+	if err != nil || ack == nil || ack.Duplicate {
+		if verifyErr := a.verifyStoredDLQ(ctx, js, subject, entry); verifyErr != nil {
+			return fmt.Errorf("DLQ publish unconfirmed (%v): %w", err, verifyErr)
+		}
 	}
 	ackCtx, ackCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer ackCancel()
-	if err := msg.DoubleAck(ackCtx); err != nil {
+	started = time.Now()
+	err = msg.DoubleAck(ackCtx)
+	logOutbound(ctx, "original_double_ack", "nats", 0, started, err)
+	if err != nil {
 		return err
 	}
 	if err := a.clearRetries(ctx, meta); err != nil {
-		slog.Warn("retry cleanup failed", "service", a.cfg.Role, "error", err)
+		logEvent(ctx, slog.LevelWarn, "retry cleanup failed", "error", err)
 	}
-	slog.Error("message quarantined", "service", a.cfg.Role, "consumer", a.cfg.Durable, "stream_sequence", meta.Sequence.Stream, "attempts", meta.NumDelivered, "reason_code", code, "reason", reason.Error())
+	logEvent(ctx, slog.LevelError, "message quarantined", "consumer", a.cfg.Durable, "dlq_subject", subject, "attempts", meta.NumDelivered, "reason_code", code, "reason", reason.Error())
 	return nil
 }
 
-func (a *app) delayedRetry(msg jetstream.Msg, delay time.Duration, cause error) bool {
-	slog.Warn("message delayed", "service", a.cfg.Role, "delay", delay, "error", cause)
-	if err := msg.NakWithDelay(delay); err != nil {
-		slog.Error("delayed NAK failed; reconnecting", "service", a.cfg.Role, "error", err)
+func (a *app) delayedRetry(ctx context.Context, msg jetstream.Msg, delay time.Duration, cause error) bool {
+	logEvent(ctx, slog.LevelWarn, "message delayed", "delay", delay, "error", cause)
+	started := time.Now()
+	err := msg.NakWithDelay(delay)
+	logOutbound(ctx, "delayed_nak", "nats", 0, started, err)
+	if err != nil {
+		logEvent(ctx, slog.LevelError, "delayed NAK failed; reconnecting", "error", err)
 		return false
 	}
 	return true
@@ -276,57 +298,64 @@ func (a *app) delayedRetry(msg jetstream.Msg, delay time.Duration, cause error) 
 func (a *app) confirmedAck(ctx context.Context, msg jetstream.Msg, meta *jetstream.MsgMetadata) bool {
 	ackCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := msg.DoubleAck(ackCtx); err != nil {
-		slog.Error("confirmed ack failed; redelivery will be deduplicated", "service", a.cfg.Role, "stream_sequence", meta.Sequence.Stream, "error", err)
+	started := time.Now()
+	err := msg.DoubleAck(ackCtx)
+	logOutbound(ctx, "original_double_ack", "nats", 0, started, err)
+	if err != nil {
+		logEvent(ctx, slog.LevelError, "confirmed ack failed; redelivery will be deduplicated", "error", err)
 		return false
 	}
 	if err := a.clearRetries(ctx, meta); err != nil {
-		slog.Warn("retry cleanup failed", "service", a.cfg.Role, "error", err)
+		logEvent(ctx, slog.LevelWarn, "retry cleanup failed", "error", err)
 	}
 	return true
 }
 
-func (a *app) haltFor(reason string, meta *jetstream.MsgMetadata, err error) {
-	slog.Error("consumer halted; operator action required", "service", a.cfg.Role, "stream_sequence", meta.Sequence.Stream, "reason", reason, "error", err)
+func (a *app) haltFor(ctx context.Context, reason string, meta *jetstream.MsgMetadata, err error) {
+	logEvent(ctx, slog.LevelError, "consumer halted; operator action required", "reason", reason, "error", err)
 	a.halt(reason + ": " + err.Error())
 }
 
 func (a *app) quarantineOrRetry(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg, meta *jetstream.MsgMetadata, code string, cause error) bool {
 	if err := a.quarantine(ctx, js, msg, meta, code, cause); err != nil {
-		slog.Error("DLQ publish or ack failed", "service", a.cfg.Role, "error", err)
-		return a.delayedRetry(msg, 10*time.Second, err)
+		logEvent(ctx, slog.LevelError, "DLQ publish or ack failed", "error", err)
+		if errors.Is(err, errDLQConflict) {
+			a.haltFor(ctx, "dlq_identity_conflict", meta, err)
+			return false
+		}
+		return a.delayedRetry(ctx, msg, 10*time.Second, err)
 	}
 	return true
 }
 
 func (a *app) handleStoreFailure(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg, meta *jetstream.MsgMetadata, err error, messageWrite bool) bool {
 	if errors.Is(err, errConsumerIncompatible) {
-		a.haltFor("consumer_incompatible", meta, err)
+		a.haltFor(ctx, "consumer_incompatible", meta, err)
 		return false
 	}
 	switch classifyStoreFailure(err) {
 	case storeTransient:
-		return a.delayedRetry(msg, 5*time.Second, err)
+		return a.delayedRetry(ctx, msg, 5*time.Second, err)
 	case storeConstraint:
 		if !messageWrite {
-			a.haltFor("consumer_state_constraint", meta, err)
+			a.haltFor(ctx, "consumer_state_constraint", meta, err)
 			return false
 		}
 		state, countErr := a.recordConstraint(ctx, meta, time.Now())
 		if countErr != nil {
-			a.haltFor("constraint_tracking_failed", meta, countErr)
+			a.haltFor(ctx, "constraint_tracking_failed", meta, countErr)
 			return false
 		}
 		if state.Recent >= constraintStormLimit {
-			a.haltFor("constraint_failure_storm", meta, err)
+			a.haltFor(ctx, "constraint_failure_storm", meta, err)
 			return false
 		}
 		if state.Attempts < constraintLimit {
-			return a.delayedRetry(msg, retryDelay(state.Attempts, meta.Sequence.Stream), err)
+			return a.delayedRetry(ctx, msg, retryDelay(state.Attempts, meta.Sequence.Stream), err)
 		}
 		return a.quarantineOrRetry(ctx, js, msg, meta, "sqlite_constraint", err)
 	default:
-		a.haltFor("sqlite_environmental_failure", meta, err)
+		a.haltFor(ctx, "sqlite_environmental_failure", meta, err)
 		return false
 	}
 }
@@ -337,8 +366,9 @@ func (a *app) process(parent context.Context, js jetstream.JetStream, msg jetstr
 	defer cancel()
 	meta, err := msg.Metadata()
 	if err != nil {
-		return a.delayedRetry(msg, 5*time.Second, err)
+		return a.delayedRetry(ctx, msg, 5*time.Second, err)
 	}
+	ctx = withMessageTrace(ctx, a.cfg.Role, msg, meta)
 	processed, err := a.alreadyProcessed(ctx, meta, msg.Data())
 	if err != nil {
 		return a.handleStoreFailure(ctx, js, msg, meta, err, false)
@@ -350,7 +380,7 @@ func (a *app) process(parent context.Context, js jetstream.JetStream, msg jetstr
 	if err != nil {
 		if errors.Is(err, errRegistryUnavailable) {
 			a.pauseUntil.Store(time.Now().Add(30 * time.Second).UnixNano())
-			return a.delayedRetry(msg, 30*time.Second, err)
+			return a.delayedRetry(ctx, msg, 30*time.Second, err)
 		}
 		if errors.Is(err, errUnknownSchema) {
 			id := int(binary.BigEndian.Uint32(msg.Data()[1:5]))
@@ -359,11 +389,11 @@ func (a *app) process(parent context.Context, js jetstream.JetStream, msg jetstr
 				return a.handleStoreFailure(ctx, js, msg, meta, countErr, false)
 			}
 			if state.Recent >= unknownStormLimit {
-				a.haltFor("unknown_schema_storm", meta, err)
+				a.haltFor(ctx, "unknown_schema_storm", meta, err)
 				return false
 			}
 			if time.Since(state.FirstSeen) < unknownSchemaWindow {
-				return a.delayedRetry(msg, retryDelay(state.Attempts, meta.Sequence.Stream), err)
+				return a.delayedRetry(ctx, msg, retryDelay(state.Attempts, meta.Sequence.Stream), err)
 			}
 			return a.quarantineOrRetry(ctx, js, msg, meta, "schema_not_found", err)
 		}
@@ -376,27 +406,31 @@ func (a *app) process(parent context.Context, js jetstream.JetStream, msg jetstr
 				return a.handleStoreFailure(ctx, js, msg, meta, countErr, false)
 			}
 			if recent >= corruptStormLimit {
-				a.haltFor("corrupt_payload_storm", meta, err)
+				a.haltFor(ctx, "corrupt_payload_storm", meta, err)
 				return false
 			}
 			return a.quarantineOrRetry(ctx, js, msg, meta, "corrupt_payload", err)
 		}
-		a.haltFor("consumer_incompatible", meta, err)
+		a.haltFor(ctx, "consumer_incompatible", meta, err)
 		return false
 	}
+	ctx = withDecodedCorrelation(ctx, e.CorrelationID)
 	if err := a.save(ctx, meta, msg.Data(), e); err != nil {
 		return a.handleStoreFailure(ctx, js, msg, meta, err, true)
 	}
 	if !a.confirmedAck(ctx, msg, meta) {
 		return false
 	}
-	slog.Info("event processed", "service", a.cfg.Role, "correlation_id", e.CorrelationID, "hazard_id", e.HazardID, "stream_sequence", meta.Sequence.Stream)
+	logEvent(ctx, slog.LevelInfo, "event processed", "hazard_id", e.HazardID)
 	return true
 }
 
 func (a *app) run(ctx context.Context) {
+	ctx = withServiceTrace(ctx, a.cfg.Role)
 	for ctx.Err() == nil {
+		started := time.Now()
 		nc, err := nats.Connect(a.cfg.NATSURL, nats.Name(a.cfg.Durable), nats.Timeout(3*time.Second))
+		logOutbound(ctx, "broker_connect", "nats", 0, started, err)
 		if err != nil {
 			slog.Warn("broker unavailable", "service", a.cfg.Role, "error", err)
 			sleep(ctx, 2*time.Second)
@@ -409,13 +443,30 @@ func (a *app) run(ctx context.Context) {
 			continue
 		}
 		setupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		started = time.Now()
 		stream, err := js.Stream(setupCtx, a.cfg.Stream)
+		logOutbound(ctx, "source_stream_lookup", "nats", 0, started, err)
+		var dlq jetstream.Stream
 		if err == nil {
-			_, err = js.Stream(setupCtx, a.cfg.DLQStream)
+			started = time.Now()
+			dlq, err = js.Stream(setupCtx, a.cfg.DLQStream)
+			logOutbound(ctx, "dlq_stream_lookup", "nats", 0, started, err)
+		}
+		if err == nil {
+			started = time.Now()
+			var info *jetstream.StreamInfo
+			info, err = dlq.Info(setupCtx)
+			logOutbound(ctx, "dlq_stream_info", "nats", 0, started, err)
+			if err == nil && (info.Config.Discard != jetstream.DiscardNew || !info.Config.DiscardNewPerSubject || info.Config.MaxMsgsPerSubject != 1 ||
+				len(info.Config.Subjects) != 1 || !strings.HasPrefix(a.cfg.DLQSubject+".", strings.TrimSuffix(info.Config.Subjects[0], ">"))) {
+				err = fmt.Errorf("DLQ stream %q does not enforce unique subjects for %q", a.cfg.DLQStream, a.cfg.DLQSubject)
+			}
 		}
 		var consumer jetstream.Consumer
 		if err == nil {
+			started = time.Now()
 			consumer, err = stream.CreateOrUpdateConsumer(setupCtx, jetstream.ConsumerConfig{Durable: a.cfg.Durable, FilterSubject: a.cfg.Subject, DeliverPolicy: jetstream.DeliverAllPolicy, AckPolicy: jetstream.AckExplicitPolicy, AckWait: 60 * time.Second, MaxDeliver: -1, MaxAckPending: 64})
+			logOutbound(ctx, "consumer_setup", "nats", 0, started, err)
 		}
 		cancel()
 		if err != nil {
@@ -443,7 +494,9 @@ func (a *app) run(ctx context.Context) {
 				continue
 			}
 			a.ready.Store(true)
+			started = time.Now()
 			batch, err := consumer.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
+			logOutbound(ctx, "consumer_fetch", "nats", 0, started, err)
 			if err != nil {
 				slog.Warn("fetch failed", "service", a.cfg.Role, "error", err)
 				break

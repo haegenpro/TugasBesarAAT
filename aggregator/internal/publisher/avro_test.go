@@ -3,12 +3,20 @@ package publisher
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/linkedin/goavro/v2"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 
 	"aggregator/internal/avrowire"
+	"aggregator/internal/domain"
+	"aggregator/internal/timeutil"
 )
 
 func TestBrokerEnvelopeWithRegistry(t *testing.T) {
@@ -39,4 +47,33 @@ func TestBrokerEnvelopeWithRegistry(t *testing.T) {
 	envelope := native.(map[string]any)
 	attrs := envelope["payload"].(map[string]any)["attributes"].(map[string]any)
 	require.JSONEq(t, "1200", string(attrs["ash_column_height_m"].([]byte)))
+}
+
+type captureJetStream struct {
+	jetstream.JetStream
+	message *nats.Msg
+}
+
+func (j *captureJetStream) PublishMsg(_ context.Context, msg *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+	j.message = msg
+	return &jetstream.PubAck{}, nil
+}
+
+func TestPublishCarriesCorrelationHeaderAndEnvelope(t *testing.T) {
+	codec, err := goavro.NewCodec(envelopeSchema)
+	require.NoError(t, err)
+	js := &captureJetStream{}
+	p := &Publisher{js: js, subject: "hazard.events", logger: slog.New(slog.NewJSONHandler(io.Discard, nil)), schema: &avrowire.Schema{ID: 17, Codec: codec}}
+	now := time.Now().UTC()
+	event := domain.HazardEvent{
+		HazardID: "h1", Source: domain.SourcePVMBG, SourceRefID: "r1", HazardType: domain.HazardVolcanic,
+		Severity: domain.SeveritySiaga, AreaName: "Merapi", Latitude: -7.0, Longitude: 110.0,
+		OccurredAt: timeutil.New(now), IngestedAt: timeutil.New(now), Attributes: map[string]any{"confidence_level": 0.88},
+	}
+	require.NoError(t, p.Publish(context.Background(), event, "cid-17"))
+	require.Equal(t, "cid-17", js.message.Header.Get("X-Correlation-ID"))
+	native, rest, err := codec.NativeFromBinary(js.message.Data[5:])
+	require.NoError(t, err)
+	require.Empty(t, rest)
+	require.Equal(t, "cid-17", native.(map[string]any)["correlation_id"])
 }

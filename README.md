@@ -253,7 +253,7 @@ of them are in `.env.example`.
 | `CONSUMER_PORT` | Internal HTTP port | `8091` | `8092` |
 | `CONSUMER_DB_PATH` | Consumer-owned SQLite file | `/data/dashboard.db` | `/data/notifier.db` |
 | `NATS_DURABLE` | Durable consumer name | `dashboard-v1` | `notifier-v1` |
-| `NATS_DLQ_SUBJECT` | This consumer's dead-letter subject | `hazard.dlq.dashboard` | `hazard.dlq.notifier` |
+| `NATS_DLQ_SUBJECT` | This consumer's dead-letter subject prefix | `hazard.dlq.dashboard` | `hazard.dlq.notifier` |
 | `NATS_URL`, `NATS_STREAM`, `NATS_SUBJECT`, `NATS_DLQ_STREAM` | Same values as `broker/.env` | | |
 | `SCHEMA_REGISTRY_URL` | Registry for decoding events | | |
 
@@ -652,8 +652,10 @@ A few details about the payload:
 - `payload.attributes` is an Avro `map<string, bytes>`, where each value is
   one JSON-encoded attribute. That keeps the mixed types used by the Store
   and the Client API intact.
-- Consumers have to resolve the schema ID and decode the Avro before they
-  can read the envelope.
+- The `X-Correlation-ID` NATS header repeats the envelope's correlation ID,
+  so consumers can log and forward it during an uncached schema lookup. After
+  decoding, they reject a disagreement between the header and envelope.
+  Older messages without the header still decode and use the envelope ID.
 - The Aggregator registers the broker schema the first time it needs to
   publish. If the registry is down at that point, the service keeps running
   and the outbox simply stays pending.
@@ -713,7 +715,11 @@ pending. Processing is limited to 25 seconds under a 60 second ack wait.
 Each consumer reads the five-byte schema-ID frame and fetches the writer
 schema from Apicurio when it is not cached. Validated schemas are saved in
 SQLite by registry URL and ID, so they survive consumer restarts and
-registry outages. The JSON-encoded attribute values are decoded one by one.
+registry outages. The consumer forwards `X-Correlation-ID` on registry requests
+and records the lookup and broker-call latency in structured logs. Messages
+without a usable correlation header are logged by original stream and sequence
+until they can be decoded. The JSON-encoded attribute values are decoded one
+by one.
 
 ### When something goes wrong
 
@@ -731,16 +737,22 @@ registry outages. The JSON-encoded attribute values are decoded one by one.
 | Ten different constraint failures within a minute | Halts |
 
 A DLQ record contains the original bytes (base64 in JSON), the stream
-sequence, the consumer, a reason code, the attempt count, and the time.
+sequence, the consumer, an optional correlation ID, a reason code, the attempt
+count, and the time.
 Replay is manual.
 
-Two more points on the DLQ. JetStream is configured with `MaxDeliver=-1`,
-because a finite limit could stop delivery before our own retry or DLQ step
-finishes. Also, the DLQ publication is confirmed before the original message
-is acknowledged. Its message ID is deterministic, which cuts down duplicate
-DLQ entries within JetStream's deduplication window. For a permanent
-deduplication key, DLQ tooling should use
-`(consumer, original_stream, stream_sequence)`.
+JetStream is configured with `MaxDeliver=-1`, because a finite limit could stop
+delivery before our own retry or DLQ step finishes. Each DLQ publication uses
+the subject `<NATS_DLQ_SUBJECT>.<durable>.<original_stream>.<stream_sequence>`.
+The `HAZARDS_DLQ` stream allows only one retained message per subject
+(`DiscardNewPerSubject`, `DiscardNew`, `MaxMsgsPerSubject=1`). After a lost ack,
+redelivery may attempt another DLQ publish; the consumer reads and validates
+the existing entry before acknowledging the original. It never treats an
+unverified publish error as success. This uniqueness lasts while the DLQ entry
+is retained. Manual deletion, purge, or replay after retention can admit a new
+entry, so replay tooling must still deduplicate by
+`(consumer, original_stream, stream_sequence)`. The DLQ retention must be at
+least as long as the main stream retention.
 
 ### Recovering from a halt
 
@@ -767,7 +779,7 @@ messages are still there. The DLQ stream keeps failures for
 `NATS_DLQ_MAX_AGE` (168h in the example). `NATS_DLQ_STREAM`,
 `NATS_DLQ_SUBJECT_PREFIX`, and `NATS_DLQ_MAX_AGE` go in `broker/.env`, while
 each consumer env file needs `NATS_DLQ_STREAM` and its own
-`NATS_DLQ_SUBJECT`.
+`NATS_DLQ_SUBJECT` prefix.
 
 ### Trying it out
 
