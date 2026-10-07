@@ -1,50 +1,32 @@
 package config
 
-import (
-	"errors"
-	"os"
-	"strconv"
-)
-
 type Config struct {
 	Port            string
 	APIKey          string
 	DelayMs         int
 	EventIntervalMs int
 	RegistryURL     string
+	ArchivePath     string
 }
 
 func Load() (Config, error) {
-	key := os.Getenv("BMKG_API_KEY")
-	if key == "" {
-		return Config{}, errors.New("BMKG_API_KEY is required")
+	v, err := requiredEnv("BMKG_PORT", "BMKG_API_KEY", "BMKG_DELAY_MS", "BMKG_EVENT_INTERVAL_MS", "SCHEMA_REGISTRY_URL", "SOURCE_ARCHIVE_PATH")
+	if err != nil {
+		return Config{}, err
 	}
-	// The contract requires at least one new event every 10 seconds.
-	interval := getEnvInt("BMKG_EVENT_INTERVAL_MS", 10000)
-	if interval < 1 || interval > 10000 {
-		return Config{}, errors.New("BMKG_EVENT_INTERVAL_MS must be between 1 and 10000")
+	if _, err = envInt(v, "BMKG_PORT", 1, 65535); err != nil {
+		return Config{}, err
 	}
-	return Config{
-		Port:            getEnv("BMKG_PORT", "8081"),
-		APIKey:          key,
-		DelayMs:         getEnvInt("BMKG_DELAY_MS", 100),
-		EventIntervalMs: interval,
-		RegistryURL:     getEnv("SCHEMA_REGISTRY_URL", "http://schema-registry:8080/apis/ccompat/v7"),
-	}, nil
-}
-
-func getEnv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	delay, err := envInt(v, "BMKG_DELAY_MS", 0, 0)
+	if err != nil {
+		return Config{}, err
 	}
-	return def
-}
-
-func getEnvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+	interval, err := envInt(v, "BMKG_EVENT_INTERVAL_MS", 1, 10000)
+	if err != nil {
+		return Config{}, err
 	}
-	return def
+	if err = envURL(v, "SCHEMA_REGISTRY_URL", "http", "https"); err != nil {
+		return Config{}, err
+	}
+	return Config{Port: v["BMKG_PORT"], APIKey: v["BMKG_API_KEY"], DelayMs: delay, EventIntervalMs: interval, RegistryURL: v["SCHEMA_REGISTRY_URL"], ArchivePath: v["SOURCE_ARCHIVE_PATH"]}, nil
 }

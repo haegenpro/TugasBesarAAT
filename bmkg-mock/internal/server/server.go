@@ -25,6 +25,7 @@ func New(logger *slog.Logger, apiKey string, h *handlers.Handler) *gin.Engine {
 	protected.Use(auth.RequireKey(apiKey))
 	protected.GET("/seismic-events", h.SeismicEvents)
 	protected.GET("/tsunami-warnings", h.TsunamiWarnings)
+	protected.GET("/history", h.History)
 
 	return r
 }

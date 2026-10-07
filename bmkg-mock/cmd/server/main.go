@@ -11,6 +11,7 @@ import (
 	"bmkg-mock/internal/avrowire"
 	"bmkg-mock/internal/config"
 	"bmkg-mock/internal/handlers"
+	"bmkg-mock/internal/history"
 	"bmkg-mock/internal/middleware"
 	"bmkg-mock/internal/seed"
 	"bmkg-mock/internal/server"
@@ -26,6 +27,16 @@ func main() {
 
 	events, warnings := seed.Build()
 	h := handlers.New(events, warnings, cfg.DelayMs)
+	archive, err := history.Open(cfg.ArchivePath)
+	if err != nil {
+		logger.Error("source archive unavailable", "error", err)
+		os.Exit(1)
+	}
+	defer archive.DB.Close()
+	if err := h.AttachArchive(archive); err != nil {
+		logger.Error("source archive initialization failed", "error", err)
+		os.Exit(1)
+	}
 	h.Registry = avrowire.NewClient(cfg.RegistryURL)
 	h.Registry.ConfigureLogging(logger, "bmkg-mock")
 	router := server.New(logger, cfg.APIKey, h)

@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net/http"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"bmkg-mock/internal/avrowire"
 	"bmkg-mock/internal/domain"
+	"bmkg-mock/internal/history"
 	"bmkg-mock/internal/middleware"
 	"bmkg-mock/internal/seed"
 	"bmkg-mock/internal/timeutil"
@@ -24,6 +26,8 @@ import (
 const maxLive = 100
 
 type Handler struct {
+	Logger   *slog.Logger
+	Archive  *history.Archive
 	Events   []domain.SeismicEvent
 	Warnings []domain.TsunamiWarning
 	DelayMs  int
@@ -34,7 +38,7 @@ type Handler struct {
 }
 
 func New(events []domain.SeismicEvent, warnings []domain.TsunamiWarning, delayMs int) *Handler {
-	return &Handler{Events: events, Warnings: warnings, DelayMs: delayMs}
+	return &Handler{Logger: middleware.NewLogger(), Events: events, Warnings: warnings, DelayMs: delayMs}
 }
 
 // AddEvent appends a generated event and its optional tsunami warning,
@@ -42,6 +46,16 @@ func New(events []domain.SeismicEvent, warnings []domain.TsunamiWarning, delayMs
 func (h *Handler) AddEvent(ev domain.SeismicEvent, warning *domain.TsunamiWarning) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.Archive != nil {
+		records := []history.Record{{Entity: "seismic-events", ID: ev.EventID, Payload: ev}}
+		if warning != nil {
+			records = append(records, history.Record{Entity: "tsunami-warnings", ID: warning.WarningID, Payload: *warning})
+		}
+		if err := h.Archive.Append(records...); err != nil {
+			h.Logger.Error("archive write failed; observation not exposed", "service", "bmkg-mock", "error", err)
+			return
+		}
+	}
 	h.Events = append(h.Events, ev)
 	if warning != nil {
 		h.Warnings = append(h.Warnings, *warning)
@@ -59,7 +73,7 @@ func (h *Handler) AddEvent(ev domain.SeismicEvent, warning *domain.TsunamiWarnin
 // RunGenerator adds one new seismic event per interval until ctx is cancelled.
 func (h *Handler) RunGenerator(ctx context.Context, interval time.Duration, logger *slog.Logger) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	boot := time.Now().Unix()
+	boot := time.Now().UnixNano()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for n := 1; ; n++ {
@@ -99,6 +113,15 @@ func (h *Handler) SeismicEvents(c *gin.Context) {
 	h.delay()
 	since := parseSince(c)
 	h.mu.RLock()
+	if h.Archive != nil {
+		head, err := h.Archive.Head()
+		if err != nil {
+			h.mu.RUnlock()
+			c.JSON(503, gin.H{"error": "archive unavailable"})
+			return
+		}
+		c.Header("X-Source-Sequence", strconv.FormatInt(head, 10))
+	}
 	out := make([]domain.SeismicEvent, 0, len(h.Events))
 	for _, e := range h.Events {
 		if since.IsZero() || e.OccurredAt.Time.After(since) {
@@ -126,6 +149,15 @@ func (h *Handler) TsunamiWarnings(c *gin.Context) {
 	h.delay()
 	since := parseSince(c)
 	h.mu.RLock()
+	if h.Archive != nil {
+		head, err := h.Archive.Head()
+		if err != nil {
+			h.mu.RUnlock()
+			c.JSON(503, gin.H{"error": "archive unavailable"})
+			return
+		}
+		c.Header("X-Source-Sequence", strconv.FormatInt(head, 10))
+	}
 	out := make([]domain.TsunamiWarning, 0, len(h.Warnings))
 	for _, w := range h.Warnings {
 		if since.IsZero() || w.EstimatedArrival.Time.After(since) {
