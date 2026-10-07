@@ -19,6 +19,9 @@ func TestLoadConfigRejectsShortDLQRetention(t *testing.T) {
 	t.Setenv("NATS_DLQ_STREAM", "HAZARDS_DLQ")
 	t.Setenv("NATS_DLQ_SUBJECT_PREFIX", "hazard.dlq")
 	t.Setenv("NATS_DLQ_MAX_AGE", "12h")
+	t.Setenv("NATS_LIFECYCLE_STREAM", "REPORT_LIFECYCLE")
+	t.Setenv("NATS_LIFECYCLE_SUBJECT", "report.lifecycle")
+	t.Setenv("NATS_LIFECYCLE_MAX_AGE", "24h")
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("DLQ retention shorter than source retention should be rejected")
 	}

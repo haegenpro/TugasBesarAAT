@@ -15,16 +15,27 @@ import (
 )
 
 type Config struct {
-	NATSURL       string
-	StreamName    string
-	StreamSubject string
-	StreamMaxAge  time.Duration
-	DLQStream     string
-	DLQPrefix     string
-	DLQMaxAge     time.Duration
+	LifecycleStream  string
+	LifecycleSubject string
+	LifecycleMaxAge  time.Duration
+	NATSURL          string
+	StreamName       string
+	StreamSubject    string
+	StreamMaxAge     time.Duration
+	DLQStream        string
+	DLQPrefix        string
+	DLQMaxAge        time.Duration
 }
 
 func loadConfig() (Config, error) {
+	v, err := requiredEnv("NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_STREAM_MAX_AGE", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT_PREFIX", "NATS_DLQ_MAX_AGE", "NATS_LIFECYCLE_STREAM", "NATS_LIFECYCLE_SUBJECT", "NATS_LIFECYCLE_MAX_AGE")
+	if err != nil {
+		return Config{}, err
+	}
+	if err = envURL(v, "NATS_URL", "nats", "tls", "ws", "wss"); err != nil {
+		return Config{}, err
+	}
+
 	natsURL, err := requireEnv("NATS_URL")
 	if err != nil {
 		return Config{}, err
@@ -69,7 +80,27 @@ func loadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("NATS_DLQ_MAX_AGE must be at least NATS_STREAM_MAX_AGE")
 	}
 
+	lifecycleStream, err := requireEnv("NATS_LIFECYCLE_STREAM")
+	if err != nil {
+		return Config{}, err
+	}
+	lifecycleSubject, err := requireEnv("NATS_LIFECYCLE_SUBJECT")
+	if err != nil {
+		return Config{}, err
+	}
+	raw, err := requireEnv("NATS_LIFECYCLE_MAX_AGE")
+	if err != nil {
+		return Config{}, err
+	}
+	lifecycleAge, err := time.ParseDuration(raw)
+	if err != nil || lifecycleAge <= 0 {
+		return Config{}, fmt.Errorf("NATS_LIFECYCLE_MAX_AGE must be a positive duration")
+	}
+	if dlqAge < lifecycleAge {
+		return Config{}, fmt.Errorf("DLQ retention must cover lifecycle retention")
+	}
 	return Config{
+		LifecycleStream: lifecycleStream, LifecycleSubject: lifecycleSubject, LifecycleMaxAge: lifecycleAge,
 		NATSURL:       natsURL,
 		StreamName:    streamName,
 		StreamSubject: streamSubject,
@@ -110,6 +141,11 @@ func ensureStream(parent context.Context, js jetstream.JetStream, cfg Config) er
 		info.Config.Storage,
 		info.Config.MaxAge,
 	)
+	if cfg.LifecycleStream != "" {
+		if _, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{Name: cfg.LifecycleStream, Subjects: []string{cfg.LifecycleSubject}, Storage: jetstream.FileStorage, MaxAge: cfg.LifecycleMaxAge}); err != nil {
+			return fmt.Errorf("create lifecycle stream: %w", err)
+		}
+	}
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name: cfg.DLQStream, Subjects: []string{cfg.DLQPrefix + ".>"},
 		Storage: jetstream.FileStorage, MaxAge: cfg.DLQMaxAge,
@@ -150,6 +186,19 @@ func checkStream(parent context.Context, cfg Config) error {
 		len(info.Config.Subjects) != 1 || info.Config.Subjects[0] != cfg.StreamSubject {
 		return fmt.Errorf("stream %q has unexpected configuration", cfg.StreamName)
 	}
+	if cfg.LifecycleStream != "" {
+		lifecycle, err := js.Stream(ctx, cfg.LifecycleStream)
+		if err != nil {
+			return err
+		}
+		info, err := lifecycle.Info(ctx)
+		if err != nil {
+			return err
+		}
+		if info.Config.Storage != jetstream.FileStorage || info.Config.MaxAge != cfg.LifecycleMaxAge || len(info.Config.Subjects) != 1 || info.Config.Subjects[0] != cfg.LifecycleSubject {
+			return fmt.Errorf("unexpected lifecycle stream configuration")
+		}
+	}
 	dlq, err := js.Stream(ctx, cfg.DLQStream)
 	if err != nil {
 		return fmt.Errorf("find DLQ stream %q: %w", cfg.DLQStream, err)
@@ -168,7 +217,8 @@ func checkStream(parent context.Context, cfg Config) error {
 
 func main() {
 	checkOnly := len(os.Args) == 2 && os.Args[1] == "--check"
-	if len(os.Args) > 1 && !checkOnly {
+	validateOnly := len(os.Args) == 2 && os.Args[1] == "--validate"
+	if len(os.Args) > 1 && !checkOnly && !validateOnly {
 		log.Fatalf("unsupported arguments: %v", os.Args[1:])
 	}
 
@@ -182,6 +232,9 @@ func main() {
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("invalid configuration: %v", err)
+	}
+	if validateOnly {
+		return
 	}
 	if checkOnly {
 		if err := checkStream(ctx, cfg); err != nil {

@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 
+/usr/local/bin/broker-init --validate
 rm -f /tmp/broker-ready
 nats-server --config /etc/nats/nats.conf &
 nats_pid=$!
