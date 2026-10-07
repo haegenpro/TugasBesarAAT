@@ -42,9 +42,9 @@ every file a complete run must produce.
 | k6 | load test | **not installed**: runs as `grafana/k6` container | same |
 | nats CLI | broker inspection | **not installed**: runs as `natsio/nats-box` container | same |
 
-Run everything from the repository root. The 11 per-service `.env` files must
+Run everything from the repository root. The 16 per-service `.env` files (including five monitoring files) must
 exist (see README, "Per-service environment files"). The root `.env` must
-contain all six host-port settings. All service settings in `.env.example`
+contain all seven host-port settings plus `GRAFANA_BIND_ADDRESS`. All service settings in `.env.example`
 are required; there are no configuration fallbacks. Startup is independent of
 external service availability. Consumer container health is liveness only;
 processing proofs use `/ready` and record/backlog checks.
@@ -214,6 +214,86 @@ as readable text in any editor, and the header line `### step 1.1` is the first 
 
 ---
 
+## Monitoring-assisted workflow (Windows and Unix)
+
+Use the commands below to trigger scenarios and assert exact results. Use Grafana
+for repeated observation instead of repeatedly running Docker log filters or NATS
+reports. Saved command outputs remain the acceptance evidence; dashboard captures
+add context. All Bash commands support Linux, macOS, and Git Bash; PowerShell
+commands support Windows PowerShell 5.1 and PowerShell 7.
+
+After Phase 1.1, open Grafana using your root `.env` settings:
+
+```bash
+GRAFANA_ADDR=$(envget .env GRAFANA_BIND_ADDRESS)
+GRAFANA_PORT=$(envget .env GRAFANA_HOST_PORT)
+case "$GRAFANA_ADDR" in 0.0.0.0) GRAFANA_ADDR=127.0.0.1 ;; esac
+printf 'Open http://%s:%s in your browser\n' "$GRAFANA_ADDR" "$GRAFANA_PORT"
+```
+```powershell
+$grafanaAddress = Get-EnvVal .env GRAFANA_BIND_ADDRESS
+$grafanaPort = Get-EnvVal .env GRAFANA_HOST_PORT
+if ($grafanaAddress -eq '0.0.0.0') { $grafanaAddress = '127.0.0.1' }
+Start-Process "http://${grafanaAddress}:$grafanaPort"
+```
+
+These commands assume the documented IPv4 bind configuration. Sign in with the
+credentials in `monitoring/grafana/.env`; do not print or save the password. Open
+**Monitoring → AAT Health, DLQ and Correlation Logs**, select all relevant services,
+set the time range to the test window, and enable a 5–10 second dashboard refresh.
+An existing Grafana volume retains its administrator password even if `.env` changes.
+
+Before relying on a panel, check **Monitoring collection** and **NATS metrics
+collection**. Missing collection is **No data**, not a successful test. Allow at
+least two collection intervals (about 30 seconds) after startup or a transition.
+Probes and metric scrapes run every 15 seconds, so they can miss short outages.
+Alerts evaluate every 30 seconds; endpoint failures require one minute before
+firing. Notifications are muted; inspect alert state in Grafana.
+
+| Runbook step | Observe in Grafana | Assertions that remain required |
+| --- | --- | --- |
+| 1.2 | Liveness, Readiness, Endpoint availability history | Direct endpoint status codes |
+| 1.4 | Logs matching correlation ID | Generate one known ID; verify Client API, Auth, Aggregator and latency fields |
+| 4.1–4.4 | Consumer pending messages, pending acknowledgements, redeliveries; readiness | Stream subjects/durable identities, the same hazard ID in both consumers, missed-event catch-up, SQL outbox check |
+| 4.5 | Logs for the optional demo consumer, when collected | Third consumer receives the same event; producer start time unchanged (demo consumer has no permanent probe target) |
+| 5.2 | Endpoint availability history and consumer recovery | Keep the two-second authenticated business probe, image IDs, and container start-time comparison |
+| 6.1–6.2b | Availability, outbound failures, request-rejection logs | Keep k6: concurrency, duration, throughput, p50/p95/p99, error rate, and controlled 429 checks |
+| 6.3 | Outbound failure logs and recovery timeline | Outage toggle, direct 503 versus health 200, cached response 200 with stale metadata, recovery, and no restart |
+
+For 1.4 and 4.2, copy the printed correlation ID into the dashboard's exact
+correlation filter. Select the contributing services and inspect the matching
+JSON fields. The existing log commands provide a text export/fallback; during
+exploration there is no need to rerun them continuously.
+
+For 4.3–4.4, keep the dashboard open across stop/start: notifier pending messages
+should rise and then drain while the dashboard consumer continues. Broker backlog
+draining alone does not prove business delivery: keep `wait_has` / `Wait-Has` for
+the specific missed event. Pending acknowledgements and redelivery counts add
+diagnostic context; they are not required to remain zero throughout recovery.
+
+For 6.3, PVMBG `/health` can remain green during an intentional data outage.
+Check the business response's `source_status` and `stale_since` plus warning logs.
+Synthetic probe duration and **Logged outbound latency p95** are not end-to-end
+business request latency and cannot replace k6 thresholds.
+
+Schema mapping, role redaction, token expiry/refresh, JSONB storage, network
+isolation, and lifecycle revision/order assertions remain API/SQL/Go tests.
+Monitoring does not inspect those contracts or instrument application throughput,
+outbox state, database health, or distributed traces.
+
+For supplemental screenshots, save `evidence/1.2-health.png`,
+`1.4-correlation.png`, `4.3-backlog-during.png`, `4.4-backlog-after.png`,
+`5.2-availability.png`, and `6.3-outage-recovery.png` as applicable. Include the
+visible time window, service/durable labels, and correlation ID where relevant.
+Avoid credentials or tokens. Record the scenario times in the corresponding step
+transcript. Screenshots do not replace Appendix C's exact record and response
+checks. See [Monitoring](../monitoring/README.md) and
+[Monitoring verification](../monitoring/VERIFICATION.md) for collector-loss and
+DLQ-specific checks. A retained DLQ count is an archive count; a decrease does not
+prove successful recovery.
+
+---
+
 ## Phase 1: Clean boot & baseline (Ketentuan 3 and 7, P1.1)
 
 ### 1.1 Start the whole system with one command
@@ -236,9 +316,10 @@ do { Start-Sleep 3; $bad = docker compose ps --format '{{.Health}}' | Where-Obje
 docker compose ps --format 'table {{.Service}}\t{{.Status}}' | Tee8 1.1-ps.txt
 ```
 
-**Desired state:** exactly 11 containers, all `healthy`: `broker, postgres,
+**Desired state:** exactly 16 default-profile containers, all `healthy`: `broker, postgres,
 registry-db, schema-registry, bmkg-mock, pvmbg-mock, aggregator, auth-service,
-client-api, consumer-dashboard, consumer-notifier`. The one command is
+client-api, consumer-dashboard, consumer-notifier, grafana, prometheus, loki, alloy,
+nats-exporter`. Optional profile containers are not included in this count. The one command is
 `docker compose up -d --build`. **Criterion:** Ketentuan 3.
 
 ### 1.2 Health endpoints
@@ -779,7 +860,7 @@ docker compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}\t{{.Port
 ```
 
 **Desired state:** every component is its own container/image. Host-published ports are
-only `18080` (client-api), `18081`, `18082`, `14222/18222` (broker), `18084` (registry) with the template settings. Host ports must be set in the root `.env`.
+only `18080` (client-api), `18081`, `18082`, `14222/18222` (broker), `18084` (registry), and `127.0.0.1:13000` (Grafana) with the template settings. Host ports must be set in the root `.env`.
 `postgres`, `aggregator`, `auth-service`, and both consumers publish **no** host port.
 
 ### 5.2 Stop, rebuild, restart ONE container, nothing else restarts (P4.1, part 2)
@@ -1169,7 +1250,7 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 
 | Step | File(s) | Must show |
 | --- | --- | --- |
-| 1.1 | `1.1.txt` | 11 containers `healthy` |
+| 1.1 | `1.1.txt` | 16 default-profile containers `healthy` |
 | 1.3 | `1.3.txt`, `1.3-volcanic-before.json` | counts at least 20/20/40 and higher on the second reading 25 s later; no `confidence_level` before the toggle; **seismic sample row too** |
 | 1.4 | `1.4.txt` | one `correlation_id` in client-api, auth-service **and** aggregator, with `latency_ms` |
 | 2.x | `2.1-started-before.txt`, `2.3-new-report.json`, `2.4-started-after.txt`, `2.2.txt`, `2.3.txt`, `2.4.txt` | toggle returns `v2`; new row has the field in `attributes`; `NO RESTART`; 0 contract violations |
@@ -1183,7 +1264,7 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 | 4.3 | `4.3.txt` **(missing)** | notifier stopped; dashboard has the event published during the stop; `outbox_pending = 0`; aggregator healthy, 0 errors; notifier Unprocessed above 0 |
 | 4.4 | `4.4.txt` | notifier prints `has <hazard_id>` for the event it missed; Unprocessed back to 0 (or briefly 1) (plain-ASCII `consreport` output) |
 | 4.5 | `4.5.txt`, `4.5-started-before.txt` **(per-consumer id comparison was missing)** | all three consumers print `has <hazard_id>` for the same new event; aggregator `StartedAt` unchanged |
-| 5.1 | `5.1.txt` | one image per component; only 18080/18081/18082/14222/18222/18084 published with the template settings |
+| 5.1 | `5.1.txt` | one image per component; only 18080/18081/18082/14222/18222/18084 and host-only Grafana 13000 published with the template settings |
 | 5.2 | `5.2.txt`, `5.2-started-before.txt`, `5.2-started-after.txt`, Terminal-A probe log (`5.2-probe.txt`) **(all missing)** | image ID of the notifier changes; only its `StartedAt` differs; probe prints `200 / 200` throughout. Capture Terminal A with `... \| tee evidence/5.2-probe.txt` / `\| Tee8 5.2-probe.txt`. |
 | 5.3 | `5.3.txt`, `5.3-side-by-side.txt` | `attributes` is `jsonb`; rows with and without `confidence_level`; no migration files |
 | 5.4 | `5.4.txt` **(missing)** | `store` network = postgres + aggregator only; others cannot resolve `postgres`; no host port |
