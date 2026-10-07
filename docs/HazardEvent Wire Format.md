@@ -179,3 +179,12 @@ The Aggregator resolves `latitude`, `longitude`, and `area_name` from the BNPB-o
 - [ ] Media-scope responses (P3) are verified against the field table above, not just "looks right" — explicitly assert the four raw fields are absent from that response shape
 
 Keep `docs/sample-hazard-event.json` in the repo and reference it from each service's test suite — it's the cheapest way to catch a wire-format drift before demo day rather than during it.
+
+## Reporting lifecycle metadata
+
+The canonical object above remains unchanged. Freshness is outside the object in
+HTTP response envelopes. Preliminary notices and corrections use a separate
+registered lifecycle envelope; see [Reporting Lifecycle](Reporting%20Lifecycle.md).
+Hazard IDs remain stable on corrections, with revisions in lifecycle/storage
+metadata. Initial canonical messages represent revision 1. Media projection rules
+also apply to canonical snapshots within notice transition history.

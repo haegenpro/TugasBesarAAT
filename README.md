@@ -6,15 +6,15 @@ an interactive downstream client, and two durable broker consumers.
 
 ## Services
 
-| Service | Directory | Port | Purpose |
+| Service | Directory | Example host port, or internal port | Purpose |
 | --- | --- | --- | --- |
-| BMKG mock | [`bmkg-mock/`](bmkg-mock/) | 8081 | Simulated seismic/tsunami source |
-| PVMBG mock | [`pvmbg-mock/`](pvmbg-mock/) | 8082 | Simulated volcanic-activity source |
+| BMKG mock | [`bmkg-mock/`](bmkg-mock/) | 18081 | Simulated seismic/tsunami source |
+| PVMBG mock | [`pvmbg-mock/`](pvmbg-mock/) | 18082 | Simulated volcanic-activity source |
 | Aggregator | [`aggregator/`](aggregator/) | internal (8080) | Polls both mocks, maps to canonical `HazardEvent`, owns the Store, publishes to NATS, serves the internal read API |
 | Canonical Store | [`store/`](store/) | internal (5432) | PostgreSQL 16, accessed only by the Aggregator |
-| Schema Registry | [`registry/`](registry/) | 8084 | Apicurio Registry with its own persistent PostgreSQL database |
+| Schema Registry | [`registry/`](registry/) | 18084 | Apicurio Registry with its own persistent PostgreSQL database |
 | Auth Service | [`auth-service/`](auth-service/) | internal (8083) | Owns persistent sessions, issues and rotates tokens |
-| Client API | [`client-api/`](client-api/) | 8080 | Authenticated downstream reads and server-side field projection |
+| Client API | [`client-api/`](client-api/) | 18080 | Authenticated downstream reads and server-side field projection |
 | Client TUI | [`client-tui/`](client-tui/) | interactive | One terminal app for Media, Field, and Internal identities |
 | Dashboard consumer | [`consumer-dashboard/`](consumer-dashboard/) | internal (8091) | Durable JetStream subscription and SQLite hazard projection |
 | Notifier consumer | [`consumer-notifier/`](consumer-notifier/) | internal (8092) | Durable JetStream subscription and simulated notification ledger |
@@ -44,6 +44,19 @@ Here is how the broker is set up:
 - The broker only stores and delivers bytes. Schema lookup and validation
   happen in each consumer after delivery.
 
+## Preliminary reporting and delayed recovery
+
+Validated observations are reported immediately when their assessment is pending.
+`GET /notices` lists open preliminary reports; `/notices?state=all` and
+`/notices/:id` expose history and linked hazards. Existing hazard endpoints stay
+available. The TUI includes these notice views.
+
+Source-owned SQLite archives survive live eviction/restart. Aggregator persists
+retry schedules and replay cursors; freshness cutoffs change presentation without
+stopping recovery. Both consumers apply versioned corrections through the added
+`REPORT_LIFECYCLE` stream. See [Reporting Lifecycle](docs/Reporting%20Lifecycle.md)
+for the full API, configuration, storage, and delivery contract.
+
 ## Repository layout
 
 ```text
@@ -66,7 +79,8 @@ docs/             # Team contract docs (wire format, stack, deployment)
 
 ## Quick start: Docker Compose
 
-First, create the eleven service env files by hand. Use the root
+First, create the root `.env` with the six host-port settings, then the eleven
+service env files by hand. Use the root
 `.env.example` together with the tables below, and copy into each file only
 the variables that service needs, including the shared ones the template
 points out. Then, from the repository root, run:
@@ -89,17 +103,30 @@ A few things are worth knowing about startup:
 - Changes to `broker/nats.conf` take effect after you recreate the broker
   with `docker compose up -d --force-recreate broker`. You do not need to
   rebuild its image.
-- Postgres runs `init.sql` only on a brand new data volume. If your local
-  volume was created before `hazard_outbox` existed, recreate it or apply the
-  schema manually.
+- Postgres runs `init.sql` on a brand new volume. Aggregator applies the
+  idempotent lifecycle migration to existing canonical schemas; no volume reset
+  is required for these additions. Older installations missing the original
+  canonical tables still need their base schema initialized.
+- There are no Compose startup dependencies. With valid configuration and
+  writable service-owned storage, `docker compose up -d --build <service>`
+  starts that service without starting its upstreams. External dependencies
+  may be absent; missing required configuration still prevents startup.
+- Consumer container checks use `/health`. `/ready` returns `503` until
+  broker subscriptions can operate; a halted consumer can remain alive.
+  Use `/ready` and backlog/record checks to verify processing, rather than
+  treating Docker's `healthy` status as proof of delivery.
+- The Registry container keeps retrying if its database is absent. Its API
+  and readiness probe remain unavailable until initialization succeeds.
+  Set `REGISTRY_RETRY_DELAY_SEC` explicitly in `registry/.env` (example `5`).
+  See [Independent startup verification](docs/Independent%20Startup%20Verification.md).
 
 Once everything is healthy, these should all respond:
 
 ```bash
-curl http://localhost:8081/health   # {"status":"ok","service":"bmkg-mock"}
-curl http://localhost:8082/health   # {"status":"ok","service":"pvmbg-mock"}
-curl http://localhost:8080/health   # client-api
-curl http://localhost:8080/ready    # auth and aggregator readiness
+curl http://localhost:18081/health   # {"status":"ok","service":"bmkg-mock"}
+curl http://localhost:18082/health   # {"status":"ok","service":"pvmbg-mock"}
+curl http://localhost:18080/health   # client-api
+curl http://localhost:18080/ready    # auth and aggregator readiness
 ```
 
 ### Per-service environment files
@@ -109,8 +136,9 @@ gitignored files yourself, each with just the variables its service needs:
 
 | File | Used by | Configuration |
 | --- | --- | --- |
-| `bmkg-mock/.env` | BMKG mock | Port, API key, delay, event interval, schema registry URL |
-| `pvmbg-mock/.env` | PVMBG mock | Port, source/admin tokens, delays, report interval, schema registry URL |
+| `.env` | Compose | Six required host ports; copy only the root host-port section |
+| `bmkg-mock/.env` | BMKG mock | Port, API key, delay, event interval, schema registry URL, archive path |
+| `pvmbg-mock/.env` | PVMBG mock | Port, source/admin tokens, delays, report interval, schema registry URL, archive path |
 | `broker/.env` | Broker and optional broker-init tool | NATS URL, streams, subjects, retention |
 | `store/.env` | PostgreSQL | Database name, user, password |
 | `registry/.env` | Schema Registry and its database | Separate database credentials and Apicurio storage settings |
@@ -124,8 +152,8 @@ gitignored files yourself, each with just the variables its service needs:
 Some notes on how these files are used:
 
 - Compose passes the values in through `env_file`. It does not mount the
-  files, and `.dockerignore` keeps them out of the build context. A root
-  `.env` is not needed at runtime.
+  files, and `.dockerignore` keeps them out of the build context. The root `.env` supplies Compose host-port
+  mappings; it is not passed to the service processes.
 - The secrets in `.env.example` are placeholders for demos. Put your real
   values in the service files.
 - Each value has to fit on one line. Use single quotes when the value
@@ -149,11 +177,28 @@ Aggregator's URL together, and update the existing database as well.
 Recreating the container does not change users in a volume that is already
 initialized.
 
-On ports: the host mappings are fixed at `8080` for the Client API, `8081`
-for BMKG, `8082` for PVMBG, and `4222`/`8222` for NATS. Keep
-`CLIENT_API_PORT=8080`, `BMKG_PORT=8081`, and `PVMBG_PORT=8082` so they line
-up. If you change any other port, keep the service URLs, health checks, and
-Compose mappings consistent with it.
+The template suggests these host ports. All six must be set explicitly:
+
+| Service | Host port | Required root `.env` setting | Container port |
+| --- | --- | --- | --- |
+| Client API | 18080 | `CLIENT_API_HOST_PORT` | 8080 |
+| BMKG | 18081 | `BMKG_HOST_PORT` | 8081 |
+| PVMBG | 18082 | `PVMBG_HOST_PORT` | 8082 |
+| Schema Registry | 18084 | `SCHEMA_REGISTRY_HOST_PORT` | 8080 |
+| NATS | 14222 | `NATS_HOST_PORT` | 4222 |
+| NATS monitoring | 18222 | `NATS_MONITOR_HOST_PORT` | 8222 |
+
+Copy only the **root `.env` host ports** section of `.env.example` into a root `.env`, or export those variables in
+your shell. Compose uses these variables when creating containers; putting
+one in a service's `.env` does not change its published port. Compose refuses
+to run if any of these settings is missing or empty. Do not copy the entire
+combined template into one file: it contains separate service credentials and repeated variable names.
+
+Keep `CLIENT_API_PORT=8080`, `BMKG_PORT=8081`, `PVMBG_PORT=8082` and the
+container URLs from `.env.example`. Containers have separate network
+namespaces, so the Aggregator, Client API and Registry can each listen on
+8080. Host commands in this README use the suggested host ports; adapt their
+URLs when you select other ports. Native source ports must also be explicitly set.
 
 To apply an env change, run `docker compose up -d --force-recreate` and
 restart the TUI if you have one open. You only need to rebuild images when
@@ -164,66 +209,76 @@ restarting the Auth container does not log anyone out.
 
 ### Configuration variables
 
-"Required" means the service refuses to start without the variable. Please
-set every `*_PORT` variable even where a default exists, because the Compose
-health checks read the port from the same env file. Example values for all
-of them are in `.env.example`.
+Every configuration variable used by a project Go service is required.
+Missing, empty, or whitespace-only settings stop startup before opening a
+listener or storage. The error lists missing names without exposing values.
+Invalid numeric settings, ports, URLs, durations, and contradictory settings
+also fail rather than selecting a fallback. The examples below are suggested
+values, never defaults in the program. All settings appear in `.env.example`.
 
 **`bmkg-mock/.env`**
 
-| Variable | Purpose | Default |
+| Variable | Purpose | Example / required value |
 | --- | --- | --- |
-| `BMKG_PORT` | HTTP port, fixed host mapping | `8081` |
+| `BMKG_PORT` | Container HTTP port | `8081` |
 | `BMKG_API_KEY` | Key expected in `X-BMKG-Key` | Required |
 | `BMKG_DELAY_MS` | Fixed response delay (spec range 50 to 150) | `100` |
 | `BMKG_EVENT_INTERVAL_MS` | Interval between generated seismic events, 1 to 10000 | `10000` |
 | `SCHEMA_REGISTRY_URL` | Registry used for Avro responses | Compose registry URL |
+| `SOURCE_ARCHIVE_PATH` | Source-owned SQLite archive | `/data/history.db` |
 
 **`pvmbg-mock/.env`**
 
-| Variable | Purpose | Default |
+| Variable | Purpose | Example / required value |
 | --- | --- | --- |
-| `PVMBG_PORT` | HTTP port, fixed host mapping | `8082` |
+| `PVMBG_PORT` | Container HTTP port | `8082` |
 | `PVMBG_TOKEN` | Bearer token for `/volcanic-reports` | Required |
 | `PVMBG_ADMIN_TOKEN` | Bearer token for `/admin/*`, must differ from `PVMBG_TOKEN` | Required |
 | `PVMBG_MIN_DELAY_MS`, `PVMBG_MAX_DELAY_MS` | Random response delay range | `500`, `3000` |
 | `PVMBG_REPORT_INTERVAL_MS` | Interval between generated volcanic reports, 1 to 10000 | `10000` |
 | `SCHEMA_REGISTRY_URL` | Registry used for Avro responses | Compose registry URL |
+| `SOURCE_ARCHIVE_PATH` | Source-owned SQLite archive | `/data/history.db` |
 
 **`aggregator/.env`**
 
-| Variable | Purpose | Default |
+| Variable | Purpose | Example / required value |
 | --- | --- | --- |
 | `AGGREGATOR_PORT` | Internal HTTP port | `8080` |
 | `POLL_INTERVAL` | Polling interval in seconds (spec suggests 2 to 5) | `3` |
-| `BMKG_BASE_URL`, `PVMBG_BASE_URL` | Source URLs, use the Compose service URLs from `.env.example` | `http://localhost:8081`, `http://localhost:8082` |
+| `BMKG_BASE_URL`, `PVMBG_BASE_URL` | Source URLs, use the Compose service URLs from `.env.example` | `http://bmkg-mock:8081`, `http://pvmbg-mock:8082` (Compose) |
 | `BMKG_API_KEY`, `PVMBG_TOKEN` | Source credentials, must match the mocks and differ from each other | Required |
 | `DATABASE_URL` | Canonical Store connection, must match `store/.env` | Required |
-| `NATS_URL` | Broker URL | `nats://localhost:4222` |
+| `NATS_URL` | Broker URL | `nats://broker:4222` (Compose) |
 | `NATS_STREAM`, `NATS_SUBJECT` | JetStream stream and subject to publish to | Required |
 | `SCHEMA_REGISTRY_URL` | Registry for source and broker schemas | Required |
+| `BMKG_FRESHNESS_SEC`, `PVMBG_FRESHNESS_SEC` | Source freshness thresholds in seconds | `60`, `1800` |
+| `SOURCE_RETRY_MAX_SEC` | Maximum retry delay; at least `POLL_INTERVAL` | `60` |
+| `NATS_LIFECYCLE_STREAM`, `NATS_LIFECYCLE_SUBJECT` | Separate lifecycle stream and subject | `REPORT_LIFECYCLE`, `report.lifecycle` |
 
 **`store/.env`** and **`registry/.env`**
 
-| Variable | Purpose | Default |
+| Variable | Purpose | Example / required value |
 | --- | --- | --- |
 | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Database credentials, each file has its own values | Required |
 | `APICURIO_STORAGE_KIND`, `APICURIO_STORAGE_SQL_KIND` | Registry storage backend (`registry/.env` only) | Required |
 | `APICURIO_DATASOURCE_URL`, `APICURIO_DATASOURCE_USERNAME`, `APICURIO_DATASOURCE_PASSWORD` | Registry database connection, must match the `POSTGRES_*` values in `registry/.env` | Required |
+| `REGISTRY_RETRY_DELAY_SEC` | Registry supervisor delay after the child process exits (`registry/.env` only) | `5` |
 
 **`broker/.env`**
 
-| Variable | Purpose | Default |
+| Variable | Purpose | Example / required value |
 | --- | --- | --- |
 | `NATS_URL` | URL the stream initializer and health check connect to | Required |
 | `NATS_STREAM`, `NATS_SUBJECT` | Main stream and its subject | Required |
 | `NATS_STREAM_MAX_AGE` | Main stream retention, for example `24h` | Required |
 | `NATS_DLQ_STREAM`, `NATS_DLQ_SUBJECT_PREFIX` | Dead-letter stream and subject prefix | Required |
-| `NATS_DLQ_MAX_AGE` | Dead-letter retention, for example `168h` | Required |
+| `NATS_DLQ_MAX_AGE` | Dead-letter retention, covering both streams | `168h` |
+| `NATS_LIFECYCLE_STREAM`, `NATS_LIFECYCLE_SUBJECT` | Lifecycle stream and subject | `REPORT_LIFECYCLE`, `report.lifecycle` |
+| `NATS_LIFECYCLE_MAX_AGE` | Explicit lifecycle retention; no inheritance | `24h` |
 
 **`auth-service/.env`**
 
-| Variable | Purpose | Default |
+| Variable | Purpose | Example / required value |
 | --- | --- | --- |
 | `MEDIA_CLIENT_ID`, `MEDIA_CLIENT_SECRET` | Media identity | Required |
 | `FIELD_CLIENT_ID`, `FIELD_CLIENT_SECRET` | Field identity | Required |
@@ -236,14 +291,14 @@ of them are in `.env.example`.
 
 **`client-api/.env`** and **`client-tui/.env`**
 
-| Variable | Purpose | Default |
+| Variable | Purpose | Example / required value |
 | --- | --- | --- |
-| `CLIENT_API_PORT` | Client API container HTTP port, fixed host mapping | `8080` |
+| `CLIENT_API_PORT` | Client API container HTTP port | `8080` |
 | `AUTH_INTERNAL_KEY` | Same key as in `auth-service/.env` | Required |
 | `AUTH_BASE_URL`, `AGGREGATOR_BASE_URL` | Internal upstream URLs | Compose service URLs |
 | `CLIENT_API_MAX_INFLIGHT` | Max concurrent Client API requests, excess gets `429` (`0` disables) | `128` |
-| `BNPB_API_URL` | TUI destination URL | `http://localhost:8080` |
-| `MEDIA_CLIENT_ID`, `FIELD_CLIENT_ID`, `INTERNAL_CLIENT_ID` | Public client IDs shown by the TUI, which prompts for one if unset | None |
+| `BNPB_API_URL` | TUI destination URL | `http://localhost:18080` |
+| `MEDIA_CLIENT_ID`, `FIELD_CLIENT_ID`, `INTERNAL_CLIENT_ID` | Public client IDs shown by the TUI | Required |
 
 **`consumer-dashboard/.env`** and **`consumer-notifier/.env`** (all required)
 
@@ -256,6 +311,7 @@ of them are in `.env.example`.
 | `NATS_DLQ_SUBJECT` | This consumer's dead-letter subject prefix | `hazard.dlq.dashboard` | `hazard.dlq.notifier` |
 | `NATS_URL`, `NATS_STREAM`, `NATS_SUBJECT`, `NATS_DLQ_STREAM` | Same values as `broker/.env` | | |
 | `SCHEMA_REGISTRY_URL` | Registry for decoding events | | |
+| `NATS_LIFECYCLE_STREAM`, `NATS_LIFECYCLE_SUBJECT` | Same lifecycle values as `broker/.env` | | |
 
 ### Client API and TUI
 
@@ -288,9 +344,10 @@ Run the TUI command in three terminals if you want to test the three
 identities side by side. The TUI reads the public client IDs from Compose
 and asks you for the secret. From there you can pick a role, list or filter
 hazards, open a detail, or request raw data. You can also run the same TUI
-on the host with `BNPB_API_URL=http://localhost:8080`.
+on the host after exporting its three client IDs and setting
+`BNPB_API_URL=http://localhost:18080`.
 
-For the refresh demo, log in as Field, wait a little over the default 60
+For the refresh demo, log in as Field, wait a little over the configured 60
 seconds, then list hazards. The expired token gets `401`, the TUI refreshes
 on its own and retries the read, and you do not have to log in again. After
 that, the "Uji token lama" menu item confirms that the old token now gets
@@ -313,13 +370,14 @@ Aggregator's port is not published to the host.
 Run the smoke test to check most of this in one go:
 
 ```bash
-scripts/smoke.sh --restart-auth --wait-for-expiry --test-outage
+API_URL=http://localhost:18080 BMKG_URL=http://localhost:18081 PVMBG_URL=http://localhost:18082 \
+  scripts/smoke.sh --restart-auth --wait-for-expiry --test-outage
 ```
 
 On Windows, use PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage -ApiUrl http://localhost:18080 -BmkgUrl http://localhost:18081 -PvmbgUrl http://localhost:18082
 ```
 
 It checks institution credential isolation, the three client identities,
@@ -327,7 +385,10 @@ Media redaction, token rotation, natural expiry, PVMBG outage status, and
 session persistence across an Auth restart. It reads the demo credentials
 from the service env files and prints only a pass or fail line. The Bash
 version requires `curl` and Python 3; `API_URL`, `BMKG_URL`, and `PVMBG_URL`
-can override the default localhost endpoints.
+must be supplied explicitly; scripts do not infer URLs from host ports or
+load a root `.env`. PowerShell requires `-ApiUrl`, `-BmkgUrl`, and `-PvmbgUrl`.
+For k6, supply `BASE_URL`, `MODE`, `VUS`, `DURATION`, `CLIENT_ID`, and
+`CLIENT_SECRET`; the wrappers read the client credentials from Auth's env file.
 
 ## Standalone (non-Docker) run
 
@@ -348,16 +409,26 @@ docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_D
 docker compose up -d broker
 
 # 3. BMKG mock
-cd bmkg-mock && BMKG_API_KEY=devkey go run ./cmd/server &
+(cd bmkg-mock && BMKG_PORT=8081 BMKG_API_KEY=devkey BMKG_DELAY_MS=100 \
+  BMKG_EVENT_INTERVAL_MS=10000 SOURCE_ARCHIVE_PATH=/tmp/bmkg-history.db \
+  SCHEMA_REGISTRY_URL=http://localhost:18084/apis/ccompat/v7 go run ./cmd/server) &
 
 # 4. PVMBG mock
-cd pvmbg-mock && PVMBG_TOKEN=devtoken PVMBG_ADMIN_TOKEN=devadmin go run ./cmd/server &
+(cd pvmbg-mock && PVMBG_PORT=8082 PVMBG_TOKEN=devtoken PVMBG_ADMIN_TOKEN=devadmin \
+  PVMBG_MIN_DELAY_MS=500 PVMBG_MAX_DELAY_MS=3000 PVMBG_REPORT_INTERVAL_MS=10000 \
+  SOURCE_ARCHIVE_PATH=/tmp/pvmbg-history.db \
+  SCHEMA_REGISTRY_URL=http://localhost:18084/apis/ccompat/v7 go run ./cmd/server) &
 
 # 5. Aggregator
 cd aggregator && \
-  BMKG_API_KEY=devkey PVMBG_TOKEN=devtoken \
+  AGGREGATOR_PORT=8080 BMKG_API_KEY=devkey PVMBG_TOKEN=devtoken \
+  BMKG_BASE_URL=http://localhost:8081 PVMBG_BASE_URL=http://localhost:8082 \
+  POLL_INTERVAL=3 SOURCE_RETRY_MAX_SEC=60 BMKG_FRESHNESS_SEC=60 PVMBG_FRESHNESS_SEC=1800 \
+  NATS_STREAM=HAZARDS NATS_SUBJECT=hazard.events \
+  NATS_LIFECYCLE_STREAM=REPORT_LIFECYCLE NATS_LIFECYCLE_SUBJECT=report.lifecycle \
+  SCHEMA_REGISTRY_URL=http://localhost:18084/apis/ccompat/v7 \
   DATABASE_URL=postgres://postgres:postgres@localhost:5432/hazards?sslmode=disable \
-  NATS_URL=nats://localhost:4222 \
+  NATS_URL=nats://localhost:14222 \
   go run ./cmd/server
 ```
 
@@ -384,17 +455,17 @@ cd aggregator && TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/
 This is the simulated BMKG source. It serves seismic events and tsunami
 warnings.
 
-- **Port:** 8081
+- **Port:** 8081 in the container; 18081 on the host with the template settings
 - **Auth:** send `X-BMKG-Key: <BMKG_API_KEY>` on the data endpoints. A
   missing key gets `401` and a wrong key gets `403`.
-- **Delay:** a fixed delay per request, set by `BMKG_DELAY_MS` (default
+- **Delay:** a fixed delay per request, set by `BMKG_DELAY_MS` (example
   `100`, and the spec asks for 50 to 150 ms).
 - **Seed data:** 20 deterministic seismic events, built at boot from a fixed
   epoch so every run starts with the same data. They cover magnitudes below
   5.0, between 5.0 and 6.5, and 6.5 or above, with and without tsunami
   potential, plus related tsunami warnings at Waspada, Siaga, and Awas.
 - **Live data:** one new seismic event every `BMKG_EVENT_INTERVAL_MS`
-  (default `10000`, allowed 1 to 10000). Lower it if you want a faster demo.
+  (example `10000`, allowed 1 to 10000). Lower it if you want a faster demo.
   An event with tsunami potential also gets a tsunami warning. The IDs look
   like `evt-<boot-unix>-<n>`, which keeps them unique across restarts. The
   mock keeps the 20 seed events plus the latest 100 generated ones.
@@ -410,9 +481,9 @@ warnings.
 ### Sample requests
 
 ```bash
-curl -H "X-BMKG-Key: devkey" http://localhost:8081/seismic-events | jq '.[0]'
-curl -H "X-BMKG-Key: devkey" "http://localhost:8081/seismic-events?since=2026-09-01T00:00:00Z"
-curl -H "X-BMKG-Key: devkey" http://localhost:8081/tsunami-warnings | jq '.[0]'
+curl -H "X-BMKG-Key: devkey" http://localhost:18081/seismic-events | jq '.[0]'
+curl -H "X-BMKG-Key: devkey" "http://localhost:18081/seismic-events?since=2026-09-01T00:00:00Z"
+curl -H "X-BMKG-Key: devkey" http://localhost:18081/tsunami-warnings | jq '.[0]'
 ```
 
 The response is an array of objects with snake_case fields and UTC
@@ -438,19 +509,19 @@ timestamps in milliseconds:
 This is the simulated PVMBG source. It serves volcanic activity reports and
 has two admin toggles that the demos rely on.
 
-- **Port:** 8082
+- **Port:** 8082 in the container; 18082 on the host with the template settings
 - **Auth:** send `Authorization: Bearer <PVMBG_TOKEN>` on
   `/volcanic-reports`. This is deliberately a **different mechanism** from
   BMKG's header key, as the spec requires. The admin endpoints need
   `Authorization: Bearer <PVMBG_ADMIN_TOKEN>`, which is a separate credential.
 - **Delay:** a random delay per request between `PVMBG_MIN_DELAY_MS` and
-  `PVMBG_MAX_DELAY_MS` (default 500 to 3000 ms).
+  `PVMBG_MAX_DELAY_MS` (example 500 to 3000 ms).
 - **Seed data:** 20 deterministic volcanic reports across all four alert
   levels (Normal, Waspada, Siaga, Awas) and 10 Indonesian volcanoes. Some of
   them already have a `confidence_level` value, which stays hidden until the
   schema toggle is on.
 - **Live data:** one new volcanic report every `PVMBG_REPORT_INTERVAL_MS`
-  (default `10000`, allowed 1 to 10000). Lower it if you want a faster demo.
+  (example `10000`, allowed 1 to 10000). Lower it if you want a faster demo.
   The IDs look like `rep-<boot-unix>-<n>`. Generation keeps going during an
   outage, so the Aggregator catches up once the outage ends. The mock keeps
   the seed reports plus the latest 100 generated ones.
@@ -468,17 +539,17 @@ has two admin toggles that the demos rely on.
 
 ```bash
 # Before toggle: confidence_level is absent
-curl -H "Authorization: Bearer devtoken" http://localhost:8082/volcanic-reports | jq '.[0]'
+curl -H "Authorization: Bearer devtoken" http://localhost:18082/volcanic-reports | jq '.[0]'
 
 # Toggle it on
-curl -X POST -H "Authorization: Bearer devadmin" http://localhost:8082/admin/schema-version
+curl -X POST -H "Authorization: Bearer devadmin" http://localhost:18082/admin/schema-version
 # => {"schema_version":"v2","confidence_level_visible":true}
 
 # After toggle: confidence_level now appears
-curl -H "Authorization: Bearer devtoken" http://localhost:8082/volcanic-reports | jq '.[0]'
+curl -H "Authorization: Bearer devtoken" http://localhost:18082/volcanic-reports | jq '.[0]'
 
 # Toggle back off
-curl -X POST -H "Authorization: Bearer devadmin" http://localhost:8082/admin/schema-version
+curl -X POST -H "Authorization: Bearer devadmin" http://localhost:18082/admin/schema-version
 # => {"schema_version":"v1","confidence_level_visible":false}
 ```
 
@@ -486,15 +557,15 @@ curl -X POST -H "Authorization: Bearer devadmin" http://localhost:8082/admin/sch
 
 ```bash
 # Enable outage
-curl -X POST -H "Authorization: Bearer devadmin" http://localhost:8082/admin/outage
+curl -X POST -H "Authorization: Bearer devadmin" http://localhost:18082/admin/outage
 # => {"outage":true}
 
 # Data endpoint now fails fast (503), health stays healthy
-curl -i -H "Authorization: Bearer devtoken" http://localhost:8082/volcanic-reports   # 503
-curl -i http://localhost:8082/health                                                 # 200
+curl -i -H "Authorization: Bearer devtoken" http://localhost:18082/volcanic-reports   # 503
+curl -i http://localhost:18082/health                                                 # 200
 
 # Clear outage
-curl -X POST -H "Authorization: Bearer devadmin" http://localhost:8082/admin/outage
+curl -X POST -H "Authorization: Bearer devadmin" http://localhost:18082/admin/outage
 # => {"outage":false}
 ```
 
@@ -514,7 +585,7 @@ that the Client API calls.
 ### Polling
 
 Each source has its own goroutine with its own `time.Ticker`, firing every
-`POLL_INTERVAL` seconds (default 3, and the spec suggests 2 to 5). The two
+`POLL_INTERVAL` seconds (example 3, and the spec suggests 2 to 5). The two
 pollers share no lock, so a slow or failing PVMBG call never delays the BMKG
 poller, and the other way around.
 
@@ -557,7 +628,8 @@ also goes into `attributes`.
 Records are keyed on `(source, source_ref_id)`, never on `hazard_id`, and
 the Store's unique index is the final guard. A new row and its outbox record
 commit together. When a record shows up again on a later poll, its canonical
-row is updated and no second outbox record is added.
+row keeps its ID; material changes queue a versioned lifecycle correction.
+Identical polls do not queue another event.
 
 ### Canonical Store
 
@@ -618,9 +690,9 @@ error, the Aggregator does the following:
 - It keeps polling BMKG as usual. The two pollers are separate goroutines
   and share no state on that path.
 - It keeps serving the last volcanic data from the Store on
-  `/internal/hazards`. Each volcanic event gets `"stale": true` and
-  `"stale_since": "<ISO8601 UTC>"` added to its `attributes` when the
-  response is built. The stored row is never changed for this.
+  `/internal/hazards`. Source and record freshness are exposed outside
+  canonical objects in `source_status` and `metadata`; expired checks are
+  explicitly unavailable. Historical rows remain accessible.
 - It never returns `500` just because PVMBG is down. If there is no volcanic
   data yet, for example right after first boot, volcanic events are simply
   missing from the result. Nothing is made up.
@@ -679,7 +751,7 @@ publish the same event twice, which is why consumers deduplicate by
 | Method | Path | Query params | Returns |
 | --- | --- | --- | --- |
 | GET | `/internal/hazards` | `since`, `hazard_type`, `severity`, `area_name`, all optional and filtered in SQL | `{"data": [...], "count": N, "as_of": "<ISO8601>", "source_status": {...}}` |
-| GET | `/internal/hazards/{id}` | none | A single `HazardEvent`, or `404` |
+| GET | `/internal/hazards/{id}` | none | `data`/`metadata`/`source_status`/`as_of` envelope, or `404` |
 | GET | `/health` | none | `{"status":"ok","service":"aggregator"}` |
 | GET | `/ready` | none | Store and broker availability, `503` when the store is unavailable |
 
@@ -711,8 +783,9 @@ consumers are built to handle that:
 - If a message is redelivered after a failed ack, the consumer sees the
   identity it already committed and just retries the ack.
 - `hazard_id` stays unique as well. If a second event arrives for the same
-  hazard with different content, the consumer halts, because there is no
-  versioning contract for updates yet.
+  hazard with different content on the original initial-event stream, the
+  consumer rejects an unversioned rewrite. Lifecycle corrections carry increasing
+  revisions, and an older initial event cannot overwrite a correction.
 
 The consumer fetches one message at a time. JetStream holds delayed NAKs, so
 later valid events keep flowing as long as fewer than 64 messages are
@@ -775,9 +848,9 @@ alive. The halt survives restarts, so it has to be cleared by hand:
 
 Please do this before the stream retention window runs out.
 
-The consumers treat hazard events as immutable, so their insert-only
-projection needs no per-hazard ordering. If update events are added later,
-they will need a version and a check that rejects stale writes.
+Consumers apply the highest hazard/notice revision across both streams.
+Lifecycle snapshots let corrections and resolutions arrive before original
+canonical events without regressing the projection.
 
 ### Retention
 
@@ -814,13 +887,13 @@ the mocks to generate their next events:
 
 ```bash
 cd broker
-NATS_URL=nats://localhost:4222 NATS_SUBJECT=hazard.events go run ./cmd/publish-invalid
+NATS_URL=nats://localhost:14222 NATS_SUBJECT=hazard.events go run ./cmd/publish-invalid
 cd ..
 docker compose logs consumer-dashboard consumer-notifier | grep 'message quarantined'
-curl -s 'http://localhost:8222/jsz?streams=true' | jq '[.account_details[].stream_detail[] | {name, messages: .state.messages}]'
+curl -s 'http://localhost:18222/jsz?streams=true' | jq '[.account_details[].stream_detail[] | {name, messages: .state.messages}]'
 cd broker
-NATS_URL=nats://localhost:4222 NATS_DLQ_STREAM=HAZARDS_DLQ go run ./cmd/inspect-dlq hazard.dlq.dashboard
-NATS_URL=nats://localhost:4222 NATS_DLQ_STREAM=HAZARDS_DLQ go run ./cmd/inspect-dlq hazard.dlq.notifier
+NATS_URL=nats://localhost:14222 NATS_DLQ_STREAM=HAZARDS_DLQ go run ./cmd/inspect-dlq hazard.dlq.dashboard
+NATS_URL=nats://localhost:14222 NATS_DLQ_STREAM=HAZARDS_DLQ go run ./cmd/inspect-dlq hazard.dlq.notifier
 cd ..
 ```
 
@@ -855,8 +928,8 @@ your own.
 ```bash
 sleep 8   # let a few poll cycles happen
 
-curl -H "X-BMKG-Key: changeme-bmkg-key" http://localhost:8081/seismic-events | jq 'length'
-curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:8082/volcanic-reports | jq 'length'
+curl -H "X-BMKG-Key: changeme-bmkg-key" http://localhost:18081/seismic-events | jq 'length'
+curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:18082/volcanic-reports | jq 'length'
 docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards' | jq '.count, .data[0]'
 ```
 
@@ -881,11 +954,11 @@ docker run --rm --network tugasbesaraat_backend natsio/nats-box:latest \
 ### Demo B: PVMBG schema evolution
 
 ```bash
-curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:8082/volcanic-reports | jq '.[0] | has("confidence_level")'
+curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:18082/volcanic-reports | jq '.[0] | has("confidence_level")'
 # => false
 
-curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" http://localhost:8082/admin/schema-version
-curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:8082/volcanic-reports | jq '.[0] | has("confidence_level")'
+curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" http://localhost:18082/admin/schema-version
+curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:18082/volcanic-reports | jq '.[0] | has("confidence_level")'
 # => true
 
 sleep 5   # let the Aggregator's next poll cycle pick up the new shape
@@ -911,21 +984,21 @@ its schema and the toggle works again.
 ### Demo C: PVMBG outage
 
 ```bash
-curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" http://localhost:8082/admin/outage
+curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" http://localhost:18082/admin/outage
 
-curl -i http://localhost:8082/health        # still 200
-curl -i http://localhost:8080/health        # still 200
-curl -H "X-BMKG-Key: changeme-bmkg-key" http://localhost:8081/seismic-events | jq 'length'   # unaffected
+curl -i http://localhost:18082/health        # still 200
+curl -i http://localhost:18080/health        # still 200
+curl -H "X-BMKG-Key: changeme-bmkg-key" http://localhost:18081/seismic-events | jq 'length'   # unaffected
 
 sleep 5   # let the Aggregator notice PVMBG is down
-docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | jq '.data[0].attributes.stale, .data[0].attributes.stale_since, .source_status.PVMBG'
+docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | jq '.source_status.PVMBG, .metadata'
 
 docker compose logs aggregator | grep '"level":"warn"' | grep pvmbg
 
-curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" http://localhost:8082/admin/outage
+curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" http://localhost:18082/admin/outage
 sleep 5
-docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | jq '.data[0].attributes | has("stale")'
-# => false, once the next successful poll clears the stale flag
+docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | jq '.source_status.PVMBG.state'
+# => "fresh", once the next successful poll verifies PVMBG
 ```
 
 ### Demo D: BMKG stays fast while PVMBG is slow
@@ -956,13 +1029,13 @@ taking 3 seconds, and asserts that the BMKG-only p95 stays under 300 ms.
 ### Demo E: institution credential isolation
 
 ```bash
-scripts/isolation-demo.sh
+BMKG_URL=http://localhost:18081 PVMBG_URL=http://localhost:18082 scripts/isolation-demo.sh
 ```
 
 On Windows, use PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1 -BmkgUrl http://localhost:18081 -PvmbgUrl http://localhost:18082
 ```
 
 The script prints one pass or fail line per probe:
@@ -977,23 +1050,23 @@ It reads the credentials from the service env files and never prints them.
 ### Demo F: load test (k6 in Docker)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode sustained   # 60 VUs, 70s on /hazards
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode mixed -Vus 50 -Duration 65s
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode sustained -Vus 60 -Duration 70s -BaseUrl http://host.docker.internal:18080
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode mixed -Vus 50 -Duration 65s -BaseUrl http://host.docker.internal:18080
 ```
 
 On Linux, macOS or Git Bash use the shell twin, which takes the same options as
 positional arguments:
 
 ```bash
-scripts/load-test.sh sustained            # 60 VUs, 70s on /hazards
-scripts/load-test.sh mixed 50 65s
+BASE_URL=http://host.docker.internal:18080 scripts/load-test.sh sustained 60 70s
+BASE_URL=http://host.docker.internal:18080 scripts/load-test.sh mixed 50 65s
 ```
 
 In `mixed` mode both wrappers warn when `pvmbg-mock/.env` does not hold a 3000 ms
 delay. Set that delay by editing the file, as in Demo D, not through the shell.
 
 `sustained` reports throughput, p50/p95/p99, error rate, and the number of
-`429` responses (`controlled_rejections_429`). With the default cap of 128
+`429` responses (`controlled_rejections_429`). With the example cap of 128
 and 60 VUs you should see none. To see controlled rejections, raise `-Vus`
 (for example to 300) or lower `CLIENT_API_MAX_INFLIGHT`.
 
@@ -1002,9 +1075,9 @@ fails unless the SEISMIC p95 is under 300 ms. Run it with PVMBG's delay at 3
 seconds, as set up in Demo D. Volcanic reads come from the Canonical Store,
 so this shows the request path does not depend on the slow PVMBG poller.
 
-Each VU logs in as Field and logs in again every 45 seconds, since the
-access token lives for 60. The script needs Docker and reaches the Client
-API on port 8080 through `host.docker.internal`.
+Each VU logs in as Field and logs in again at 75% of the access token
+lifetime returned by Auth. The script needs Docker and reaches the Client
+API on host port 18080 through `host.docker.internal`.
 
 ### Demo G: rebuild one service independently
 
@@ -1016,10 +1089,10 @@ docker compose ps   # note every uptime in the STATUS column
 docker compose stop pvmbg-mock
 
 # While it is down, requests that do not need it are still served.
-TOKEN=$(curl -s -X POST http://localhost:8080/auth/login -H 'Content-Type: application/json' \
+TOKEN=$(curl -s -X POST http://localhost:18080/auth/login -H 'Content-Type: application/json' \
   -d '{"client_id":"field-demo","client_secret":"replace-with-field-secret"}' | jq -r .access_token)
-curl -s -H "Authorization: Bearer $TOKEN" 'http://localhost:8080/hazards?hazard_type=SEISMIC' | jq '.count'
-curl -s -H "Authorization: Bearer $TOKEN" 'http://localhost:8080/hazards?hazard_type=VOLCANIC' | jq '.count, .source_status'
+curl -s -H "Authorization: Bearer $TOKEN" 'http://localhost:18080/hazards?hazard_type=SEISMIC' | jq '.count'
+curl -s -H "Authorization: Bearer $TOKEN" 'http://localhost:18080/hazards?hazard_type=VOLCANIC' | jq '.count, .source_status'
 
 docker compose build pvmbg-mock
 docker compose up -d --no-deps pvmbg-mock
@@ -1095,6 +1168,6 @@ The network name assumes the default Compose project name, `tugasbesaraat`.
   `(source, source_ref_id)`. A new record is inserted and queued for
   publishing. A record seen again on a later poll has its mutable columns
   (severity, area, coordinates, `attributes`) updated in place, keeps its
-  original `hazard_id`, and is never published again. The schema toggle
+  original `hazard_id`; material changes publish lifecycle corrections. The schema toggle
   creates a report with a fresh source ID, which is why Demo B ends up with
   a new row next to the older ones without changing their IDs.

@@ -1,6 +1,7 @@
 # Cross-Team Contracts: Aggregator API & Broker
 
-*As of 2026-09-24*
+The complete observation, notice, correction, replay, and freshness contract is in
+[Reporting Lifecycle](Reporting%20Lifecycle.md).
 
 ## Overview
 
@@ -18,7 +19,9 @@ Everything else (Auth internals, Consumer internals) stays inside one person's o
 | Endpoint | Method | Query params | Returns |
 | --- | --- | --- | --- |
 | `/internal/hazards` | GET | `since` (ISO 8601, optional), `hazard_type` (SEISMIC\|VOLCANIC, optional), `severity` (optional), `area_name` (optional, substring match) | List of `HazardEvent` (full Mentah+Ringkasan shape — scope filtering happens in Client-API, not here) |
-| `/internal/hazards/{hazard_id}` | GET | — | Single `HazardEvent` or 404 |
+| `/internal/hazards/{hazard_id}` | GET | — | Envelope with `data`, `metadata`, `source_status`, `as_of`, or 404 |
+| `/internal/notices` | GET | `state` (default open; all for history) | Preliminary notice list |
+| `/internal/notices/{notice_id}` | GET | — | Notice and transition history, or 404 |
 | `/health` | GET | — | `{ "status": "ok", "service": "aggregator" }` |
 
 **Response envelope for the list endpoint:**
@@ -32,7 +35,7 @@ Everything else (Auth internals, Consumer internals) stays inside one person's o
 }
 ```
 
-`as_of` is the timestamp the Aggregator generated this response at — Client-API uses it, not `Date.now()`/`time.Now()` on its own side, when it needs to reason about data freshness (avoids clock-skew arguments between the two services).
+`as_of` is the timestamp the Aggregator generated this response at — Client-API uses it, not `Date.now()`/`time.Now()` on its own side, for the response generation time. Source last-success and per-record last-seen/observation times describe freshness; `as_of` alone does not verify the source.
 
 `source_status.PVMBG` becomes `{"state":"stale","stale_since":"<ISO8601>"}` during an outage, including when the result has no volcanic rows. Client-API forwards this metadata outside the hazard objects, so Media can see availability without seeing raw `attributes`.
 
@@ -46,29 +49,19 @@ projects Media responses from an explicit summary field list.
 
 **Pagination:** not required for M1's data volumes (≥20 seed records per source, low event rate) — explicitly out of scope. If the list grows large during testing, add `limit`/`offset` later without breaking existing callers (additive query params only).
 
-## Contract 1: staleness & degraded-state representation
+## Contract 1: freshness and degradation
 
-This is the field that makes P2's outage criterion demonstrable end-to-end, so it needs to be exact, not just "some indicator."
+Freshness is response metadata outside canonical hazard objects. `source_status`
+contains BMKG seismic, BMKG warning assessment, and PVMBG status, with
+`fresh`, `stale`, or `unavailable` and dated checks. `metadata` contains record
+revision, last real live observation, observation time, assessment state, and
+historical flag. Lists key record metadata by hazard ID; detail has one metadata
+object. Canonical `attributes` are not modified at read time to add stale flags.
 
-When PVMBG is in outage and a `HazardEvent` in the response is volcanic data that hasn't been refreshed since the outage began, the Aggregator adds two fields to **that event's `attributes` map** (not top-level — keeps the core `HazardEvent` shape from the wire spec untouched):
-
-```json
-{
-  "attributes": {
-    "eruption_count_24h": 3,
-    "ash_column_height_m": 1200,
-    "stale": true,
-    "stale_since": "2026-09-24T09:58:12.000Z"
-  }
-}
-```
-
-- `stale` (bool): only present and `true` when the underlying source is known to be unreachable and this is last-known data
-- `stale_since` (ISO 8601): when the Aggregator first observed the PVMBG outage
-
-**Client-API's job:** surface this to the end client as an explicit status (e.g. include `"data_status": "stale"` in its own response, or a `Warning` header) rather than silently passing it through inside `attributes` — that's specifically what P2's criterion 3 asks for ("disertai penanda kebaruan data ... bukan error 500").
-
-If PVMBG is unreachable and there is **no** last-known data at all (e.g. first boot before any successful poll), the Aggregator omits that source's events entirely rather than fabricating a placeholder — Client-API should treat an empty/partial volcanic result set plus a healthy `/health` check as "no data yet," not an error.
+A failed source keeps dated last-known records readable. If there is no verified
+record, or the configured check-age threshold expires, availability is explicitly
+unavailable. Expiry neither ends the hazard nor stops retries. Media sees the
+summary projection and this metadata without raw observations or coordinates.
 
 ## Contract 1: client examples
 
@@ -149,8 +142,8 @@ Why at-least-once over at-most-once: P5's criterion 3 explicitly requires explai
 
 **Consequence: every consumer must be idempotent.** A message can be delivered more than once (e.g. the SQLite commit succeeds, then the consumer crashes before its ack is confirmed). Both consumers persist the broker stream sequence and payload digest in the same SQLite transaction as their local effect. They also keep `payload.hazard_id` unique:
 
-- **Dashboard updater:** insert each immutable hazard once; a changed event with the same ID requires a versioning contract
-- **Notifier:** record one local notification summary per hazard; a future external sender requires an outbox and receiver-side idempotency
+- **Dashboard updater:** apply initial hazards at revision 1 and lifecycle corrections by increasing hazard revision; retain notices and transition history
+- **Notifier:** maintain canonical summaries and record preliminary transitions/corrections once by lifecycle event ID; external sending is outside this implementation
 
 This is worth stating explicitly in the report per P5's criterion 5 ("apakah consumer perlu bersifat idempoten dan bagaimana kelompok menyikapinya") — it's a direct rubric line, not just good practice.
 
@@ -192,12 +185,12 @@ keeps broker delivery attempts from ending before the application policy does.
 
 - [x] Broker technology — settled: NATS + JetStream
 - [ ] **Aggregator internal port** — pick a value for `<port>` in Contract 1's base URL and add it to `.env.example`
-- [ ] Confirm the `stale`/`stale_since` fields inside `attributes` are acceptable to both Anggota 1 (producing them) and Anggota 2 (consuming them) — this is the one field genuinely new since the original wire format spec was written
+- [x] Freshness is carried outside canonical payloads; notice/correction shapes are documented in Reporting Lifecycle.
 
 ## Checklist before integration
 
 - [ ] Anggota 2's Client-API can call `GET /internal/hazards` against a running Aggregator and parse the `data`/`count`/`as_of` envelope
-- [ ] Anggota 2's Client-API correctly surfaces `attributes.stale`/`stale_since` as an explicit client-facing status, not passed through silently
+- [x] Client API forwards source/record freshness metadata and projects notice history by scope.
 - [x] Anggota 1's Aggregator publishes Avro to `NATS_SUBJECT` in the envelope shape above, verified by a consumer that resolves the schema ID
 - [x] Anggota 3's consumers deserialize `payload` using the same `HazardEvent` model from the wire format spec (no separate ad hoc parsing)
 - [x] Both consumers (dashboard updater, notifier) key on `hazard_id` for dedup and can be shown handling a redelivered/duplicate message without double-applying it

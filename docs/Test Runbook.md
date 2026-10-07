@@ -43,7 +43,11 @@ every file a complete run must produce.
 | nats CLI | broker inspection | **not installed**: runs as `natsio/nats-box` container | same |
 
 Run everything from the repository root. The 11 per-service `.env` files must
-exist (see README, "Per-service environment files").
+exist (see README, "Per-service environment files"). The root `.env` must
+contain all six host-port settings. All service settings in `.env.example`
+are required; there are no configuration fallbacks. Startup is independent of
+external service availability. Consumer container health is liveness only;
+processing proofs use `/ready` and record/backlog checks.
 
 ### 0.2 Helpers (paste once per terminal)
 
@@ -62,7 +66,7 @@ for r in MEDIA FIELD INTERNAL; do
   eval "${r}_ID=\$(envget auth-service/.env ${r}_CLIENT_ID)"
   eval "${r}_SECRET=\$(envget auth-service/.env ${r}_CLIENT_SECRET)"
 done
-API=http://localhost:8080; BMKG=http://localhost:8081; PVMBG=http://localhost:8082
+API=http://localhost:18080; BMKG=http://localhost:18081; PVMBG=http://localhost:18082
 # NET is resolved when `nats` runs (the network only exists once the stack is up; see the nats helper)
 
 # ---- JSON helpers: jget <path>, jkeys <path>, jlen <path>, jfind <path> <field> <value> ----
@@ -119,7 +123,7 @@ $Creds = @{}
 foreach ($r in 'MEDIA','FIELD','INTERNAL') {
   $Creds[$r] = @{ id = Get-EnvVal auth-service/.env "${r}_CLIENT_ID"; secret = Get-EnvVal auth-service/.env "${r}_CLIENT_SECRET" }
 }
-$API = 'http://localhost:8080'; $BmkgUrl = 'http://localhost:8081'; $PvmbgUrl = 'http://localhost:8082'
+$API = 'http://localhost:18080'; $BmkgUrl = 'http://localhost:18081'; $PvmbgUrl = 'http://localhost:18082'
 $AdminH = @{ Authorization = "Bearer $PvmbgAdmin" }
 
 # ---- HTTP / stack helpers ----
@@ -412,13 +416,13 @@ violations, nothing unhealthy. **Criterion:** P1.2, P1.3.
 Automated, one PASS/FAIL line per probe (Linux, macOS, or Git Bash):
 
 ```bash
-scripts/isolation-demo.sh | tee 3.1-isolation.txt
+BMKG_URL="$BMKG" PVMBG_URL="$PVMBG" scripts/isolation-demo.sh | tee 3.1-isolation.txt
 ```
 
 On Windows, use PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1 | Tee8 3.1-isolation.txt
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1 -BmkgUrl $BmkgUrl -PvmbgUrl $PvmbgUrl | Tee8 3.1-isolation.txt
 ```
 
 Manual equivalent:
@@ -508,7 +512,7 @@ $hid = (Hz $Media.access_token '/hazards').data[0].hazard_id
 
 > Capture: run `step 3.4` first. Output is saved to `evidence/3.4.txt`.
 
-This step takes about 65 seconds on purpose (default TTL 60 s). Run it as one block.
+This step takes about 65 seconds on purpose (configured TTL 60 s). Run it as one block.
 
 ```bash
 L=$(login "$FIELD_ID" "$FIELD_SECRET")
@@ -552,13 +556,13 @@ log in as Field, wait over 60 s, list hazards. The TUI refreshes by itself and
 Full automated variant (Linux, macOS, or Git Bash, ~70 s):
 
 ```bash
-scripts/smoke.sh --restart-auth --wait-for-expiry --test-outage
+API_URL="$API" BMKG_URL="$BMKG" PVMBG_URL="$PVMBG" scripts/smoke.sh --restart-auth --wait-for-expiry --test-outage
 ```
 
 On Windows, use PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage -ApiUrl $API -BmkgUrl $BmkgUrl -PvmbgUrl $PvmbgUrl
 ```
 Desired: final line `PASS: ...`. The outage option restores PVMBG afterward.
 
@@ -682,13 +686,13 @@ broker keeps those events for its durable cursor. Keep `MISSED` / `$missed` for 
 
 ```bash
 docker compose start consumer-notifier
-until [ "$(docker compose ps consumer-notifier --format '{{.Health}}')" = healthy ]; do sleep 2; done
+until docker compose exec -T consumer-notifier wget -q --spider http://localhost:8092/ready; do sleep 2; done
 wait_has consumer-notifier 8092 "$MISSED"                                       # the event it missed is delivered
 consreport | tee evidence/4.4-consumers-after.txt            # notifier-v1 Unprocessed back to 0 (or 1)
 ```
 ```powershell
 docker compose start consumer-notifier
-do { Start-Sleep 2 } until ((docker compose ps consumer-notifier --format '{{.Health}}') -eq 'healthy')
+do { docker compose exec -T consumer-notifier wget -q --spider http://localhost:8092/ready; $readyExit = $LASTEXITCODE; if ($readyExit -ne 0) { Start-Sleep 2 } } until ($readyExit -eq 0)
 Wait-Has consumer-notifier 8092 $missed                                          # the event it missed is delivered
 Consreport | Tee8 4.4-consumers-after.txt
 ```
@@ -712,9 +716,11 @@ docker compose --profile consumer-demo rm -sf consumer-dashboard-demo
 docker volume rm $(docker volume ls -q -f name=dashboard-demo-data) 2>/dev/null || true
 docker compose --profile consumer-demo up -d --force-recreate consumer-dashboard-demo
 for i in $(seq 1 30); do                                    # bounded wait, max ~60 s
-  st=$(docker compose --profile consumer-demo ps consumer-dashboard-demo --format '{{.Health}}'); [ "$st" = healthy ] && break; sleep 2
+  st=not_ready
+  if docker compose exec -T consumer-dashboard-demo wget -q --spider http://localhost:8093/ready; then st=ready; break; fi
+  sleep 2
 done
-[ "$st" = healthy ] || { echo "demo consumer NOT healthy ($st):"; docker compose --profile consumer-demo logs --tail 5 consumer-dashboard-demo; }
+[ "$st" = ready ] || { echo "demo consumer NOT ready ($st):"; docker compose --profile consumer-demo logs --tail 5 consumer-dashboard-demo; }
 sleep 12; H=$(latest); echo "event published after the third consumer joined: $H"
 for s in "consumer-dashboard 8091" "consumer-notifier 8092" "consumer-dashboard-demo 8093"; do wait_has $s "$H"; done   # all three have it
 echo "demo consumer records: $(rec consumer-dashboard-demo 8093 | jget count)"                                          # history replayed
@@ -728,8 +734,9 @@ docker compose --profile consumer-demo rm -sf consumer-dashboard-demo
 docker volume ls -q -f name=dashboard-demo-data | ForEach-Object { docker volume rm $_ }
 docker compose --profile consumer-demo up -d --force-recreate consumer-dashboard-demo
 for ($i = 0; $i -lt 30; $i++) {                              # bounded wait, max ~60 s
-  $st = docker compose --profile consumer-demo ps consumer-dashboard-demo --format '{{.Health}}'; if ($st -eq 'healthy') { break }; Start-Sleep 2 }
-if ($st -ne 'healthy') { "demo consumer NOT healthy ($st):"; docker compose --profile consumer-demo logs --tail 5 consumer-dashboard-demo }
+  $st = 'not_ready'; docker compose exec -T consumer-dashboard-demo wget -q --spider http://localhost:8093/ready
+  if ($LASTEXITCODE -eq 0) { $st = 'ready'; break }; Start-Sleep 2 }
+if ($st -ne 'ready') { "demo consumer NOT ready ($st):"; docker compose --profile consumer-demo logs --tail 5 consumer-dashboard-demo }
 Start-Sleep 12; $h = Latest; "event published after the third consumer joined: $h"
 foreach ($s in @(@('consumer-dashboard',8091),@('consumer-notifier',8092),@('consumer-dashboard-demo',8093))) { Wait-Has $s[0] $s[1] $h }   # all three have it
 "demo consumer records: $((Rec consumer-dashboard-demo 8093).count)"                                              # history replayed
@@ -742,7 +749,7 @@ Consreport
 > or its volume `dashboard-demo-data`. A leftover volume holds the SQLite file from the previous
 > broker, so the new durable replays stream sequence 1 with different bytes and the consumer **halts**
 > (`consumer_incompatible ... HAZARDS/1 was reused with different bytes`, `/ready` = 503, container
-> `unhealthy`). A leftover container from a deleted network fails instead with `network ... not found`
+> still alive). A leftover container from a deleted network fails instead with `network ... not found`
 > (`Exited (128)`). The pre-flight above removes both. Tear down with
 > `docker compose --profile consumer-demo down -v --remove-orphans`.
 
@@ -772,7 +779,7 @@ docker compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}\t{{.Port
 ```
 
 **Desired state:** every component is its own container/image. Host-published ports are
-only `8080` (client-api), `8081`, `8082`, `4222/8222` (broker), `8084` (registry).
+only `18080` (client-api), `18081`, `18082`, `14222/18222` (broker), `18084` (registry) with the template settings. Host ports must be set in the root `.env`.
 `postgres`, `aggregator`, `auth-service`, and both consumers publish **no** host port.
 
 ### 5.2 Stop, rebuild, restart ONE container, nothing else restarts (P4.1, part 2)
@@ -840,7 +847,7 @@ git log --oneline -- store/init.sql
 
 **Desired state:**
 - Column list is the fixed set from `store/init.sql` and `attributes` is type `jsonb`. No `confidence_level` column was ever added.
-- Rows **with** and **without** `confidence_level` coexist in one table; seismic rows never have it, and `rep-schema-0000N` rows have it.
+- Rows **with** and **without** `confidence_level` coexist in one table; seismic rows never have it, and `rep-schema-<boot>-<activation>` rows have it.
 - No migration files; `init.sql` untouched by the schema change.
 - Both old and new rows are still readable through the API: `agg '/internal/hazards?hazard_type=VOLCANIC' | jget count` returns every row.
 
@@ -935,12 +942,12 @@ is the decoupling the design relies on.)
 ```bash
 # Git Bash: prefix with MSYS_NO_PATHCONV=1 so -v paths aren't mangled. Linux: add --add-host=host.docker.internal:host-gateway
 docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
-  -e MODE=mixed -e VUS=50 -e DURATION=65s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
+  -e BASE_URL=http://host.docker.internal:18080 -e MODE=mixed -e VUS=50 -e DURATION=65s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
   grafana/k6 run /scripts/load-test.js 2>&1 | tee evidence/6.1-k6-mixed.txt
 echo "k6 exit code: ${PIPESTATUS[0]}"
 ```
 ```powershell
-.\scripts\load-test.ps1 -Mode mixed -Vus 50 -Duration 65s 2>&1 | ForEach-Object { "$_" } | Tee8 6.1-k6-mixed.txt
+.\scripts\load-test.ps1 -Mode mixed -Vus 50 -Duration 65s -BaseUrl http://host.docker.internal:18080 2>&1 | ForEach-Object { "$_" } | Tee8 6.1-k6-mixed.txt
 "k6 exit code: $LASTEXITCODE"
 ```
 
@@ -965,12 +972,12 @@ Notes from the first run (seismic p95 was 278 ms, only 22 ms under the limit):
 
 ```bash
 docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
-  -e MODE=sustained -e VUS=60 -e DURATION=70s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
+  -e BASE_URL=http://host.docker.internal:18080 -e MODE=sustained -e VUS=60 -e DURATION=70s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
   grafana/k6 run /scripts/load-test.js 2>&1 | tee evidence/6.2-k6-sustained.txt
 docker compose ps --format '{{.Service}} {{.Status}}' | grep -v healthy || echo "NO CRASH"
 ```
 ```powershell
-.\scripts\load-test.ps1 -Mode sustained -Vus 60 -Duration 70s 2>&1 | ForEach-Object { "$_" } | Tee8 6.2-k6-sustained.txt
+.\scripts\load-test.ps1 -Mode sustained -Vus 60 -Duration 70s -BaseUrl http://host.docker.internal:18080 2>&1 | ForEach-Object { "$_" } | Tee8 6.2-k6-sustained.txt
 docker compose ps --format '{{.Service}} {{.Health}}' | Where-Object { $_ -notmatch 'healthy' }     # => (nothing)
 ```
 
@@ -995,7 +1002,7 @@ CAP_ORIG=$(envget client-api/.env CLIENT_API_MAX_INFLIGHT)
 sed -i.bak 's/^CLIENT_API_MAX_INFLIGHT=.*/CLIENT_API_MAX_INFLIGHT=5/' client-api/.env && rm -f client-api/.env.bak
 docker compose up -d --force-recreate --no-deps client-api; sleep 8
 docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
-  -e MODE=sustained -e VUS=300 -e DURATION=30s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
+  -e BASE_URL=http://host.docker.internal:18080 -e MODE=sustained -e VUS=300 -e DURATION=30s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
   grafana/k6 run /scripts/load-test.js 2>&1 | tail -40
 echo "health under saturation: $(code $API/health)"                               # 200
 docker compose logs client-api --since 2m 2>&1 | grep -c 'request rejected'       # > 0
@@ -1007,7 +1014,7 @@ docker compose up -d --force-recreate --no-deps client-api
 $CapOrig = Get-EnvVal client-api/.env CLIENT_API_MAX_INFLIGHT
 (Get-Content client-api/.env) -replace '^CLIENT_API_MAX_INFLIGHT=.*','CLIENT_API_MAX_INFLIGHT=5' | Set-Content client-api/.env
 docker compose up -d --force-recreate --no-deps client-api; Start-Sleep 8
-.\scripts\load-test.ps1 -Mode sustained -Vus 300 -Duration 30s 2>&1 | ForEach-Object { "$_" } | Select-Object -Last 40
+.\scripts\load-test.ps1 -Mode sustained -Vus 300 -Duration 30s -BaseUrl http://host.docker.internal:18080 2>&1 | ForEach-Object { "$_" } | Select-Object -Last 40
 "health under saturation: $(Code "$API/health")"                                  # 200
 (docker compose logs client-api --since 2m 2>&1 | Select-String 'request rejected').Count     # > 0
 (Get-Content client-api/.env) -replace '^CLIENT_API_MAX_INFLIGHT=.*',"CLIENT_API_MAX_INFLIGHT=$CapOrig" | Set-Content client-api/.env
@@ -1153,7 +1160,7 @@ docker compose down -v     # also delete all volumes (fresh start next time)
 | k6 `min=-...ns` for `http_req_duration` | Docker VM clock drift (WSL2) | cosmetic; see 6.1 notes. `wsl --shutdown` + restart Docker, then rerun |
 | `controlled_rejections_429` missing from the k6 summary | old script version (counter only shown once incremented) | use the current `scripts/load-test.js`; it now declares a threshold so the line always prints |
 | 4.x output is full of `Γöé`, `ΓöÇ`, `Γò¡` (garbled box characters) | `nats consumer report` prints UTF-8 box-drawing characters; the Windows console decodes them with the OEM code page, and `Tee8`/`Step` then saves the already-garbled text | use `consreport` / `Consreport` (plain ASCII, built from `--json`); in PowerShell run the UTF-8 line from 0.3 (`[Console]::OutputEncoding = ...`) once per terminal |
-| 4.5 stuck in the `Start-Sleep` / `until ... healthy` loop; `docker compose ps` shows the demo container `unhealthy` | leftover `dashboard-demo-data` volume from an earlier run: the new durable replays stream sequence 1 with different bytes, the consumer halts (`consumer_incompatible`, `/ready` 503) and never becomes healthy | `docker compose --profile consumer-demo rm -sf consumer-dashboard-demo`, `docker volume rm $(docker volume ls -q -f name=dashboard-demo-data)`, then `up -d --force-recreate`. The 4.5 pre-flight does this and its wait is now bounded (60 s) and prints the logs. Tear down with `--profile consumer-demo down -v --remove-orphans`. |
+| 4.5 fails to become ready; `/ready` returns 503 although the container is alive | leftover `dashboard-demo-data` volume from an earlier run: the new durable replays stream sequence 1 with different bytes, the consumer halts (`consumer_incompatible`, `/ready` 503) and never becomes ready | `docker compose --profile consumer-demo rm -sf consumer-dashboard-demo`, `docker volume rm $(docker volume ls -q -f name=dashboard-demo-data)`, then `up -d --force-recreate`. The 4.5 pre-flight does this and its wait is now bounded (60 s) and prints the logs. Tear down with `--profile consumer-demo down -v --remove-orphans`. |
 
 ## Appendix C: evidence checklist (a complete run produces all of these)
 
@@ -1176,7 +1183,7 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 | 4.3 | `4.3.txt` **(missing)** | notifier stopped; dashboard has the event published during the stop; `outbox_pending = 0`; aggregator healthy, 0 errors; notifier Unprocessed above 0 |
 | 4.4 | `4.4.txt` | notifier prints `has <hazard_id>` for the event it missed; Unprocessed back to 0 (or briefly 1) (plain-ASCII `consreport` output) |
 | 4.5 | `4.5.txt`, `4.5-started-before.txt` **(per-consumer id comparison was missing)** | all three consumers print `has <hazard_id>` for the same new event; aggregator `StartedAt` unchanged |
-| 5.1 | `5.1.txt` | one image per component; only 8080/8081/8082/4222/8222/8084 published |
+| 5.1 | `5.1.txt` | one image per component; only 18080/18081/18082/14222/18222/18084 published with the template settings |
 | 5.2 | `5.2.txt`, `5.2-started-before.txt`, `5.2-started-after.txt`, Terminal-A probe log (`5.2-probe.txt`) **(all missing)** | image ID of the notifier changes; only its `StartedAt` differs; probe prints `200 / 200` throughout. Capture Terminal A with `... \| tee evidence/5.2-probe.txt` / `\| Tee8 5.2-probe.txt`. |
 | 5.3 | `5.3.txt`, `5.3-side-by-side.txt` | `attributes` is `jsonb`; rows with and without `confidence_level`; no migration files |
 | 5.4 | `5.4.txt` **(missing)** | `store` network = postgres + aggregator only; others cannot resolve `postgres`; no host port |
@@ -1185,3 +1192,32 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 | 6.2 | `6.2.txt` | ≥ 50 VUs, ≥ 60 s, throughput, p50/p95/p99, `http_req_failed` < 1 %, no unhealthy container |
 | 6.2b | `6.2b.txt` **(missing)** | `controlled_rejections_429` > 0, error rate < 1 %, `/health` 200, `request rejected` logs |
 | 6.3 | `6.3.txt`, `6.3-volcanic-during.json`, `6.3-started-*.txt` | volcanic **HTTP 200** during outage with `state=stale` + `stale_since` (not 5xx, not a hang); seismic 200; `warn` not `error` logs; back to `fresh`; `NO RESTART` |
+
+## Reporting lifecycle verification
+
+See [Reporting Lifecycle](Reporting%20Lifecycle.md) for the updated contracts.
+Run the Go suites in each affected service. Store integration tests need a
+**dedicated** `TEST_DATABASE_URL` with `store/init.sql` initialized; do not point
+these tests at a live demo database because tests advance replay cursors.
+
+The added tests cover immediate persistence while warning HTTP is blocked,
+unknown-versus-empty assessment, late warnings with stable hazard IDs, correction
+outbox work, warning-before-seismic ordering, cursor rollback, generic volcanic
+mapping notices, source snapshot ordering, Media redaction in notice history,
+source live eviction/archive restart, history auth/outage behavior, and consumer
+correction-before-initial ordering with duplicate notification suppression.
+
+For an actual outage, enable `/admin/outage`, inspect `/hazards` source/record
+metadata, and check PVMBG `/history` also returns 503. Leave the outage enabled
+10–20 minutes for the M1 demo; restore it and allow up to the configured maximum
+retry interval plus source response time for recovery. Age cutoff does not stop
+replay. For a faster archive-eviction demonstration, shorten the source generation
+interval and keep Aggregator offline until more than 100 observations are generated;
+restart the source and Aggregator, and verify archived observations catch up.
+
+Inspect consumer `/records?view=notices`, `history`, and `notifications` alongside
+its canonical `/records`. Stop one consumer while both streams continue, then
+restart it within stream retention and verify higher revisions remain applied.
+Run the existing mixed k6 test with PVMBG delay fixed at 3 seconds and at least
+50 connections for 60 seconds. Keep verification credentials in gitignored env
+files; never save tokens in evidence logs.

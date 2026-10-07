@@ -1,6 +1,6 @@
 # Canonical Tech Stack Specification — IF4031 M1
 
-*As of 2026-09-24*
+*As of 2026-10-07*
 
 ## Language & Runtime
 
@@ -34,8 +34,12 @@
 | --- | --- |
 | Database | PostgreSQL 16 (`postgres:16-alpine3.24` image) |
 | Driver | `pgx` (v5), used via its native interface (`github.com/jackc/pgx/v5`) rather than wrapped in `database/sql`, for better JSONB and context-cancellation support |
-| Schema management | `store/init.sql` initializes a fresh database, including the outbox. The Aggregator checks the schema but does not create or migrate tables. Source-specific changes such as `confidence_level` remain in `attributes` JSONB. |
+| Schema management | `store/init.sql` initializes a fresh database, including the outbox. The Aggregator applies additive, idempotent lifecycle migrations on existing canonical schemas under an advisory lock. Source-specific changes such as `confidence_level` remain in `attributes` JSONB. |
 | Table shape (starting point) | Fixed, indexed columns for `hazard_id` (PK), `source`, `hazard_type`, `severity`, `area_name`, `occurred_at`, `ingested_at`; a `JSONB` column for `attributes` (and optionally the full raw payload, for easy whole-record reads) |
+
+## Source history and reporting lifecycle
+
+Each source owns a SQLite replay archive and separate Docker volume. Aggregator owns durable observations, cursors, notices, retry schedules, revisions, and outboxes in PostgreSQL. Consumers own versioned projections in SQLite. See [Reporting Lifecycle](Reporting%20Lifecycle.md).
 
 ## Message Broker
 

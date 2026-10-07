@@ -10,7 +10,7 @@ This document fixes the deployment topology and observability conventions the M1
 
 ## docker-compose skeleton
 
-| Service | Port | Owner | Notes |
+| Service | Container port | Owner | Notes |
 | --- | --- | --- | --- |
 | `bmkg` | 8081 | Person A | mock, fixed contract |
 | `pvmbg` | 8082 | Person A | mock, fixed contract |
@@ -25,7 +25,7 @@ This document fixes the deployment topology and observability conventions the M1
 services:
   bmkg:
     build: ./services/bmkg
-    ports: ["8081:8081"]
+    ports: ["${BMKG_HOST_PORT:?Set BMKG_HOST_PORT in root .env or the shell}:8081"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
       interval: 5s
@@ -33,7 +33,7 @@ services:
 
   pvmbg:
     build: ./services/pvmbg
-    ports: ["8082:8082"]
+    ports: ["${PVMBG_HOST_PORT:?Set PVMBG_HOST_PORT in root .env or the shell}:8082"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
       interval: 5s
@@ -41,9 +41,6 @@ services:
 
   aggregator:
     build: ./services/aggregator
-    depends_on:
-      bmkg: { condition: service_healthy }
-      pvmbg: { condition: service_healthy }
     env_file: .env
 
   canonical-store:
@@ -51,8 +48,7 @@ services:
 
   client-api:
     build: ./services/client-api
-    ports: ["8080:8080"]
-    depends_on: [aggregator, auth-service]
+    ports: ["${CLIENT_API_HOST_PORT:?Set CLIENT_API_HOST_PORT in root .env or the shell}:8080"]
 
   auth-service:
     build: ./services/auth-service
@@ -62,11 +58,9 @@ services:
 
   consumer-dashboard:
     build: ./services/consumer-dashboard
-    depends_on: [broker]
 
   consumer-notifier:
     build: ./services/consumer-notifier
-    depends_on: [broker]
 ```
 
 Each service reaches others by **compose service name** (`http://pvmbg:8082`), never hardcoded IPs — this also means the same compose file works identically whether a service is written in Go or Python.
@@ -105,17 +99,18 @@ Rules:
 - No real secrets committed, ever — only `.env.example` is committed, `.env` itself is gitignored
 - Both Go (`os.Getenv`, or `godotenv` for local dev) and Python (`os.environ`, or `python-dotenv`) read this identically since it's plain `KEY=value` — no language-specific format needed
 
-## Health checks & startup ordering
+## Health checks and independent startup
 
-Every service exposes `GET /health` returning `200 OK` with a minimal JSON body once it can actually serve traffic (not just "process started"):
+Project HTTP services expose `GET /health` returning `200 OK` when their own listener and required local storage are working:
 
 ```json
 { "status": "ok", "service": "pvmbg" }
 ```
 
-- Use compose's `healthcheck` + `depends_on: condition: service_healthy` (shown in the skeleton above) so the Aggregator never polls a mock before it's actually ready — avoids flaky demo starts, not just a nicety
-- `/health` must reflect real readiness: if PVMBG's outage mode is on, `/health` can still return `200` (the service process is fine; it's the business endpoints that fail per P2's outage semantics) — don't conflate "outage mode" with "unhealthy container," they're tested separately (P2 vs P4)
-- Each service must also survive being stopped/restarted alone without crashing its dependents (P4's independent-restart proof) — test this explicitly, don't assume compose's dependency graph guarantees it at runtime after initial startup
+- Do not gate startup with `depends_on` or wait for external services before starting local listeners. A service with valid configuration starts on its own and retries unavailable dependencies in the background.
+- `/health` checks local operation. `/ready` checks dependency availability and processing state where supported. Consumer Compose probes use `/health`; readiness can be 503 while their containers are healthy. PVMBG outage mode can leave `/health` at 200 while data endpoints return 503.
+- Each service must survive being stopped/restarted alone without crashing its dependents. Test actual absence at startup and recovery after dependencies return.
+- Registry uses the SQL-only supervisor described in `registry/README.md`. It stays running while Apicurio initializes or retries after an exit. Its API and management readiness probe can remain unreachable until its owned database appears; Compose reports readiness separately.
 
 ## Correlation ID propagation
 
