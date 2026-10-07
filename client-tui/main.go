@@ -33,10 +33,12 @@ type app struct {
 }
 
 func main() {
-	baseURL := os.Getenv("BNPB_API_URL")
-	if baseURL == "" {
-		baseURL = "http://localhost:8080"
+	baseURL, err := loadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "invalid configuration:", err)
+		os.Exit(1)
 	}
+
 	a := &app{input: bufio.NewReader(os.Stdin), client: &http.Client{Timeout: 8 * time.Second}, baseURL: strings.TrimRight(baseURL, "/")}
 	a.run()
 }
@@ -61,7 +63,7 @@ func (a *app) run() {
 			continue
 		}
 		fmt.Printf("Login: %s (%s)\n", a.session.ClientID, a.session.Role)
-		fmt.Println("\n1. Daftar hazard\n2. Daftar dengan filter\n3. Detail hazard\n4. Minta data raw\n5. Uji token lama\n6. Logout\n0. Keluar")
+		fmt.Println("\n1. Daftar hazard\n2. Daftar dengan filter\n3. Detail hazard\n4. Minta data raw\n5. Uji token lama\n6. Logout\n7. Laporan awal\n8. Detail laporan awal\n9. Riwayat laporan awal\n0. Keluar")
 		switch a.prompt("Pilih") {
 		case "1":
 			a.list("")
@@ -75,6 +77,12 @@ func (a *app) run() {
 			a.testOldToken()
 		case "6":
 			a.logout()
+		case "7":
+			a.notices(false)
+		case "8":
+			a.noticeDetail()
+		case "9":
+			a.notices(true)
 		case "0":
 			return
 		}
@@ -166,7 +174,9 @@ func (a *app) protected(method, path string) (int, []byte, error) {
 func (a *app) login(prefix string) {
 	clientID := os.Getenv(prefix + "_CLIENT_ID")
 	if clientID == "" {
-		clientID = a.prompt("Client ID")
+		fmt.Println(prefix + "_CLIENT_ID is required")
+		a.pause()
+		return
 	} else {
 		fmt.Println("Client ID:", clientID)
 	}
@@ -270,9 +280,12 @@ func (a *app) showList(query url.Values) {
 	fmt.Printf("\n%d hazard | as_of %s\n", result.Count, result.AsOf)
 	fmt.Printf("%-36s  %-6s  %-8s  %-7s  %s\n", "Hazard ID", "Sumber", "Jenis", "Level", "Area")
 	for _, item := range result.Data {
-		fmt.Printf("%-36s  %-6s  %-8s  %-7s  %s\n", item.HazardID, item.Source, item.HazardType, item.Severity, item.AreaName)
+		fmt.Printf("%-36s  %-6s  %-8s  %-7s  %s\n", item.HazardID, item.Source, item.HazardType, item.Severity, item.AreaName+" | waktu: "+item.OccurredAt)
 	}
 	fmt.Println("Status sumber:", pretty(result.SourceStatus))
+	if len(result.Metadata) > 0 {
+		fmt.Println("Kebaruan / assessment:", pretty(result.Metadata))
+	}
 	a.pause()
 }
 
@@ -321,4 +334,46 @@ func pretty(data []byte) string {
 		return output.String()
 	}
 	return string(data)
+}
+
+func (a *app) notices(history bool) {
+	path := "/notices?view=summary"
+	if history {
+		path += "&state=all"
+	}
+	status, data, err := a.protected(http.MethodGet, path)
+	if err != nil {
+		fmt.Println(err)
+	} else {
+		fmt.Println("HTTP", status)
+		fmt.Println(pretty(data))
+	}
+	a.pause()
+}
+func (a *app) noticeDetail() {
+	id := a.prompt("Notice ID")
+	status, data, err := a.protected(http.MethodGet, "/notices/"+url.PathEscape(id))
+	if err != nil {
+		fmt.Println(err)
+	} else {
+		fmt.Println("HTTP", status)
+		fmt.Println(pretty(data))
+	}
+	if status == 200 {
+		var response struct {
+			Data struct {
+				HazardID string `json:"hazard_id"`
+			}
+		}
+		if json.Unmarshal(data, &response) == nil && response.Data.HazardID != "" && a.prompt("Buka hazard terkait? (y/n)") == "y" {
+			status, data, err = a.protected(http.MethodGet, "/hazards/"+url.PathEscape(response.Data.HazardID))
+			if err != nil {
+				fmt.Println(err)
+			} else {
+				fmt.Println("HTTP", status)
+				fmt.Println(pretty(data))
+			}
+		}
+	}
+	a.pause()
 }

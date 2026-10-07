@@ -11,6 +11,8 @@ type hazardSummary struct {
 	HazardType string `json:"hazard_type"`
 	Severity   string `json:"severity"`
 	AreaName   string `json:"area_name"`
+	OccurredAt string `json:"occurred_at"`
+	IngestedAt string `json:"ingested_at"`
 }
 
 type hazardList struct {
@@ -18,6 +20,7 @@ type hazardList struct {
 	Count        int             `json:"count"`
 	AsOf         string          `json:"as_of"`
 	SourceStatus json.RawMessage `json:"source_status"`
+	Metadata     json.RawMessage `json:"metadata"`
 }
 
 func requireResponseFields(data []byte, fields ...string) error {
