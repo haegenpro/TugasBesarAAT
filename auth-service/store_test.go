@@ -109,3 +109,27 @@ func TestAccessTokenExpiresNaturally(t *testing.T) {
 		t.Fatalf("refresh after expiry failed: %v", err)
 	}
 }
+
+func TestRecoveryScopeOnlyForInternalIdentity(t *testing.T) {
+	store, err := openStore(filepath.Join(t.TempDir(), "auth.db"), time.Minute, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.db.Close()
+	for _, test := range []struct{ role, scope string }{
+		{"media", "hazards:summary"}, {"field", "hazards:raw"}, {"internal", "hazards:raw consumer:resume"},
+	} {
+		pair, err := store.issue(context.Background(), identity{ID: test.role + "-id", Role: test.role})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := store.verify(context.Background(), pair.AccessToken)
+		if err != nil || pair.Scope != test.scope || p.Scope != test.scope {
+			t.Fatalf("role=%s scopes=%q/%q error=%v", test.role, pair.Scope, p.Scope, err)
+		}
+		rotated, err := store.rotate(context.Background(), pair.RefreshToken)
+		if err != nil || rotated.Scope != test.scope {
+			t.Fatalf("rotation changed scope: %q %v", rotated.Scope, err)
+		}
+	}
+}

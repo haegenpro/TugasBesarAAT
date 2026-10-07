@@ -335,6 +335,8 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | `NATS_DLQ_SUBJECT` | This consumer's dead-letter subject prefix | `hazard.dlq.dashboard` | `hazard.dlq.notifier` |
 | `NATS_URL`, `NATS_STREAM`, `NATS_SUBJECT`, `NATS_DLQ_STREAM` | Same values as `broker/.env` | | |
 | `SCHEMA_REGISTRY_URL` | Registry for decoding events | | |
+| `AUTH_BASE_URL` | Auth Service URL for recovery introspection only | `http://auth-service:8083` | `http://auth-service:8083` |
+| `AUTH_INTERNAL_KEY` | Same service key as Auth Service; used only for recovery introspection | Required | Required |
 | `NATS_LIFECYCLE_STREAM`, `NATS_LIFECYCLE_SUBJECT` | Same lifecycle values as `broker/.env` | | |
 
 ### Client API and TUI
@@ -868,14 +870,19 @@ for processing availability and inspect its reported halt reason and the error
 logs to diagnose the halt. Use broker backlog and `/records` checks to verify
 delivery progress; a healthy container alone does not prove delivery.
 
-The halt survives restarts, so it has to be cleared by hand:
+The halt survives restarts. Fix the cause, obtain an Internal access token through
+Client API `/auth/login`, then call the affected consumer's `POST /admin/resume`.
+The consumer checks the token through Auth Service and requires `consumer:resume`.
+Media and Field tokens are rejected. The consumer transactionally clears its shared
+halt and records the authenticated client and correlation ID; no database editing
+or container restart is needed. Verify `/ready`, processing logs, `/records`, and
+broker backlog afterward.
 
-1. Find the cause in the registry, the consumer code, or the SQLite volume.
-2. Stop the consumer.
-3. Delete the `halt_reason` row from its `consumer_control` SQLite table.
-4. Start the consumer again.
-
-Please do this before the stream retention window runs out.
+Auth Service availability is required for this recovery request, but not for
+normal consumer processing. Resume preserves retry/storm history and does not
+replay previously quarantined messages. Recent storms or an unresolved cause can
+halt processing again. Recover before original stream retention expires.
+See [Consumer recovery](docs/consumer-recovery.md) for commands and response codes.
 
 Consumers apply the highest hazard/notice revision across both streams.
 Lifecycle snapshots let corrections and resolutions arrive before original

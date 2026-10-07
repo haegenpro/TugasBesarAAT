@@ -3,6 +3,7 @@ module consumernotifier
 go 1.27.1
 
 require (
+	github.com/google/uuid v1.6.0
 	github.com/linkedin/goavro/v2 v2.15.0
 	github.com/nats-io/nats.go v1.36.0
 	modernc.org/sqlite v1.34.5
@@ -11,7 +12,6 @@ require (
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/golang/snappy v0.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.17.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/nats-io/nkeys v0.4.7 // indirect

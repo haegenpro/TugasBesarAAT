@@ -8,6 +8,8 @@ import (
 func TestConfigurationRequiresExplicitValues(t *testing.T) {
 	values := map[string]string{
 		"CONSUMER_ROLE":          "dashboard",
+		"AUTH_BASE_URL":          "http://auth-service:8083",
+		"AUTH_INTERNAL_KEY":      "test-internal-key",
 		"CONSUMER_PORT":          "8091",
 		"CONSUMER_DB_PATH":       "/data/dashboard.db",
 		"NATS_URL":               "nats://broker:4222",
@@ -38,6 +40,7 @@ func TestConfigurationRequiresExplicitValues(t *testing.T) {
 	}
 	for key, invalid := range map[string]string{
 		"CONSUMER_PORT":       "invalid",
+		"AUTH_BASE_URL":       "invalid",
 		"NATS_URL":            "invalid",
 		"SCHEMA_REGISTRY_URL": "invalid",
 	} {

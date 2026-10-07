@@ -197,6 +197,10 @@ func (a *app) clearRetries(ctx context.Context, meta *jetstream.MsgMetadata) err
 }
 
 func (a *app) halt(reason string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.generation++
+	a.reason = reason
 	a.halted.Store(true)
 	a.ready.Store(false)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -209,6 +213,8 @@ func (a *app) halt(reason string) {
 }
 
 func (a *app) refreshHalt(ctx context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.haltSticky.Load() {
 		a.halted.Store(true)
 		return nil
@@ -216,6 +222,7 @@ func (a *app) refreshHalt(ctx context.Context) error {
 	var reason string
 	err := a.db.QueryRowContext(ctx, `SELECT value FROM consumer_control WHERE key='halt_reason'`).Scan(&reason)
 	if errors.Is(err, sql.ErrNoRows) {
+		a.reason = ""
 		a.halted.Store(false)
 		return nil
 	}
@@ -226,6 +233,10 @@ func (a *app) refreshHalt(ctx context.Context) error {
 	if !a.halted.Load() {
 		slog.Error("consumer remains halted; operator action required", "service", a.cfg.Role, "reason", reason)
 	}
+	if a.reason != reason || !a.halted.Load() {
+		a.generation++
+	}
+	a.reason = reason
 	a.halted.Store(true)
 	return nil
 }

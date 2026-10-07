@@ -146,7 +146,7 @@ func TestStoreDeduplicatesAfterRestart(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		a := &app{cfg: config{Role: "notifier"}, db: db}
+		a := &app{haltController: &haltController{}, cfg: config{Role: "notifier"}, db: db}
 		if err := a.save(context.Background(), meta, raw, e); err != nil {
 			t.Fatal(err)
 		}
@@ -176,7 +176,7 @@ func TestStoreDeduplicatesAfterRestart(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("processed messages = %d, want 1", count)
 	}
-	if _, err := (&app{db: db}).alreadyProcessed(context.Background(), meta, []byte("different bytes")); !errors.Is(err, errConsumerIncompatible) {
+	if _, err := (&app{haltController: &haltController{}, db: db}).alreadyProcessed(context.Background(), meta, []byte("different bytes")); !errors.Is(err, errConsumerIncompatible) {
 		t.Fatalf("reused stream sequence should halt: %v", err)
 	}
 }
@@ -190,7 +190,7 @@ func TestUnknownSchemaCounterSurvivesRestart(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		a := &app{cfg: config{Role: "dashboard"}, db: db}
+		a := &app{haltController: &haltController{}, cfg: config{Role: "dashboard"}, db: db}
 		got, err := a.recordUnknown(context.Background(), meta, 17, start.Add(time.Duration(want)*time.Second))
 		if err != nil || got.Attempts != want || !got.FirstSeen.Equal(start.Add(time.Second)) {
 			t.Fatalf("retry state = %+v, error = %v; want attempts %d and first seen %s", got, err, want, start.Add(time.Second))
@@ -207,7 +207,7 @@ func TestSaveRollsBackMessageIdentityOnConflictingHazard(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	a := &app{cfg: config{Role: "dashboard"}, db: db}
+	a := &app{haltController: &haltController{}, cfg: config{Role: "dashboard"}, db: db}
 	e := envelope{HazardID: "h1", Payload: hazardEvent{HazardID: "h1", Severity: "SIAGA"}}
 	first := &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 1}}
 	if err := a.save(context.Background(), first, []byte("first"), e); err != nil {
@@ -230,7 +230,7 @@ func TestUnknownSchemaStormCountsDistinctMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	a := &app{db: db}
+	a := &app{haltController: &haltController{}, db: db}
 	now := time.Now()
 	for i := 1; i <= unknownStormLimit; i++ {
 		meta := &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: uint64(i)}}
@@ -247,7 +247,7 @@ func TestCorruptPayloadStormCountsDistinctMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	a := &app{db: db}
+	a := &app{haltController: &haltController{}, db: db}
 	now := time.Now()
 	for i := 1; i <= corruptStormLimit; i++ {
 		meta := &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: uint64(i)}}
@@ -341,7 +341,7 @@ func TestAckFailureAfterCommitOnlyRetriesAckOnRedelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	a := &app{cfg: config{Role: "dashboard"}, db: db}
+	a := &app{haltController: &haltController{}, cfg: config{Role: "dashboard"}, db: db}
 	meta := &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 41}}
 	raw := []byte("original frame")
 	e := envelope{HazardID: "h1", Payload: hazardEvent{HazardID: "h1", Severity: "SIAGA"}}
@@ -372,7 +372,7 @@ func TestRegistryNakFailureRequestsReconnect(t *testing.T) {
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
-	a := &app{cfg: config{Role: "dashboard"}, db: db, schemas: newSchemaClient(server.URL, db)}
+	a := &app{haltController: &haltController{}, cfg: config{Role: "dashboard"}, db: db, schemas: newSchemaClient(server.URL, db)}
 	msg := &testMsg{meta: &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 41}}, raw: testFrame(t), nakErr: errors.New("connection lost")}
 	if a.process(context.Background(), nil, msg) || msg.nakCalls != 1 || a.pauseUntil.Load() <= time.Now().UnixNano() {
 		t.Fatalf("NAK failure should reconnect and pause: nak_calls=%d", msg.nakCalls)
@@ -385,7 +385,7 @@ func TestHaltPersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &app{db: db}
+	a := &app{haltController: &haltController{}, db: db}
 	a.halt("consumer_incompatible: unsupported envelope")
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -395,7 +395,7 @@ func TestHaltPersistsAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	restarted := &app{db: reopened}
+	restarted := &app{haltController: &haltController{}, db: reopened}
 	if err := restarted.refreshHalt(context.Background()); err != nil || !restarted.halted.Load() {
 		t.Fatalf("halt lost after restart: halted=%v error=%v", restarted.halted.Load(), err)
 	}
@@ -420,7 +420,7 @@ func TestUnknownSchemaCarriesCorrelationIntoRegistryAndLogs(t *testing.T) {
 	header := nats.Header{}
 	header.Set(correlationHeader, "cid-unknown")
 	msg := &testMsg{meta: &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 41}}, raw: testFrame(t), header: header}
-	a := &app{cfg: config{Role: "dashboard"}, db: db, schemas: newSchemaClient(server.URL, db)}
+	a := &app{haltController: &haltController{}, cfg: config{Role: "dashboard"}, db: db, schemas: newSchemaClient(server.URL, db)}
 	if !a.process(context.Background(), nil, msg) || msg.nakCalls != 1 {
 		t.Fatal("unknown schema should be delayed")
 	}
@@ -473,7 +473,7 @@ func TestSuccessfulMessageKeepsCorrelationThroughLookupAndAck(t *testing.T) {
 	header := nats.Header{}
 	header.Set(correlationHeader, "cid-1")
 	msg := &testMsg{meta: &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 41}}, raw: testFrame(t), header: header}
-	a := &app{cfg: config{Role: "dashboard"}, db: db, schemas: newSchemaClient(server.URL, db)}
+	a := &app{haltController: &haltController{}, cfg: config{Role: "dashboard"}, db: db, schemas: newSchemaClient(server.URL, db)}
 	if !a.process(context.Background(), nil, msg) || msg.ackCalls != 1 {
 		t.Fatalf("valid message must be stored and acked: ack_calls=%d", msg.ackCalls)
 	}
@@ -539,7 +539,7 @@ func TestDLQRetainsOneEntryAfterLostAckAndAmbiguousPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	a := &app{cfg: config{Role: "dashboard", Durable: "dashboard-v1", DLQStream: streamName, DLQSubject: prefix + ".dashboard"}, db: db}
+	a := &app{haltController: &haltController{}, cfg: config{Role: "dashboard", Durable: "dashboard-v1", DLQStream: streamName, DLQSubject: prefix + ".dashboard"}, db: db}
 	var logs bytes.Buffer
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&logs, nil)))

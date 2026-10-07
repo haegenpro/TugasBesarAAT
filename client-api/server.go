@@ -157,11 +157,20 @@ func (a *api) authenticate() gin.HandlerFunc {
 	}
 }
 
+func hasScope(scopes, required string) bool {
+	for _, scope := range strings.Fields(scopes) {
+		if scope == required {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *api) view(c *gin.Context) (string, bool) {
 	principal := c.MustGet("principal").(principal)
 	view := c.DefaultQuery("view", "")
 	if view == "" {
-		if principal.Scope == "hazards:raw" {
+		if hasScope(principal.Scope, "hazards:raw") {
 			view = "raw"
 		} else {
 			view = "summary"
@@ -171,7 +180,7 @@ func (a *api) view(c *gin.Context) (string, bool) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "view must be summary or raw"})
 		return "", false
 	}
-	if view == "raw" && principal.Scope != "hazards:raw" {
+	if view == "raw" && !hasScope(principal.Scope, "hazards:raw") {
 		c.JSON(http.StatusForbidden, gin.H{"error": "raw view forbidden for media"})
 		return "", false
 	}

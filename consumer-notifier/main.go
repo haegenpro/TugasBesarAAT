@@ -30,10 +30,11 @@ var errRegistryUnavailable = errors.New("schema registry unavailable")
 type config struct {
 	Role, Port, DBPath, NATSURL, Stream, Subject, Durable, RegistryURL, DLQStream, DLQSubject string
 	LifecycleStream, LifecycleSubject                                                         string
+	AuthURL, AuthInternalKey                                                                  string
 }
 
 func loadConfig() (config, error) {
-	values, err := requiredEnv("CONSUMER_ROLE", "CONSUMER_PORT", "CONSUMER_DB_PATH", "NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_DURABLE", "SCHEMA_REGISTRY_URL", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT", "NATS_LIFECYCLE_STREAM", "NATS_LIFECYCLE_SUBJECT")
+	values, err := requiredEnv("CONSUMER_ROLE", "CONSUMER_PORT", "CONSUMER_DB_PATH", "NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_DURABLE", "SCHEMA_REGISTRY_URL", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT", "NATS_LIFECYCLE_STREAM", "NATS_LIFECYCLE_SUBJECT", "AUTH_BASE_URL", "AUTH_INTERNAL_KEY")
 	if err != nil {
 		return config{}, err
 	}
@@ -46,11 +47,14 @@ func loadConfig() (config, error) {
 	if err = envURL(values, "SCHEMA_REGISTRY_URL", "http", "https"); err != nil {
 		return config{}, err
 	}
+	if err = envURL(values, "AUTH_BASE_URL", "http", "https"); err != nil {
+		return config{}, err
+	}
 	if values["CONSUMER_ROLE"] != "dashboard" && values["CONSUMER_ROLE"] != "notifier" {
 		return config{}, errors.New("CONSUMER_ROLE must be dashboard or notifier")
 	}
 	lifecycleStream, lifecycleSubject := values["NATS_LIFECYCLE_STREAM"], values["NATS_LIFECYCLE_SUBJECT"]
-	return config{LifecycleStream: lifecycleStream, LifecycleSubject: lifecycleSubject, Role: values["CONSUMER_ROLE"], Port: values["CONSUMER_PORT"], DBPath: values["CONSUMER_DB_PATH"], NATSURL: values["NATS_URL"], Stream: values["NATS_STREAM"], Subject: values["NATS_SUBJECT"], Durable: values["NATS_DURABLE"], RegistryURL: strings.TrimRight(values["SCHEMA_REGISTRY_URL"], "/"), DLQStream: values["NATS_DLQ_STREAM"], DLQSubject: values["NATS_DLQ_SUBJECT"]}, nil
+	return config{AuthURL: strings.TrimRight(values["AUTH_BASE_URL"], "/"), AuthInternalKey: values["AUTH_INTERNAL_KEY"], LifecycleStream: lifecycleStream, LifecycleSubject: lifecycleSubject, Role: values["CONSUMER_ROLE"], Port: values["CONSUMER_PORT"], DBPath: values["CONSUMER_DB_PATH"], NATSURL: values["NATS_URL"], Stream: values["NATS_STREAM"], Subject: values["NATS_SUBJECT"], Durable: values["NATS_DURABLE"], RegistryURL: strings.TrimRight(values["SCHEMA_REGISTRY_URL"], "/"), DLQStream: values["NATS_DLQ_STREAM"], DLQSubject: values["NATS_DLQ_SUBJECT"]}, nil
 }
 
 type schemaClient struct {
@@ -240,13 +244,12 @@ func (s *schemaClient) decode(ctx context.Context, data []byte) (envelope, error
 }
 
 type app struct {
+	*haltController
 	lifecycle  *app
 	cfg        config
 	db         *sql.DB
 	schemas    *schemaClient
 	ready      atomic.Bool
-	halted     atomic.Bool
-	haltSticky atomic.Bool
 	pauseUntil atomic.Int64
 }
 
@@ -505,7 +508,7 @@ func (a *app) run(ctx context.Context) {
 				sleep(ctx, 5*time.Second)
 				continue
 			}
-			a.ready.Store(true)
+			a.markReady()
 			started = time.Now()
 			batch, err := consumer.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
 			logOutbound(ctx, "consumer_fetch", "nats", 0, started, err)
@@ -543,22 +546,21 @@ func sleep(ctx context.Context, d time.Duration) {
 	}
 }
 
-func (a *app) serve(ctx context.Context) error {
+func (a *app) router() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /admin/resume", a.resumeHandler)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "ok", "service": "consumer-" + a.cfg.Role})
 	})
 	mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
-		ready := a.ready.Load() && !a.halted.Load() && time.Now().UnixNano() >= a.pauseUntil.Load()
+		halted, reason := a.snapshot()
+		ready := a.ready.Load() && !halted && time.Now().UnixNano() >= a.pauseUntil.Load()
 		if a.lifecycle != nil {
 			ready = ready && a.lifecycle.ready.Load() && !a.lifecycle.halted.Load() && time.Now().UnixNano() >= a.lifecycle.pauseUntil.Load()
 		}
-		body := map[string]any{"ready": ready, "halted": a.halted.Load()}
-		if a.halted.Load() {
-			var reason string
-			if err := a.db.QueryRowContext(r.Context(), `SELECT value FROM consumer_control WHERE key='halt_reason'`).Scan(&reason); err == nil {
-				body["reason"] = reason
-			}
+		body := map[string]any{"ready": ready, "halted": halted}
+		if halted {
+			body["reason"] = reason
 		}
 		if until := a.pauseUntil.Load(); time.Now().UnixNano() < until {
 			body["registry_retry_after"] = time.Unix(0, until).UTC().Format(time.RFC3339)
@@ -594,7 +596,11 @@ func (a *app) serve(ctx context.Context) error {
 		}
 		writeJSON(w, map[string]any{"data": items, "count": len(items)})
 	})
-	srv := &http.Server{Addr: ":" + a.cfg.Port, Handler: mux}
+	return mux
+}
+
+func (a *app) serve(ctx context.Context) error {
+	srv := &http.Server{Addr: ":" + a.cfg.Port, Handler: a.router()}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -624,13 +630,13 @@ func main() {
 	defer db.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	a := &app{cfg: cfg, db: db, schemas: newSchemaClient(cfg.RegistryURL, db)}
+	a := &app{haltController: &haltController{}, cfg: cfg, db: db, schemas: newSchemaClient(cfg.RegistryURL, db)}
 	lifecycleCfg := cfg
 	lifecycleCfg.Stream = cfg.LifecycleStream
 	lifecycleCfg.Subject = cfg.LifecycleSubject
 	lifecycleCfg.Durable = cfg.Durable + "-lifecycle"
 	lifecycleCfg.DLQSubject = cfg.DLQSubject + ".lifecycle"
-	a.lifecycle = &app{cfg: lifecycleCfg, db: db, schemas: a.schemas}
+	a.lifecycle = &app{haltController: a.haltController, cfg: lifecycleCfg, db: db, schemas: a.schemas}
 	go a.lifecycle.run(ctx)
 	go a.run(ctx)
 	if err := a.serve(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {

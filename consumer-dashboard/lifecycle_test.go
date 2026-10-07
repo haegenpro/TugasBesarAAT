@@ -14,7 +14,7 @@ func TestCorrectionBeforeCanonicalCannotRegressProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	a := &app{db: db, cfg: config{Role: "notifier"}}
+	a := &app{haltController: &haltController{}, db: db, cfg: config{Role: "notifier"}}
 	ctx := context.Background()
 	h := hazardEvent{HazardID: "stable-hazard", Source: "BMKG", Severity: "AWAS", AreaName: "Coast", OccurredAt: "2026-10-07T00:00:00Z"}
 	e := lifecycleEvent{EventID: "correction", EventType: "hazard_corrected", RecordID: h.HazardID, Revision: 2, HazardRevision: 2, Hazard: &h, CorrelationID: "test"}

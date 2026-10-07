@@ -167,8 +167,8 @@ sequence, so transport deduplication cannot identify it as the old delivery.
 Business-record checks may suppress duplicate effects; replaying changed payloads
 under an existing hazard ID may instead halt an incompatible consumer. Lifecycle
 events retain their own event-ID/revision rules. A halted consumer may additionally
-need the manual halt-clearing procedure described in the root README after
-fixing the cause.
+need the authenticated resume operation described in
+[Consumer recovery](../docs/consumer-recovery.md) after fixing the cause.
 
 Republishing neither removes the DLQ record nor adds a recovery status. Records
 expire according to explicitly configured `NATS_DLQ_MAX_AGE` (168h in the example).
