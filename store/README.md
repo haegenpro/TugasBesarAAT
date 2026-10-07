@@ -5,11 +5,11 @@ no other service connects to this database directly.
 
 `init.sql` is mounted at `/docker-entrypoint-initdb.d/init.sql` and creates all
 tables, including the outbox, on first container boot. The Aggregator checks
-for the tables but does not create or migrate them. Compose mounts Postgres
+the canonical tables and applies idempotent lifecycle migrations under an advisory lock. Compose mounts Postgres
 data in the `postgres-data` volume so pending events survive container
-recreation. A local volume created before the outbox was added needs to be
-recreated or initialized manually; `init.sql` does not rerun on an existing
-volume.
+recreation. Lifecycle tables and columns are added on existing canonical
+schemas by the Aggregator migration. Installations missing the original
+canonical tables still need the base schema initialized.
 
 ## Tables
 
@@ -51,3 +51,7 @@ SELECT attributes FROM hazard_events WHERE source = 'PVMBG' AND attributes ? 'co
 ```
 
 Both rows live in the same table, same column, with no migration between them.
+
+## Reporting lifecycle
+
+Validated observations, replay cursors, retry schedules, notices, transitions, and lifecycle outbox work are Aggregator-owned PostgreSQL data. Hazard corrections retain the hazard ID and increment a storage revision. See [Reporting Lifecycle](../docs/Reporting%20Lifecycle.md).

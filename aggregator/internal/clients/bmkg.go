@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"aggregator/internal/avrowire"
@@ -17,6 +18,7 @@ import (
 )
 
 type SeismicEvent struct {
+	SourceSequence   int64          `json:"_source_sequence,omitempty"`
 	EventID          string         `json:"event_id"`
 	Magnitude        float64        `json:"magnitude"`
 	DepthKM          float64        `json:"depth_km"`
@@ -25,16 +27,17 @@ type SeismicEvent struct {
 	RegionName       string         `json:"region_name"`
 	OccurredAt       time.Time      `json:"occurred_at"`
 	PotentialTsunami bool           `json:"potential_tsunami"`
-	Attributes       map[string]any `json:"-"`
+	Attributes       map[string]any `json:"_extra_attributes,omitempty"`
 }
 
 type TsunamiWarning struct {
+	SourceSequence   int64          `json:"_source_sequence,omitempty"`
 	WarningID        string         `json:"warning_id"`
 	RelatedEventID   string         `json:"related_event_id"`
 	ThreatLevel      string         `json:"threat_level"`
 	AffectedZones    []string       `json:"affected_zones"`
 	EstimatedArrival time.Time      `json:"estimated_arrival"`
-	Attributes       map[string]any `json:"-"`
+	Attributes       map[string]any `json:"_extra_attributes,omitempty"`
 }
 
 type BMKGClient struct {
@@ -119,12 +122,21 @@ func (c *BMKGClient) get(ctx context.Context, correlationID, path string, requir
 	if err := json.Unmarshal(encoded, out); err != nil {
 		return fmt.Errorf("%w: bmkg %s: %v", ErrContractViolation, path, err)
 	}
+	sequence := int64(0)
+	if header := resp.Header.Get("X-Source-Sequence"); header != "" {
+		var err error
+		sequence, err = strconv.ParseInt(header, 10, 64)
+		if err != nil || sequence < 0 {
+			return fmt.Errorf("%w: invalid source sequence", ErrContractViolation)
+		}
+	}
 	switch typed := out.(type) {
 	case *[]SeismicEvent:
 		for i, event := range *typed {
 			if event.EventID == "" {
 				return fmt.Errorf("%w: bmkg %s record %d: empty event_id", ErrContractViolation, path, i)
 			}
+			(*typed)[i].SourceSequence = sequence
 			(*typed)[i].Attributes = unmappedFields(records[i], "event_id", "magnitude", "depth_km", "epicenter_lat", "epicenter_lon", "region_name", "occurred_at", "potential_tsunami")
 		}
 	case *[]TsunamiWarning:
@@ -137,6 +149,7 @@ func (c *BMKGClient) get(ctx context.Context, correlationID, path string, requir
 			default:
 				return fmt.Errorf("%w: bmkg %s record %d: invalid threat_level %q", ErrContractViolation, path, i, warning.ThreatLevel)
 			}
+			(*typed)[i].SourceSequence = sequence
 			(*typed)[i].Attributes = unmappedFields(records[i], "warning_id", "related_event_id", "threat_level", "affected_zones", "estimated_arrival")
 		}
 	}

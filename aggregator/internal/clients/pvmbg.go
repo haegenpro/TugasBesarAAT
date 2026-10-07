@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"aggregator/internal/avrowire"
@@ -15,6 +16,7 @@ import (
 
 // VolcanicReport contains mapped PVMBG fields and source-specific attributes.
 type VolcanicReport struct {
+	SourceSequence   int64
 	ReportID         string
 	VolcanoID        string
 	AlertLevel       string
@@ -133,12 +135,21 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 	if raws == nil {
 		return nil, fmt.Errorf("%w: pvmbg %s returned null instead of an array", ErrContractViolation, path)
 	}
+	sequence := int64(0)
+	if header := resp.Header.Get("X-Source-Sequence"); header != "" {
+		var err error
+		sequence, err = strconv.ParseInt(header, 10, 64)
+		if err != nil || sequence < 0 {
+			return nil, fmt.Errorf("%w: invalid source sequence", ErrContractViolation)
+		}
+	}
 	reports := make([]VolcanicReport, 0, len(raws))
 	for _, raw := range raws {
 		r, err := decodeVolcanicReport(raw)
 		if err != nil {
 			return nil, fmt.Errorf("pvmbg %s record %d: %w", path, len(reports), err)
 		}
+		r.SourceSequence = sequence
 		reports = append(reports, r)
 	}
 	return reports, nil

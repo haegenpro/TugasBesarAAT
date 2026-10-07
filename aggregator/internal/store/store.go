@@ -37,9 +37,11 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.Pool.Ping(ctx)
 }
 
-// CheckSchema verifies the tables needed by the aggregator without changing
-// the database. Postgres creates them from store/init.sql on first boot.
+// CheckSchema applies idempotent lifecycle migrations before validating the canonical tables.
 func (s *Store) CheckSchema(ctx context.Context) error {
+	if err := s.Migrate(ctx); err != nil {
+		return err
+	}
 	for _, query := range []string{
 		`SELECT hazard_id, source, source_ref_id, attributes FROM hazard_events LIMIT 0`,
 		`SELECT volcano_id, area_name, latitude, longitude FROM volcano_reference LIMIT 0`,
@@ -56,55 +58,20 @@ func (s *Store) CheckSchema(ctx context.Context) error {
 // A genuinely new source record inserts a fresh row and outbox event and
 // returns inserted=true. A record seen on an earlier poll cycle updates its
 // mutable fields in place but keeps its original hazard_id and returns
-// inserted=false, so it is never queued again. Source fields that the
-// Aggregator ignores never enter this store operation.
+// inserted=false. Material changes queue a lifecycle correction; identical
+// observations only refresh last-seen metadata. Canonical initial snapshots
+// remain revision 1 in the original outbox.
 func (s *Store) SaveDedup(ctx context.Context, e domain.HazardEvent, correlationID string) (inserted bool, err error) {
-	attrsJSON, err := json.Marshal(e.Attributes)
-	if err != nil {
-		return false, err
-	}
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-
-	row := tx.QueryRow(ctx, `
-		INSERT INTO hazard_events
-			(hazard_id, source, source_ref_id, hazard_type, severity, area_name,
-			 latitude, longitude, occurred_at, ingested_at, attributes)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-		ON CONFLICT (source, source_ref_id) DO UPDATE SET
-			severity = EXCLUDED.severity,
-			area_name = EXCLUDED.area_name,
-			latitude = EXCLUDED.latitude,
-			longitude = EXCLUDED.longitude,
-			occurred_at = EXCLUDED.occurred_at,
-			attributes = EXCLUDED.attributes
-		RETURNING (xmax = 0) AS inserted
-	`,
-		e.HazardID, string(e.Source), e.SourceRefID, string(e.HazardType), string(e.Severity),
-		e.AreaName, e.Latitude, e.Longitude, e.OccurredAt.Time, e.IngestedAt.Time, attrsJSON,
-	)
-	if err := row.Scan(&inserted); err != nil {
+	_, inserted, err = s.saveHazardTx(ctx, tx, e, correlationID, true)
+	if err != nil {
 		return false, err
 	}
-	if inserted {
-		payload, err := json.Marshal(e)
-		if err != nil {
-			return false, err
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO hazard_outbox (hazard_id, event_payload, correlation_id)
-			VALUES ($1, $2, $3)
-		`, e.HazardID, payload, correlationID); err != nil {
-			return false, err
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, err
-	}
-	return inserted, nil
+	return inserted, tx.Commit(ctx)
 }
 
 type OutboxEvent struct {
