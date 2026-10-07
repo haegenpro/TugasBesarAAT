@@ -1,0 +1,74 @@
+package handlers
+
+import (
+	"encoding/json"
+	"github.com/gin-gonic/gin"
+	"net/http"
+	"pvmbg-mock/internal/domain"
+	"pvmbg-mock/internal/history"
+	"strconv"
+)
+
+func (h *Handler) AttachArchive(a *history.Archive) error {
+	records := []history.Record{}
+	for _, r := range h.Reports {
+		records = append(records, history.Record{Entity: "volcanic-reports", ID: r.ReportID, Payload: r})
+	}
+	if err := a.Append(records...); err != nil {
+		return err
+	}
+	h.Archive = a
+	return nil
+}
+func (h *Handler) History(c *gin.Context) {
+	if h.Toggles.Outage() {
+		c.JSON(503, gin.H{"error": "pvmbg outage in progress"})
+		return
+	}
+	h.randomDelay()
+	if h.Toggles.Outage() {
+		c.JSON(503, gin.H{"error": "pvmbg outage in progress"})
+		return
+	}
+	entity := c.Query("entity")
+	if entity != "volcanic-reports" {
+		c.JSON(400, gin.H{"error": "invalid entity"})
+		return
+	}
+	after := int64(0)
+	limit := 100
+	var err error
+	if v := c.Query("after"); v != "" {
+		after, err = strconv.ParseInt(v, 10, 64)
+		if err != nil || after < 0 {
+			c.JSON(400, gin.H{"error": "invalid cursor"})
+			return
+		}
+	}
+	if v := c.Query("limit"); v != "" {
+		limit, err = strconv.Atoi(v)
+		if err != nil || limit < 1 || limit > 1000 {
+			c.JSON(400, gin.H{"error": "invalid limit"})
+			return
+		}
+	}
+	if h.Archive == nil {
+		c.JSON(503, gin.H{"error": "archive unavailable"})
+		return
+	}
+	page, err := h.Archive.Read(entity, after, limit)
+	if err != nil {
+		c.JSON(503, gin.H{"error": "archive unavailable"})
+		return
+	}
+	for i := range page.Data {
+		var r domain.VolcanicReport
+		if err := json.Unmarshal(page.Data[i].Payload, &r); err != nil {
+			c.JSON(503, gin.H{"error": "archive invalid"})
+			return
+		}
+		b, _ := json.Marshal(r.WireCopy(h.Toggles.ShowConfidence()))
+		page.Data[i].Payload = b
+	}
+	c.JSON(http.StatusOK, page)
+}

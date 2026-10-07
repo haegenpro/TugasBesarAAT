@@ -11,6 +11,7 @@ import (
 	"pvmbg-mock/internal/avrowire"
 	"pvmbg-mock/internal/config"
 	"pvmbg-mock/internal/handlers"
+	"pvmbg-mock/internal/history"
 	"pvmbg-mock/internal/middleware"
 	"pvmbg-mock/internal/seed"
 	"pvmbg-mock/internal/server"
@@ -28,6 +29,16 @@ func main() {
 	reports := seed.Build()
 	toggles := state.New()
 	h := handlers.New(reports, toggles, cfg.MinDelayMs, cfg.MaxDelayMs)
+	archive, err := history.Open(cfg.ArchivePath)
+	if err != nil {
+		logger.Error("source archive unavailable", "error", err)
+		os.Exit(1)
+	}
+	defer archive.DB.Close()
+	if err := h.AttachArchive(archive); err != nil {
+		logger.Error("source archive initialization failed", "error", err)
+		os.Exit(1)
+	}
 	h.Registry = avrowire.NewClient(cfg.RegistryURL)
 	h.Registry.ConfigureLogging(logger, "pvmbg-mock")
 	router := server.New(logger, cfg.Token, cfg.AdminToken, h, toggles)

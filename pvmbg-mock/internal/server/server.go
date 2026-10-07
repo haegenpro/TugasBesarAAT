@@ -23,6 +23,7 @@ func New(logger *slog.Logger, token, adminToken string, h *handlers.Handler, tog
 	data := r.Group("/")
 	data.Use(auth.RequireBearer(token))
 	data.GET("/volcanic-reports", h.VolcanicReports)
+	data.GET("/history", h.History)
 
 	admin := r.Group("/admin")
 	admin.Use(auth.RequireBearer(adminToken))

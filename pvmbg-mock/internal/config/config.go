@@ -2,8 +2,6 @@ package config
 
 import (
 	"errors"
-	"os"
-	"strconv"
 )
 
 type Config struct {
@@ -14,42 +12,34 @@ type Config struct {
 	MaxDelayMs       int
 	ReportIntervalMs int
 	RegistryURL      string
+	ArchivePath      string
 }
 
 func Load() (Config, error) {
-	token := os.Getenv("PVMBG_TOKEN")
-	adminToken := os.Getenv("PVMBG_ADMIN_TOKEN")
-	if token == "" || adminToken == "" || token == adminToken {
-		return Config{}, errors.New("PVMBG_TOKEN and PVMBG_ADMIN_TOKEN must be distinct and nonempty")
+	v, err := requiredEnv("PVMBG_PORT", "PVMBG_TOKEN", "PVMBG_ADMIN_TOKEN", "PVMBG_MIN_DELAY_MS", "PVMBG_MAX_DELAY_MS", "PVMBG_REPORT_INTERVAL_MS", "SCHEMA_REGISTRY_URL", "SOURCE_ARCHIVE_PATH")
+	if err != nil {
+		return Config{}, err
 	}
-	// The contract requires at least one new report every 10 seconds.
-	interval := getEnvInt("PVMBG_REPORT_INTERVAL_MS", 10000)
-	if interval < 1 || interval > 10000 {
-		return Config{}, errors.New("PVMBG_REPORT_INTERVAL_MS must be between 1 and 10000")
+	if v["PVMBG_TOKEN"] == v["PVMBG_ADMIN_TOKEN"] {
+		return Config{}, errors.New("PVMBG_TOKEN and PVMBG_ADMIN_TOKEN must be distinct")
 	}
-	return Config{
-		Port:             getEnv("PVMBG_PORT", "8082"),
-		Token:            token,
-		AdminToken:       adminToken,
-		MinDelayMs:       getEnvInt("PVMBG_MIN_DELAY_MS", 500),
-		MaxDelayMs:       getEnvInt("PVMBG_MAX_DELAY_MS", 3000),
-		ReportIntervalMs: interval,
-		RegistryURL:      getEnv("SCHEMA_REGISTRY_URL", "http://schema-registry:8080/apis/ccompat/v7"),
-	}, nil
-}
-
-func getEnv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	if _, err = envInt(v, "PVMBG_PORT", 1, 65535); err != nil {
+		return Config{}, err
 	}
-	return def
-}
-
-func getEnvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+	minDelay, err := envInt(v, "PVMBG_MIN_DELAY_MS", 0, 0)
+	if err != nil {
+		return Config{}, err
 	}
-	return def
+	maxDelay, err := envInt(v, "PVMBG_MAX_DELAY_MS", minDelay, 0)
+	if err != nil {
+		return Config{}, err
+	}
+	interval, err := envInt(v, "PVMBG_REPORT_INTERVAL_MS", 1, 10000)
+	if err != nil {
+		return Config{}, err
+	}
+	if err = envURL(v, "SCHEMA_REGISTRY_URL", "http", "https"); err != nil {
+		return Config{}, err
+	}
+	return Config{Port: v["PVMBG_PORT"], Token: v["PVMBG_TOKEN"], AdminToken: v["PVMBG_ADMIN_TOKEN"], MinDelayMs: minDelay, MaxDelayMs: maxDelay, ReportIntervalMs: interval, RegistryURL: v["SCHEMA_REGISTRY_URL"], ArchivePath: v["SOURCE_ARCHIVE_PATH"]}, nil
 }

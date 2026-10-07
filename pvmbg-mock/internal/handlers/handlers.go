@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/http"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 
 	"pvmbg-mock/internal/avrowire"
 	"pvmbg-mock/internal/domain"
+	"pvmbg-mock/internal/history"
 	"pvmbg-mock/internal/middleware"
 	"pvmbg-mock/internal/seed"
 	"pvmbg-mock/internal/state"
@@ -21,6 +23,8 @@ import (
 )
 
 type Handler struct {
+	Logger      *slog.Logger
+	Archive     *history.Archive
 	Reports     []domain.VolcanicReport
 	Toggles     *state.Toggles
 	MinDelayMs  int
@@ -35,7 +39,7 @@ type Handler struct {
 
 func New(reports []domain.VolcanicReport, toggles *state.Toggles, minDelayMs, maxDelayMs int) *Handler {
 	return &Handler{
-		Reports:    reports,
+		Logger: middleware.NewLogger(), Reports: reports,
 		Toggles:    toggles,
 		MinDelayMs: minDelayMs,
 		MaxDelayMs: maxDelayMs,
@@ -54,6 +58,12 @@ const maxLive = 100
 func (h *Handler) AddReport(r domain.VolcanicReport) {
 	h.schemaMu.Lock()
 	defer h.schemaMu.Unlock()
+	if h.Archive != nil {
+		if err := h.Archive.Append(history.Record{Entity: "volcanic-reports", ID: r.ReportID, Payload: r}); err != nil {
+			h.Logger.Error("archive write failed; observation not exposed", "service", "pvmbg-mock", "error", err)
+			return
+		}
+	}
 	h.Reports = append(h.Reports, r)
 	h.liveIDs = append(h.liveIDs, r.ReportID)
 	if len(h.liveIDs) <= maxLive {
@@ -69,7 +79,7 @@ func (h *Handler) AddReport(r domain.VolcanicReport) {
 // endpoint, so the Aggregator catches up once the outage ends.
 func (h *Handler) RunGenerator(ctx context.Context, interval time.Duration, logger *slog.Logger) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	boot := time.Now().Unix()
+	boot := time.Now().UnixNano()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for n := 1; ; n++ {
@@ -127,6 +137,14 @@ func (h *Handler) VolcanicReports(c *gin.Context) {
 
 	h.schemaMu.RLock()
 	defer h.schemaMu.RUnlock()
+	if h.Archive != nil {
+		head, err := h.Archive.Head()
+		if err != nil {
+			c.JSON(503, gin.H{"error": "archive unavailable"})
+			return
+		}
+		c.Header("X-Source-Sequence", strconv.FormatInt(head, 10))
+	}
 	since := parseSince(c)
 	showConfidence := h.Toggles.ShowConfidence()
 	out := make([]domain.VolcanicReport, 0, len(h.Reports))
@@ -185,10 +203,17 @@ func (h *Handler) AdminSchemaVersion(c *gin.Context) {
 		if len(h.Reports) > 0 {
 			h.activations++
 			report := h.Reports[0]
-			report.ReportID = fmt.Sprintf("rep-schema-%05d", h.activations)
+			report.ReportID = fmt.Sprintf("rep-schema-%d-%05d", time.Now().UnixNano(), h.activations)
 			report.ReportedAt = timeutil.New(time.Now().UTC())
 			confidence := 0.88
 			report.ConfidenceLevel = &confidence
+			if h.Archive != nil {
+				if err := h.Archive.Append(history.Record{Entity: "volcanic-reports", ID: report.ReportID, Payload: report}); err != nil {
+					h.Toggles.ToggleSchema()
+					c.JSON(503, gin.H{"error": "archive unavailable"})
+					return
+				}
+			}
 			h.Reports = append(h.Reports, report)
 		}
 	}
