@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+storage:
+  tsdb:
+    retention:
+      time: {{.METRICS_RETENTION_DAYS}}d
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+  - job_name: alloy
+    metrics_path: {{quote (urlPath .ALLOY_METRICS_URL)}}
+    static_configs:
+      - targets: [{{quote (urlHost .ALLOY_METRICS_URL)}}]
+    scheme: {{quote (urlScheme .ALLOY_METRICS_URL)}}
+  - job_name: loki
+    metrics_path: {{quote (urlPath .LOKI_METRICS_URL)}}
+    static_configs:
+      - targets: [{{quote (urlHost .LOKI_METRICS_URL)}}]
+    scheme: {{quote (urlScheme .LOKI_METRICS_URL)}}
+  - job_name: nats-exporter
+    metrics_path: {{quote (urlPath .NATS_EXPORTER_METRICS_URL)}}
+    static_configs:
+      - targets: [{{quote (urlHost .NATS_EXPORTER_METRICS_URL)}}]
+    scheme: {{quote (urlScheme .NATS_EXPORTER_METRICS_URL)}}

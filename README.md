@@ -44,6 +44,22 @@ Here is how the broker is set up:
 - The broker only stores and delivers bytes. Schema lookup and validation
   happen in each consumer after delivery.
 
+## Continuous monitoring
+
+Grafana, Prometheus, Loki, Alloy, and a NATS exporter start with the application stack. Alloy embeds
+Blackbox probing for existing health/readiness endpoints and collects this Compose
+project's Docker logs. Grafana provides endpoint history, logged outbound latency,
+correlation-ID search, DLQ archive size, consumer delivery metrics, and alerts.
+The NATS exporter reads broker monitoring endpoints without consuming messages. No OTel or separate
+Blackbox container is required.
+
+Each monitoring image adds a small startup validator to its pinned official image.
+Missing/empty/whitespace-only required settings are reported together by name;
+there are no environment fallbacks. Create the five monitoring service `.env`
+files from their sections in `.env.example`, plus the root Grafana address/port.
+See [Monitoring setup and evidence](monitoring/README.md) for all required settings,
+access, retention, dashboard interpretation, and verification.
+
 ## Preliminary reporting and delayed recovery
 
 Validated observations are reported immediately when their assessment is pending.
@@ -72,6 +88,7 @@ registry/         # Apicurio Registry + separate persistent database
 consumer-dashboard/ # durable dashboard projection
 consumer-notifier/  # durable simulated notifications
 scripts/          # smoke test, isolation demo, k6 load test
+monitoring/      # five monitoring wrappers, configuration, provisioned dashboard
 docker-compose.yml
 .env.example
 docs/             # Team contract docs (wire format, stack, deployment)
@@ -79,9 +96,9 @@ docs/             # Team contract docs (wire format, stack, deployment)
 
 ## Quick start: Docker Compose
 
-First, create the root `.env` with the six host-port settings, then the eleven
-service env files by hand. Use the root
-`.env.example` together with the tables below, and copy into each file only
+First, create the root `.env` with the six application host ports and the
+Grafana bind address and host port, then the sixteen service env files by hand.
+Use the root `.env.example` together with the tables below, and copy into each file only
 the variables that service needs, including the shared ones the template
 points out. Then, from the repository root, run:
 
@@ -136,7 +153,7 @@ gitignored files yourself, each with just the variables its service needs:
 
 | File | Used by | Configuration |
 | --- | --- | --- |
-| `.env` | Compose | Six required host ports; copy only the root host-port section |
+| `.env` | Compose | Required application host ports and Grafana address/port; copy only the root section |
 | `bmkg-mock/.env` | BMKG mock | Port, API key, delay, event interval, schema registry URL, archive path |
 | `pvmbg-mock/.env` | PVMBG mock | Port, source/admin tokens, delays, report interval, schema registry URL, archive path |
 | `broker/.env` | Broker and optional broker-init tool | NATS URL, streams, subjects, retention |
@@ -148,6 +165,11 @@ gitignored files yourself, each with just the variables its service needs:
 | `client-tui/.env` | Interactive TUI | API URL and public client IDs, no login secrets |
 | `consumer-dashboard/.env` | Dashboard consumer | Role, durable name, SQLite path, broker and registry URLs, DLQ subject |
 | `consumer-notifier/.env` | Notifier consumer | Role, durable name, SQLite path, broker and registry URLs, DLQ subject |
+| `monitoring/grafana/.env` | Grafana | Administrator credentials, data source URLs, and DLQ stream name |
+| `monitoring/prometheus/.env` | Prometheus | Required metrics retention and monitoring scrape URLs |
+| `monitoring/nats-exporter/.env` | NATS exporter | Required broker monitoring URL |
+| `monitoring/loki/.env` | Loki | Required log retention |
+| `monitoring/alloy/.env` | Alloy | Required metrics/log destinations and health/readiness target URLs |
 
 Some notes on how these files are used:
 
@@ -177,7 +199,8 @@ Aggregator's URL together, and update the existing database as well.
 Recreating the container does not change users in a volume that is already
 initialized.
 
-The template suggests these host ports. All six must be set explicitly:
+The template suggests these host ports. All ports and the Grafana bind address
+must be set explicitly:
 
 | Service | Host port | Required root `.env` setting | Container port |
 | --- | --- | --- | --- |
@@ -187,6 +210,7 @@ The template suggests these host ports. All six must be set explicitly:
 | Schema Registry | 18084 | `SCHEMA_REGISTRY_HOST_PORT` | 8080 |
 | NATS | 14222 | `NATS_HOST_PORT` | 4222 |
 | NATS monitoring | 18222 | `NATS_MONITOR_HOST_PORT` | 8222 |
+| Grafana | 13000 | `GRAFANA_HOST_PORT` (also requires `GRAFANA_BIND_ADDRESS`) | 3000 |
 
 Copy only the **root `.env` host ports** section of `.env.example` into a root `.env`, or export those variables in
 your shell. Compose uses these variables when creating containers; putting
@@ -837,9 +861,14 @@ least as long as the main stream retention.
 
 ### Recovering from a halt
 
-When a consumer halts, `/ready` returns 503 with a reason and Compose marks
-the container unhealthy. `/health` still answers, since the process is
-alive. The halt survives restarts, so it has to be cleared by hand:
+When a consumer halts, `/ready` returns `503`. `/health` still returns `200`
+because the process is alive, so Compose can continue to report the container
+as healthy: its probe checks `/health`, not processing readiness. Check `/ready`
+for processing availability and inspect its reported halt reason and the error
+logs to diagnose the halt. Use broker backlog and `/records` checks to verify
+delivery progress; a healthy container alone does not prove delivery.
+
+The halt survives restarts, so it has to be cleared by hand:
 
 1. Find the cause in the registry, the consumer code, or the SQLite volume.
 2. Stop the consumer.

@@ -220,3 +220,19 @@ The important line: **a PVMBG outage (P2) is a `warn`, not an `error`** — the 
 - [ ] Every outbound call logs `target_service`, `status_code`/`success`, and `latency_ms`, including on failure
 - [ ] PVMBG outage and similar handled-degradation cases log at `warn`, not `error`
 - [ ] No service can be stopped/restarted and take down an unrelated service alongside it
+
+## Continuous monitoring
+
+The implemented Compose stack adds Grafana, Prometheus, Loki, Alloy, and a NATS
+exporter. The exporter reads NATS monitoring endpoints for JetStream stream and
+consumer metrics, without consuming, acknowledging, or deleting messages. Alloy
+embeds Blackbox Exporter to probe existing `/health` and supported `/ready`
+endpoints and forwards Docker logs to Loki. Prometheus stores probe metrics;
+Grafana provides dashboards and alert state. Application startup is independent
+of monitoring, and consumers keep their liveness-based Compose probes.
+
+Monitoring uses required per-service environment files and a startup validator
+that reports every missing/empty/whitespace-only setting by name before starting
+the upstream program. Root Grafana bind address and host port use Compose's
+required-variable checks. See [Monitoring](../monitoring/README.md) for setup,
+retention, collection permissions, and evidence capture.

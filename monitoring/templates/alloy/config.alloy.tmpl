@@ -1,0 +1,136 @@
+// Collector lifecycle and metric buffering are persisted through --storage.path.
+prometheus.exporter.blackbox "health" {
+  config_file = "/tmp/monitoring/blackbox.yml"
+  target {
+    name = "bmkg-mock_health"
+    address = {{quote .BMKG_HEALTH_URL}}
+    module = "http_2xx"
+    labels = { service = "bmkg-mock", probe = "health" }
+  }
+  target {
+    name = "pvmbg-mock_health"
+    address = {{quote .PVMBG_HEALTH_URL}}
+    module = "http_2xx"
+    labels = { service = "pvmbg-mock", probe = "health" }
+  }
+  target {
+    name = "aggregator_health"
+    address = {{quote .AGGREGATOR_HEALTH_URL}}
+    module = "http_2xx"
+    labels = { service = "aggregator", probe = "health" }
+  }
+  target {
+    name = "aggregator_ready"
+    address = {{quote .AGGREGATOR_READY_URL}}
+    module = "http_2xx"
+    labels = { service = "aggregator", probe = "ready" }
+  }
+  target {
+    name = "auth-service_health"
+    address = {{quote .AUTH_HEALTH_URL}}
+    module = "http_2xx"
+    labels = { service = "auth-service", probe = "health" }
+  }
+  target {
+    name = "client-api_health"
+    address = {{quote .CLIENT_API_HEALTH_URL}}
+    module = "http_2xx"
+    labels = { service = "client-api", probe = "health" }
+  }
+  target {
+    name = "client-api_ready"
+    address = {{quote .CLIENT_API_READY_URL}}
+    module = "http_2xx"
+    labels = { service = "client-api", probe = "ready" }
+  }
+  target {
+    name = "consumer-dashboard_health"
+    address = {{quote .DASHBOARD_HEALTH_URL}}
+    module = "http_2xx"
+    labels = { service = "consumer-dashboard", probe = "health" }
+  }
+  target {
+    name = "consumer-dashboard_ready"
+    address = {{quote .DASHBOARD_READY_URL}}
+    module = "http_2xx"
+    labels = { service = "consumer-dashboard", probe = "ready" }
+  }
+  target {
+    name = "consumer-notifier_health"
+    address = {{quote .NOTIFIER_HEALTH_URL}}
+    module = "http_2xx"
+    labels = { service = "consumer-notifier", probe = "health" }
+  }
+  target {
+    name = "consumer-notifier_ready"
+    address = {{quote .NOTIFIER_READY_URL}}
+    module = "http_2xx"
+    labels = { service = "consumer-notifier", probe = "ready" }
+  }
+  target {
+    name = "schema-registry_ready"
+    address = {{quote .REGISTRY_READY_URL}}
+    module = "http_2xx"
+    labels = { service = "schema-registry", probe = "ready" }
+  }
+  target {
+    name = "broker_health"
+    address = {{quote .NATS_HEALTH_URL}}
+    module = "http_2xx"
+    labels = { service = "broker", probe = "health" }
+  }
+}
+discovery.relabel "health" {
+  targets = prometheus.exporter.blackbox.health.targets
+  rule {
+    source_labels = ["__param_target"]
+    target_label = "instance"
+  }
+}
+prometheus.scrape "health" {
+  targets = discovery.relabel.health.output
+  scrape_interval = "15s"
+  scrape_timeout = "10s"
+  forward_to = [prometheus.remote_write.local.receiver]
+}
+prometheus.remote_write "local" {
+  endpoint {
+    url = {{quote .PROMETHEUS_WRITE_URL}}
+  }
+}
+
+discovery.docker "project" {
+  host = "unix:///var/run/docker.sock"
+  refresh_interval = "15s"
+  filter {
+    name = "label"
+    values = [{{quote (printf "com.docker.compose.project=%s" .COMPOSE_PROJECT_NAME)}}]
+  }
+}
+discovery.relabel "logs" {
+  targets = discovery.docker.project.targets
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex = "(grafana|prometheus|loki|alloy|nats-exporter|broker-init)"
+    action = "drop"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label = "service"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label = "compose_project"
+  }
+}
+loki.source.docker "project" {
+  host = "unix:///var/run/docker.sock"
+  targets = discovery.relabel.logs.output
+  labels = {}
+  forward_to = [loki.write.local.receiver]
+}
+loki.write "local" {
+  endpoint {
+    url = {{quote .LOKI_PUSH_URL}}
+  }
+}
