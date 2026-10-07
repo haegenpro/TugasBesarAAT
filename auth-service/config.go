@@ -2,7 +2,7 @@ package main
 
 import (
 	"errors"
-	"os"
+	"fmt"
 	"strconv"
 	"time"
 )
@@ -23,18 +23,25 @@ type config struct {
 }
 
 func loadConfig() (config, error) {
-	accessTTL, err := durationSeconds("ACCESS_TOKEN_TTL_SEC", 60)
+	v, err := requiredEnv("AUTH_PORT", "AUTH_DB_PATH", "AUTH_INTERNAL_KEY", "ACCESS_TOKEN_TTL_SEC", "REFRESH_TOKEN_TTL_SEC", "MEDIA_CLIENT_ID", "MEDIA_CLIENT_SECRET", "FIELD_CLIENT_ID", "FIELD_CLIENT_SECRET", "INTERNAL_CLIENT_ID", "INTERNAL_CLIENT_SECRET")
 	if err != nil {
 		return config{}, err
 	}
-	refreshTTL, err := durationSeconds("REFRESH_TOKEN_TTL_SEC", 86400)
+	if _, err = envInt(v, "AUTH_PORT", 1, 65535); err != nil {
+		return config{}, err
+	}
+	accessTTL, err := durationSeconds(v, "ACCESS_TOKEN_TTL_SEC")
+	if err != nil {
+		return config{}, err
+	}
+	refreshTTL, err := durationSeconds(v, "REFRESH_TOKEN_TTL_SEC")
 	if err != nil {
 		return config{}, err
 	}
 	if refreshTTL <= accessTTL {
 		return config{}, errors.New("refresh token TTL must exceed access token TTL")
 	}
-	internalKey := os.Getenv("AUTH_INTERNAL_KEY")
+	internalKey := v["AUTH_INTERNAL_KEY"]
 	if internalKey == "" {
 		return config{}, errors.New("AUTH_INTERNAL_KEY is required")
 	}
@@ -45,8 +52,8 @@ func loadConfig() (config, error) {
 		{"FIELD", "field"},
 		{"INTERNAL", "internal"},
 	} {
-		id := os.Getenv(item.prefix + "_CLIENT_ID")
-		secret := os.Getenv(item.prefix + "_CLIENT_SECRET")
+		id := v[item.prefix+"_CLIENT_ID"]
+		secret := v[item.prefix+"_CLIENT_SECRET"]
 		if id == "" || secret == "" {
 			return config{}, errors.New(item.prefix + " credentials are required")
 		}
@@ -56,25 +63,15 @@ func loadConfig() (config, error) {
 		identities[id] = identity{ID: id, Secret: secret, Role: item.role}
 		secrets[secret] = true
 	}
-	port := os.Getenv("AUTH_PORT")
-	if port == "" {
-		port = "8083"
-	}
-	path := os.Getenv("AUTH_DB_PATH")
-	if path == "" {
-		path = "/data/auth.db"
-	}
+	port, path := v["AUTH_PORT"], v["AUTH_DB_PATH"]
 	return config{Port: port, DBPath: path, InternalKey: internalKey, AccessTTL: accessTTL, RefreshTTL: refreshTTL, Identities: identities}, nil
 }
 
-func durationSeconds(name string, fallback int) (time.Duration, error) {
-	value := os.Getenv(name)
-	if value == "" {
-		return time.Duration(fallback) * time.Second, nil
-	}
+func durationSeconds(values map[string]string, name string) (time.Duration, error) {
+	value := values[name]
 	seconds, err := strconv.Atoi(value)
-	if err != nil || seconds < 1 {
-		return 0, errors.New(name + " must be a positive integer")
+	if err != nil || seconds < 1 || int64(seconds) > (1<<63-1)/int64(time.Second) {
+		return 0, fmt.Errorf("%s must be positive integer seconds within the supported duration range", name)
 	}
 	return time.Duration(seconds) * time.Second, nil
 }
