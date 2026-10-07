@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Linux/macOS/Git Bash twin of scripts/load-test.ps1: runs scripts/load-test.js with k6 in Docker.
 # Reads the Field client credentials from auth-service/.env.
-# Usage: scripts/load-test.sh [sustained|mixed] [VUS] [DURATION]
-#   scripts/load-test.sh sustained            # 60 VUs, 70s on /hazards
-#   scripts/load-test.sh mixed 50 65s         # BMKG-only vs PVMBG path
+# Usage: BASE_URL=... scripts/load-test.sh sustained|mixed VUS DURATION
+#   BASE_URL=http://host.docker.internal:18080 scripts/load-test.sh sustained 60 70s
+#   BASE_URL=http://host.docker.internal:18080 scripts/load-test.sh mixed 50 65s         # BMKG-only vs PVMBG path
 # For "mixed", first set PVMBG's delay to 3 s. The mock reads its delay from pvmbg-mock/.env
 # (Compose env_file), not from your shell, so `PVMBG_MIN_DELAY_MS=3000 docker compose ...` does nothing:
 #   1. In pvmbg-mock/.env set PVMBG_MIN_DELAY_MS=3000 and PVMBG_MAX_DELAY_MS=3000
@@ -11,9 +11,11 @@
 # (README, Demo D). Restore the original values and recreate the container afterwards.
 set -euo pipefail
 
-MODE="${1:-sustained}"
-VUS="${2:-60}"
-DURATION="${3:-70s}"
+MODE="${1:?Usage: BASE_URL=... scripts/load-test.sh sustained|mixed VUS DURATION}"
+VUS="${2:?VUS is required}"
+DURATION="${3:?DURATION is required}"
+: "${BASE_URL:?BASE_URL is required (for example http://host.docker.internal:18080)}"
+[[ "$VUS" =~ ^[1-9][0-9]*$ ]] || { echo 'VUS must be a positive integer' >&2; exit 2; }
 case "$MODE" in sustained|mixed) ;; *) echo "mode must be sustained or mixed" >&2; exit 2 ;; esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +43,6 @@ fi
 MSYS_NO_PATHCONV=1 docker run --rm -i \
   --add-host=host.docker.internal:host-gateway \
   -v "$SCRIPT_DIR:/scripts:ro" \
-  -e MODE="$MODE" -e VUS="$VUS" -e DURATION="$DURATION" \
+  -e BASE_URL="$BASE_URL" -e MODE="$MODE" -e VUS="$VUS" -e DURATION="$DURATION" \
   -e CLIENT_ID="$CLIENT_ID" -e CLIENT_SECRET="$CLIENT_SECRET" \
   grafana/k6 run /scripts/load-test.js

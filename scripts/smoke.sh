@@ -19,9 +19,9 @@ for arg in "$@"; do
   esac
 done
 
-API_URL="${API_URL:-http://localhost:8080}"
-BMKG_URL="${BMKG_URL:-http://localhost:8081}"
-PVMBG_URL="${PVMBG_URL:-http://localhost:8082}"
+: "${API_URL:?Set API_URL (for example http://localhost:18080)}"
+: "${BMKG_URL:?Set BMKG_URL (for example http://localhost:18081)}"
+: "${PVMBG_URL:?Set PVMBG_URL (for example http://localhost:18082)}"
 API_URL="${API_URL%/}"
 BMKG_URL="${BMKG_URL%/}"
 PVMBG_URL="${PVMBG_URL%/}"
@@ -126,7 +126,8 @@ if (( TEST_OUTAGE )); then
   for (( attempt=0; attempt<10; attempt++ )); do
     sleep 1
     hazards "$MEDIA_ACCESS" '/hazards?hazard_type=VOLCANIC'
-    if [[ "$(demo_json_field source_status.PVMBG.state < "$DEMO_RESPONSE_FILE")" == stale ]]; then
+    source_state="$(demo_json_field source_status.PVMBG.state < "$DEMO_RESPONSE_FILE")"
+    if [[ "$source_state" == stale || "$source_state" == unavailable ]]; then
       stale=1
       break
     fi

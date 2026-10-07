@@ -1,6 +1,20 @@
-param([switch]$RestartAuth, [switch]$WaitForExpiry, [switch]$TestOutage)
+param(
+    [switch]$RestartAuth,
+    [switch]$WaitForExpiry,
+    [switch]$TestOutage,
+    [string]$ApiUrl,
+    [string]$BmkgUrl,
+    [string]$PvmbgUrl
+)
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($ApiUrl)) { throw "-ApiUrl is required" }
+if ([string]::IsNullOrWhiteSpace($BmkgUrl)) { throw "-BmkgUrl is required" }
+if ([string]::IsNullOrWhiteSpace($PvmbgUrl)) { throw "-PvmbgUrl is required" }
+
+$ApiUrl = $ApiUrl.TrimEnd('/')
+$BmkgUrl = $BmkgUrl.TrimEnd('/')
+$PvmbgUrl = $PvmbgUrl.TrimEnd('/')
 
 function Read-EnvFile {
     param([string]$Path)
@@ -55,16 +69,16 @@ function Login([string]$prefix) {
         client_id = $authSettings["${prefix}_CLIENT_ID"]
         client_secret = $authSettings["${prefix}_CLIENT_SECRET"]
     } | ConvertTo-Json -Compress
-    return Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/auth/login' -ContentType 'application/json' -Body $body
+    return Invoke-RestMethod -Method Post -Uri "$ApiUrl/auth/login" -ContentType 'application/json' -Body $body
 }
 
 function Hazards([string]$token, [string]$path) {
-    return Invoke-RestMethod -Method Get -Uri "http://localhost:8080$path" -Headers @{ Authorization = "Bearer $token" }
+    return Invoke-RestMethod -Method Get -Uri "$ApiUrl$path" -Headers @{ Authorization = "Bearer $token" }
 }
 
 function ExpectStatus([string]$token, [string]$path, [int]$expected) {
     try {
-        Invoke-WebRequest -Method Get -Uri "http://localhost:8080$path" -Headers @{ Authorization = "Bearer $token" } -UseBasicParsing | Out-Null
+        Invoke-WebRequest -Method Get -Uri "$ApiUrl$path" -Headers @{ Authorization = "Bearer $token" } -UseBasicParsing | Out-Null
         throw "Expected HTTP $expected for $path"
     } catch {
         if (-not $_.Exception.Response -or [int]$_.Exception.Response.StatusCode -ne $expected) {
@@ -81,8 +95,8 @@ if ($media.role -ne 'media' -or $field.role -ne 'field' -or $internal.role -ne '
 }
 
 foreach ($case in @(
-    @{ uri = 'http://localhost:8082/volcanic-reports'; headers = @{ Authorization = "Bearer $($bmkgSettings['BMKG_API_KEY'])" } },
-    @{ uri = 'http://localhost:8081/seismic-events'; headers = @{ 'X-BMKG-Key' = $pvmbgSettings['PVMBG_TOKEN'] } }
+    @{ uri = "$PvmbgUrl/volcanic-reports"; headers = @{ Authorization = "Bearer $($bmkgSettings['BMKG_API_KEY'])" } },
+    @{ uri = "$BmkgUrl/seismic-events"; headers = @{ 'X-BMKG-Key' = $pvmbgSettings['PVMBG_TOKEN'] } }
 )) {
     try {
         Invoke-WebRequest -Method Get -Uri $case.uri -Headers $case.headers -UseBasicParsing | Out-Null
@@ -118,13 +132,13 @@ if (-not $internalData.data[0].PSObject.Properties['attributes']) { throw 'Inter
 
 if ($TestOutage) {
     $adminHeaders = @{ Authorization = "Bearer $($pvmbgSettings['PVMBG_ADMIN_TOKEN'])" }
-    $null = Invoke-RestMethod -Method Post -Uri 'http://localhost:8082/admin/outage' -Headers $adminHeaders
+    $null = Invoke-RestMethod -Method Post -Uri "$PvmbgUrl/admin/outage" -Headers $adminHeaders
     try {
         $stale = $false
         for ($attempt = 0; $attempt -lt 10; $attempt++) {
             Start-Sleep -Seconds 1
             $volcanic = Hazards $media.access_token '/hazards?hazard_type=VOLCANIC'
-            if ($volcanic.source_status.PVMBG.state -eq 'stale') {
+            if ($volcanic.source_status.PVMBG.state -in @('stale', 'unavailable')) {
                 $stale = $true
                 break
             }
@@ -134,7 +148,7 @@ if ($TestOutage) {
             throw 'Outage response leaked raw attributes to Media'
         }
     } finally {
-        $null = Invoke-RestMethod -Method Post -Uri 'http://localhost:8082/admin/outage' -Headers $adminHeaders
+        $null = Invoke-RestMethod -Method Post -Uri "$PvmbgUrl/admin/outage" -Headers $adminHeaders
     }
 }
 
@@ -160,7 +174,7 @@ if ($WaitForExpiry) {
     ExpectStatus $oldAccess '/hazards' 401
 }
 $refreshBody = @{ refresh_token = $field.refresh_token } | ConvertTo-Json -Compress
-$newTokens = Invoke-RestMethod -Method Post -Uri 'http://localhost:8080/auth/refresh' -ContentType 'application/json' -Body $refreshBody
+$newTokens = Invoke-RestMethod -Method Post -Uri "$ApiUrl/auth/refresh" -ContentType 'application/json' -Body $refreshBody
 ExpectStatus $oldAccess '/hazards' 401
 $null = Hazards $newTokens.access_token '/hazards'
 

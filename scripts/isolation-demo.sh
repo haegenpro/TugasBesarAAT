@@ -3,8 +3,8 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/demo-common.sh"
 
-BMKG_URL="${BMKG_URL:-http://localhost:8081}"
-PVMBG_URL="${PVMBG_URL:-http://localhost:8082}"
+: "${BMKG_URL:?Set BMKG_URL (for example http://localhost:18081)}"
+: "${PVMBG_URL:?Set PVMBG_URL (for example http://localhost:18082)}"
 BMKG_KEY="$(demo_env_value "$DEMO_ROOT/bmkg-mock/.env" BMKG_API_KEY)"
 PVMBG_TOKEN="$(demo_env_value "$DEMO_ROOT/pvmbg-mock/.env" PVMBG_TOKEN)"
 DEMO_RESPONSE_FILE="$(mktemp)"

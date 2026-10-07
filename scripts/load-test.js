@@ -5,11 +5,22 @@ import http from 'k6/http';
 import { sleep } from 'k6';
 import { Counter } from 'k6/metrics';
 
-const BASE = __ENV.BASE_URL || 'http://host.docker.internal:8080';
-const MODE = __ENV.MODE || 'sustained';
-const VUS = parseInt(__ENV.VUS || '60');
-const DURATION = __ENV.DURATION || '70s';
-const REFRESH_AFTER_MS = 45000; // access token TTL defaults to 60s
+function required(name) {
+  const value = __ENV[name];
+  if (!value || !value.trim()) throw new Error(`${name} is required`);
+  return value;
+}
+const BASE = required('BASE_URL');
+const MODE = required('MODE');
+const vusValue = required('VUS');
+if (!/^[1-9][0-9]*$/.test(vusValue)) throw new Error('VUS must be a positive integer');
+const VUS = Number(vusValue);
+const DURATION = required('DURATION');
+required('CLIENT_ID');
+required('CLIENT_SECRET');
+if (!['sustained', 'mixed'].includes(MODE)) throw new Error('MODE must be sustained or mixed');
+// Re-login follows the actual lifetime returned by Auth, rather than assuming a TTL.
+let refreshAfterMs = 0;
 
 const rejected = new Counter('controlled_rejections_429');
 const unexpected = new Counter('unexpected_errors');
@@ -38,6 +49,9 @@ function login() {
   if (res.status === 200) {
     token = res.json('access_token');
     obtained = Date.now();
+    const expiresIn = Number(res.json('expires_in'));
+    if (!Number.isFinite(expiresIn) || expiresIn <= 0) throw new Error('Auth must return a positive expires_in');
+    refreshAfterMs = expiresIn * 1000 * 0.75;
     return true;
   }
   // A rejected login (429 under overload) is not an error; back off and retry next iteration.
@@ -48,7 +62,7 @@ function login() {
 }
 
 export default function () {
-  if (!token || Date.now() - obtained > REFRESH_AFTER_MS) {
+  if (!token || Date.now() - obtained > refreshAfterMs) {
     if (!login()) { sleep(0.5); return; }
   }
 
