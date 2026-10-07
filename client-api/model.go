@@ -70,8 +70,10 @@ func (h hazard) summary() summaryHazard {
 }
 
 type sourceStatus struct {
-	State      string `json:"state"`
-	StaleSince string `json:"stale_since,omitempty"`
+	State       string `json:"state"`
+	LastSuccess string `json:"last_success,omitempty"`
+	LastAttempt string `json:"last_attempt,omitempty"`
+	StaleSince  string `json:"stale_since,omitempty"`
 }
 
 func (status *sourceStatus) UnmarshalJSON(data []byte) error {
@@ -83,7 +85,7 @@ func (status *sourceStatus) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
-	if decoded.State != "fresh" && decoded.State != "stale" {
+	if decoded.State != "fresh" && decoded.State != "stale" && decoded.State != "unavailable" {
 		return fmt.Errorf("invalid source status: state %q", decoded.State)
 	}
 	if decoded.State == "stale" && decoded.StaleSince == "" {
@@ -94,10 +96,11 @@ func (status *sourceStatus) UnmarshalJSON(data []byte) error {
 }
 
 type aggregatorList struct {
-	Data         []hazard                `json:"data"`
-	Count        int                     `json:"count"`
-	AsOf         string                  `json:"as_of"`
-	SourceStatus map[string]sourceStatus `json:"source_status"`
+	Data         []hazard                  `json:"data"`
+	Count        int                       `json:"count"`
+	AsOf         string                    `json:"as_of"`
+	SourceStatus map[string]sourceStatus   `json:"source_status"`
+	Metadata     map[string]recordMetadata `json:"metadata,omitempty"`
 }
 
 func (list *aggregatorList) UnmarshalJSON(data []byte) error {

@@ -33,6 +33,8 @@ func (a *api) router() *gin.Engine {
 	protected := limited.Group("/", a.authenticate())
 	protected.GET("/hazards", a.listHazards)
 	protected.GET("/hazards/:id", a.getHazard)
+	protected.GET("/notices", a.listNotices)
+	protected.GET("/notices/:id", a.getNotice)
 	return r
 }
 
@@ -204,10 +206,10 @@ func (a *api) listHazards(c *gin.Context) {
 		for _, item := range list.Data {
 			summaries = append(summaries, item.summary())
 		}
-		c.JSON(http.StatusOK, gin.H{"data": summaries, "count": len(summaries), "as_of": list.AsOf, "source_status": list.SourceStatus})
+		c.JSON(http.StatusOK, gin.H{"data": summaries, "count": len(summaries), "as_of": list.AsOf, "source_status": list.SourceStatus, "metadata": list.Metadata})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": list.Data, "count": len(list.Data), "as_of": list.AsOf, "source_status": list.SourceStatus})
+	c.JSON(http.StatusOK, gin.H{"data": list.Data, "count": len(list.Data), "as_of": list.AsOf, "source_status": list.SourceStatus, "metadata": list.Metadata})
 }
 
 func (a *api) getHazard(c *gin.Context) {
@@ -220,8 +222,8 @@ func (a *api) getHazard(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid hazard ID"})
 		return
 	}
-	var item hazard
-	status, err := a.call(c, "aggregator", http.MethodGet, joinURL(a.cfg.AggregatorURL, "/internal/hazards/"+id), nil, false, &item)
+	var detail aggregatorDetail
+	status, err := a.call(c, "aggregator", http.MethodGet, joinURL(a.cfg.AggregatorURL, "/internal/hazards/"+id), nil, false, &detail)
 	if err != nil || status >= 500 || status == 0 {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "aggregator unavailable"})
 		return
@@ -234,10 +236,11 @@ func (a *api) getHazard(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "aggregator unavailable"})
 		return
 	}
-	metadata := map[string]sourceStatus{item.Source: detailStatus(item)}
+	item := detail.Data
+	metadata := detail.SourceStatus
 	if view == "summary" {
-		c.JSON(http.StatusOK, gin.H{"data": item.summary(), "source_status": metadata})
+		c.JSON(http.StatusOK, gin.H{"data": item.summary(), "source_status": metadata, "metadata": detail.Metadata, "as_of": detail.AsOf})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": item, "source_status": metadata})
+	c.JSON(http.StatusOK, gin.H{"data": item, "source_status": metadata, "metadata": detail.Metadata, "as_of": detail.AsOf})
 }

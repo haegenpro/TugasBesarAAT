@@ -1,12 +1,9 @@
 package main
 
 import (
-	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
 )
 
@@ -19,31 +16,23 @@ type config struct {
 }
 
 func loadConfig() (config, error) {
-	key := os.Getenv("AUTH_INTERNAL_KEY")
-	if key == "" {
-		return config{}, errors.New("AUTH_INTERNAL_KEY is required")
+	v, err := requiredEnv("CLIENT_API_PORT", "AUTH_BASE_URL", "AGGREGATOR_BASE_URL", "AUTH_INTERNAL_KEY", "CLIENT_API_MAX_INFLIGHT")
+	if err != nil {
+		return config{}, err
 	}
-	port := os.Getenv("CLIENT_API_PORT")
-	if port == "" {
-		port = "8080"
+	if _, err = envInt(v, "CLIENT_API_PORT", 1, 65535); err != nil {
+		return config{}, err
 	}
-	authURL := os.Getenv("AUTH_BASE_URL")
-	if authURL == "" {
-		authURL = "http://auth-service:8083"
-	}
-	aggregatorURL := os.Getenv("AGGREGATOR_BASE_URL")
-	if aggregatorURL == "" {
-		aggregatorURL = "http://aggregator:8080"
-	}
-	maxInFlight := 128
-	if raw := os.Getenv("CLIENT_API_MAX_INFLIGHT"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil {
-			return config{}, fmt.Errorf("CLIENT_API_MAX_INFLIGHT must be an integer: %w", err)
+	for _, key := range []string{"AUTH_BASE_URL", "AGGREGATOR_BASE_URL"} {
+		if err = envURL(v, key, "http", "https"); err != nil {
+			return config{}, err
 		}
-		maxInFlight = parsed
 	}
-	return config{Port: port, AuthURL: authURL, AggregatorURL: aggregatorURL, AuthInternalKey: key, MaxInFlight: maxInFlight}, nil
+	maxInFlight, err := envInt(v, "CLIENT_API_MAX_INFLIGHT", 0, 0)
+	if err != nil {
+		return config{}, err
+	}
+	return config{Port: v["CLIENT_API_PORT"], AuthURL: v["AUTH_BASE_URL"], AggregatorURL: v["AGGREGATOR_BASE_URL"], AuthInternalKey: v["AUTH_INTERNAL_KEY"], MaxInFlight: maxInFlight}, nil
 }
 
 func main() {
