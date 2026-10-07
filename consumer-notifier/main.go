@@ -29,21 +29,28 @@ var errRegistryUnavailable = errors.New("schema registry unavailable")
 
 type config struct {
 	Role, Port, DBPath, NATSURL, Stream, Subject, Durable, RegistryURL, DLQStream, DLQSubject string
+	LifecycleStream, LifecycleSubject                                                         string
 }
 
 func loadConfig() (config, error) {
-	keys := []string{"CONSUMER_ROLE", "CONSUMER_PORT", "CONSUMER_DB_PATH", "NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_DURABLE", "SCHEMA_REGISTRY_URL", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT"}
-	values := map[string]string{}
-	for _, key := range keys {
-		values[key] = os.Getenv(key)
-		if values[key] == "" {
-			return config{}, fmt.Errorf("%s is required", key)
-		}
+	values, err := requiredEnv("CONSUMER_ROLE", "CONSUMER_PORT", "CONSUMER_DB_PATH", "NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_DURABLE", "SCHEMA_REGISTRY_URL", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT", "NATS_LIFECYCLE_STREAM", "NATS_LIFECYCLE_SUBJECT")
+	if err != nil {
+		return config{}, err
+	}
+	if _, err = envInt(values, "CONSUMER_PORT", 1, 65535); err != nil {
+		return config{}, err
+	}
+	if err = envURL(values, "NATS_URL", "nats", "tls", "ws", "wss"); err != nil {
+		return config{}, err
+	}
+	if err = envURL(values, "SCHEMA_REGISTRY_URL", "http", "https"); err != nil {
+		return config{}, err
 	}
 	if values["CONSUMER_ROLE"] != "dashboard" && values["CONSUMER_ROLE"] != "notifier" {
 		return config{}, errors.New("CONSUMER_ROLE must be dashboard or notifier")
 	}
-	return config{Role: values["CONSUMER_ROLE"], Port: values["CONSUMER_PORT"], DBPath: values["CONSUMER_DB_PATH"], NATSURL: values["NATS_URL"], Stream: values["NATS_STREAM"], Subject: values["NATS_SUBJECT"], Durable: values["NATS_DURABLE"], RegistryURL: strings.TrimRight(values["SCHEMA_REGISTRY_URL"], "/"), DLQStream: values["NATS_DLQ_STREAM"], DLQSubject: values["NATS_DLQ_SUBJECT"]}, nil
+	lifecycleStream, lifecycleSubject := values["NATS_LIFECYCLE_STREAM"], values["NATS_LIFECYCLE_SUBJECT"]
+	return config{LifecycleStream: lifecycleStream, LifecycleSubject: lifecycleSubject, Role: values["CONSUMER_ROLE"], Port: values["CONSUMER_PORT"], DBPath: values["CONSUMER_DB_PATH"], NATSURL: values["NATS_URL"], Stream: values["NATS_STREAM"], Subject: values["NATS_SUBJECT"], Durable: values["NATS_DURABLE"], RegistryURL: strings.TrimRight(values["SCHEMA_REGISTRY_URL"], "/"), DLQStream: values["NATS_DLQ_STREAM"], DLQSubject: values["NATS_DLQ_SUBJECT"]}, nil
 }
 
 type schemaClient struct {
@@ -132,6 +139,7 @@ func (s *schemaClient) codec(ctx context.Context, id int) (*goavro.Codec, error)
 }
 
 type envelope struct {
+	Lifecycle     *lifecycleEvent
 	CorrelationID string
 	HazardID      string
 	Payload       hazardEvent
@@ -177,6 +185,9 @@ func (s *schemaClient) decode(ctx context.Context, data []byte) (envelope, error
 	}
 	if headerCID := correlationFromContext(ctx); headerCID != "" && headerCID != cid {
 		return envelope{}, fmt.Errorf("%w: correlation header and envelope differ", errCorruptPayload)
+	}
+	if _, ok := outer["snapshot"]; ok {
+		return decodeLifecycle(outer, cid)
 	}
 	payload, ok := outer["payload"].(map[string]any)
 	if !ok {
@@ -229,6 +240,7 @@ func (s *schemaClient) decode(ctx context.Context, data []byte) (envelope, error
 }
 
 type app struct {
+	lifecycle  *app
 	cfg        config
 	db         *sql.DB
 	schemas    *schemaClient
@@ -538,6 +550,9 @@ func (a *app) serve(ctx context.Context) error {
 	})
 	mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
 		ready := a.ready.Load() && !a.halted.Load() && time.Now().UnixNano() >= a.pauseUntil.Load()
+		if a.lifecycle != nil {
+			ready = ready && a.lifecycle.ready.Load() && !a.lifecycle.halted.Load() && time.Now().UnixNano() >= a.lifecycle.pauseUntil.Load()
+		}
 		body := map[string]any{"ready": ready, "halted": a.halted.Load()}
 		if a.halted.Load() {
 			var reason string
@@ -554,6 +569,10 @@ func (a *app) serve(ctx context.Context) error {
 		writeJSON(w, body)
 	})
 	mux.HandleFunc("GET /records", func(w http.ResponseWriter, r *http.Request) {
+		if view := r.URL.Query().Get("view"); view != "" {
+			a.lifecycleRecords(w, r, view)
+			return
+		}
 		rows, err := a.db.QueryContext(r.Context(), `SELECT hazard_id,payload,correlation_id,processed_at FROM records ORDER BY processed_at DESC LIMIT 100`)
 		if err != nil {
 			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
@@ -606,6 +625,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	a := &app{cfg: cfg, db: db, schemas: newSchemaClient(cfg.RegistryURL, db)}
+	lifecycleCfg := cfg
+	lifecycleCfg.Stream = cfg.LifecycleStream
+	lifecycleCfg.Subject = cfg.LifecycleSubject
+	lifecycleCfg.Durable = cfg.Durable + "-lifecycle"
+	lifecycleCfg.DLQSubject = cfg.DLQSubject + ".lifecycle"
+	a.lifecycle = &app{cfg: lifecycleCfg, db: db, schemas: a.schemas}
+	go a.lifecycle.run(ctx)
 	go a.run(ctx)
 	if err := a.serve(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("http server failed", "error", err)

@@ -44,6 +44,11 @@ func openDB(path string) (*sql.DB, error) {
 		`CREATE INDEX IF NOT EXISTS constraint_retry_recent ON constraint_retry(first_seen_ms)`,
 		`CREATE TABLE IF NOT EXISTS corrupt_messages (stream TEXT NOT NULL, sequence INTEGER NOT NULL, first_seen_ms INTEGER NOT NULL, PRIMARY KEY(stream, sequence))`,
 		`CREATE INDEX IF NOT EXISTS corrupt_messages_recent ON corrupt_messages(first_seen_ms)`,
+		`CREATE TABLE IF NOT EXISTS record_versions (record_id TEXT PRIMARY KEY, revision INTEGER NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS lifecycle_events (event_id TEXT PRIMARY KEY, record_id TEXT NOT NULL, revision INTEGER NOT NULL, payload TEXT NOT NULL, processed_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS notice_records (notice_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL, processed_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS source_status_records (endpoint TEXT PRIMARY KEY, revision INTEGER NOT NULL, payload TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS notifications (event_id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, processed_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS consumer_control (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 	}
 	for _, statement := range statements {
@@ -77,6 +82,9 @@ func (a *app) alreadyProcessed(ctx context.Context, meta *jetstream.MsgMetadata,
 
 // save commits the broker identity and projection as one SQLite transaction.
 func (a *app) save(ctx context.Context, meta *jetstream.MsgMetadata, raw []byte, e envelope) error {
+	if e.Lifecycle != nil {
+		return a.saveLifecycle(ctx, meta, raw, *e.Lifecycle)
+	}
 	var output any = e.Payload
 	if a.cfg.Role == "notifier" {
 		output = map[string]any{"hazard_id": e.HazardID, "source": e.Payload.Source, "severity": e.Payload.Severity, "area_name": e.Payload.AreaName, "occurred_at": e.Payload.OccurredAt}
@@ -108,6 +116,15 @@ func (a *app) save(ctx context.Context, meta *jetstream.MsgMetadata, raw []byte,
 		}
 		return tx.Commit()
 	}
+	var version int64
+	versionErr := tx.QueryRowContext(ctx, `SELECT revision FROM record_versions WHERE record_id=?`, "hazard:"+e.HazardID).Scan(&version)
+	if versionErr != nil && !errors.Is(versionErr, sql.ErrNoRows) {
+		return versionErr
+	}
+	// An initial canonical message is revision 1. A lifecycle correction may arrive first.
+	if version > 1 {
+		return tx.Commit()
+	}
 	var previous string
 	err = tx.QueryRowContext(ctx, `SELECT payload FROM records WHERE hazard_id=?`, e.HazardID).Scan(&previous)
 	if err == nil && previous != string(data) {
@@ -120,6 +137,9 @@ func (a *app) save(ctx context.Context, meta *jetstream.MsgMetadata, raw []byte,
 		if _, err := tx.ExecContext(ctx, `INSERT INTO records(hazard_id,payload,correlation_id,processed_at) VALUES (?,?,?,?)`, e.HazardID, string(data), e.CorrelationID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO record_versions(record_id,revision) VALUES(?,1) ON CONFLICT(record_id) DO NOTHING`, "hazard:"+e.HazardID); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
