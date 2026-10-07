@@ -15,7 +15,7 @@ type PVMBGStatus struct {
 }
 
 func NewPVMBGStatus() *PVMBGStatus {
-	return &PVMBGStatus{healthy: true}
+	return &PVMBGStatus{staleSince: time.Now().UTC()}
 }
 
 func (s *PVMBGStatus) MarkHealthy() {

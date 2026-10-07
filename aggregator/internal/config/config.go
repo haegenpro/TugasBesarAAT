@@ -2,8 +2,6 @@ package config
 
 import (
 	"errors"
-	"os"
-	"strconv"
 	"time"
 )
 
@@ -15,7 +13,12 @@ type Config struct {
 	PVMBGBaseURL string
 	PVMBGToken   string
 
-	PollInterval time.Duration
+	PollInterval     time.Duration
+	MaxBackoff       time.Duration
+	BMKGFreshness    time.Duration
+	PVMBGFreshness   time.Duration
+	LifecycleStream  string
+	LifecycleSubject string
 
 	DatabaseURL string
 
@@ -26,46 +29,40 @@ type Config struct {
 }
 
 func Load() (Config, error) {
-	bmkgKey := os.Getenv("BMKG_API_KEY")
-	pvmbgToken := os.Getenv("PVMBG_TOKEN")
-	databaseURL := os.Getenv("DATABASE_URL")
-	if bmkgKey == "" || pvmbgToken == "" || databaseURL == "" || os.Getenv("NATS_STREAM") == "" || os.Getenv("NATS_SUBJECT") == "" || os.Getenv("SCHEMA_REGISTRY_URL") == "" {
-		return Config{}, errors.New("BMKG_API_KEY, PVMBG_TOKEN, DATABASE_URL, NATS_STREAM, NATS_SUBJECT, and SCHEMA_REGISTRY_URL are required")
+	v, err := requiredEnv("AGGREGATOR_PORT", "BMKG_BASE_URL", "BMKG_API_KEY", "PVMBG_BASE_URL", "PVMBG_TOKEN", "POLL_INTERVAL", "SOURCE_RETRY_MAX_SEC", "BMKG_FRESHNESS_SEC", "PVMBG_FRESHNESS_SEC", "DATABASE_URL", "NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "SCHEMA_REGISTRY_URL", "NATS_LIFECYCLE_STREAM", "NATS_LIFECYCLE_SUBJECT")
+	if err != nil {
+		return Config{}, err
 	}
-	if bmkgKey == pvmbgToken {
+	if v["BMKG_API_KEY"] == v["PVMBG_TOKEN"] {
 		return Config{}, errors.New("BMKG and PVMBG credentials must be distinct")
 	}
-	return Config{
-		Port: getEnv("AGGREGATOR_PORT", "8080"),
-
-		BMKGBaseURL:  getEnv("BMKG_BASE_URL", "http://localhost:8081"),
-		BMKGAPIKey:   bmkgKey,
-		PVMBGBaseURL: getEnv("PVMBG_BASE_URL", "http://localhost:8082"),
-		PVMBGToken:   pvmbgToken,
-
-		PollInterval: time.Duration(getEnvInt("POLL_INTERVAL", 3)) * time.Second,
-
-		DatabaseURL: databaseURL,
-
-		NATSURL:           getEnv("NATS_URL", "nats://localhost:4222"),
-		NATSStream:        os.Getenv("NATS_STREAM"),
-		NATSSubject:       os.Getenv("NATS_SUBJECT"),
-		SchemaRegistryURL: os.Getenv("SCHEMA_REGISTRY_URL"),
-	}, nil
-}
-
-func getEnv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	if _, err = envInt(v, "AGGREGATOR_PORT", 1, 65535); err != nil {
+		return Config{}, err
 	}
-	return def
-}
-
-func getEnvInt(key string, def int) int {
-	if v := os.Getenv(key); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
+	for _, key := range []string{"BMKG_BASE_URL", "PVMBG_BASE_URL", "SCHEMA_REGISTRY_URL"} {
+		if err = envURL(v, key, "http", "https"); err != nil {
+			return Config{}, err
 		}
 	}
-	return def
+	if err = envURL(v, "DATABASE_URL", "postgres", "postgresql"); err != nil {
+		return Config{}, err
+	}
+	if err = envURL(v, "NATS_URL", "nats", "tls", "ws", "wss"); err != nil {
+		return Config{}, err
+	}
+	durations := map[string]time.Duration{}
+	for _, key := range []string{"POLL_INTERVAL", "SOURCE_RETRY_MAX_SEC", "BMKG_FRESHNESS_SEC", "PVMBG_FRESHNESS_SEC"} {
+		n, err := envInt(v, key, 1, int((1<<63-1)/int64(time.Second)))
+		if err != nil {
+			return Config{}, err
+		}
+		durations[key] = time.Duration(n) * time.Second
+	}
+	if durations["SOURCE_RETRY_MAX_SEC"] < durations["POLL_INTERVAL"] {
+		return Config{}, errors.New("SOURCE_RETRY_MAX_SEC must be at least POLL_INTERVAL")
+	}
+	if v["NATS_LIFECYCLE_STREAM"] == v["NATS_STREAM"] || v["NATS_LIFECYCLE_SUBJECT"] == v["NATS_SUBJECT"] {
+		return Config{}, errors.New("canonical and lifecycle streams/subjects must be distinct")
+	}
+	return Config{Port: v["AGGREGATOR_PORT"], BMKGBaseURL: v["BMKG_BASE_URL"], BMKGAPIKey: v["BMKG_API_KEY"], PVMBGBaseURL: v["PVMBG_BASE_URL"], PVMBGToken: v["PVMBG_TOKEN"], PollInterval: durations["POLL_INTERVAL"], MaxBackoff: durations["SOURCE_RETRY_MAX_SEC"], BMKGFreshness: durations["BMKG_FRESHNESS_SEC"], PVMBGFreshness: durations["PVMBG_FRESHNESS_SEC"], DatabaseURL: v["DATABASE_URL"], NATSURL: v["NATS_URL"], NATSStream: v["NATS_STREAM"], NATSSubject: v["NATS_SUBJECT"], SchemaRegistryURL: v["SCHEMA_REGISTRY_URL"], LifecycleStream: v["NATS_LIFECYCLE_STREAM"], LifecycleSubject: v["NATS_LIFECYCLE_SUBJECT"]}, nil
 }

@@ -4,7 +4,9 @@ package api
 
 import (
 	"errors"
+	"github.com/google/uuid"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,56 +17,30 @@ import (
 )
 
 type API struct {
-	Store  *store.Store
-	Status *poller.PVMBGStatus
-	Deps   *Dependencies
+	Store          *store.Store
+	Status         *poller.PVMBGStatus
+	Deps           *Dependencies
+	BMKGFreshness  time.Duration
+	PVMBGFreshness time.Duration
 }
 
-func New(s *store.Store, status *poller.PVMBGStatus, deps *Dependencies) *API {
-	return &API{Store: s, Status: status, Deps: deps}
+func New(s *store.Store, status *poller.PVMBGStatus, deps *Dependencies, bmkgFreshness, pvmbgFreshness time.Duration) *API {
+	return &API{Store: s, Status: status, Deps: deps, BMKGFreshness: bmkgFreshness, PVMBGFreshness: pvmbgFreshness}
 }
 
 type listResponse struct {
-	Data         []domain.HazardEvent    `json:"data"`
-	Count        int                     `json:"count"`
-	AsOf         timeutil.Time           `json:"as_of"`
-	SourceStatus map[string]sourceStatus `json:"source_status"`
+	Data         []domain.HazardEvent             `json:"data"`
+	Count        int                              `json:"count"`
+	AsOf         timeutil.Time                    `json:"as_of"`
+	SourceStatus map[string]sourceStatus          `json:"source_status"`
+	Metadata     map[string]domain.RecordMetadata `json:"metadata"`
 }
 
 type sourceStatus struct {
-	State      string `json:"state"`
-	StaleSince string `json:"stale_since,omitempty"`
-}
-
-func (a *API) currentSourceStatus() map[string]sourceStatus {
-	healthy, staleSince := a.Status.Snapshot()
-	if healthy {
-		return map[string]sourceStatus{"PVMBG": {State: "fresh"}}
-	}
-	return map[string]sourceStatus{"PVMBG": {State: "stale", StaleSince: timeutil.FormatISOMilli(staleSince)}}
-}
-
-// enrichStale adds attributes.stale / attributes.stale_since to volcanic
-// events at response time when PVMBG is currently known unreachable. The
-// stored row itself is never mutated for this.
-func (a *API) enrichStale(events []domain.HazardEvent) []domain.HazardEvent {
-	if a.Status.IsHealthy() {
-		return events
-	}
-	staleSince := timeutil.FormatISOMilli(a.Status.StaleSince())
-	for i, e := range events {
-		if e.HazardType != domain.HazardVolcanic {
-			continue
-		}
-		attrs := map[string]interface{}{}
-		for k, v := range e.Attributes {
-			attrs[k] = v
-		}
-		attrs["stale"] = true
-		attrs["stale_since"] = staleSince
-		events[i].Attributes = attrs
-	}
-	return events
+	State       string     `json:"state"`
+	LastSuccess *time.Time `json:"last_success,omitempty"`
+	LastAttempt *time.Time `json:"last_attempt,omitempty"`
+	StaleSince  string     `json:"stale_since,omitempty"`
 }
 
 func (a *API) ListHazards(c *gin.Context) {
@@ -89,13 +65,23 @@ func (a *API) ListHazards(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "store unavailable"})
 		return
 	}
-	events = a.enrichStale(events)
+	status, err := a.statuses(c.Request.Context())
+	if err != nil {
+		c.JSON(503, gin.H{"error": "store unavailable"})
+		return
+	}
+	metadata, err := a.recordMetadata(c.Request.Context(), events, status)
+	if err != nil {
+		c.JSON(503, gin.H{"error": "store unavailable"})
+		return
+	}
 
 	c.JSON(http.StatusOK, listResponse{
 		Data:         events,
 		Count:        len(events),
 		AsOf:         timeutil.New(domain.Now()),
-		SourceStatus: a.currentSourceStatus(),
+		SourceStatus: status,
+		Metadata:     metadata,
 	})
 }
 
@@ -105,6 +91,10 @@ func (a *API) GetHazard(c *gin.Context) {
 		return
 	}
 	id := c.Param("id")
+	if _, err := uuid.Parse(id); err != nil {
+		c.JSON(400, gin.H{"error": "invalid hazard ID"})
+		return
+	}
 	event, err := a.Store.GetByID(c.Request.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -115,8 +105,17 @@ func (a *API) GetHazard(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "store unavailable"})
 		return
 	}
-	enriched := a.enrichStale([]domain.HazardEvent{event})
-	c.JSON(http.StatusOK, enriched[0])
+	status, err := a.statuses(c.Request.Context())
+	if err != nil {
+		c.JSON(503, gin.H{"error": "store unavailable"})
+		return
+	}
+	metadata, err := a.recordMetadata(c.Request.Context(), []domain.HazardEvent{event}, status)
+	if err != nil {
+		c.JSON(503, gin.H{"error": "store unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": event, "source_status": status, "metadata": metadata[event.HazardID], "as_of": timeutil.New(domain.Now())})
 }
 
 func Health(c *gin.Context) {
@@ -125,7 +124,7 @@ func Health(c *gin.Context) {
 
 func (a *API) Ready(c *gin.Context) {
 	storeReady := a.Deps.StoreReady()
-	brokerReady := a.Deps.BrokerReady()
+	brokerReady := a.Deps.BrokerReady() && a.Deps.LifecycleReady()
 	status := "ready"
 	code := http.StatusOK
 	if !storeReady {

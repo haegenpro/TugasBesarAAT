@@ -50,21 +50,23 @@ func main() {
 	status := poller.NewPVMBGStatus()
 
 	p := &poller.Poller{
-		BMKG:     bmkgClient,
-		PVMBG:    pvmbgClient,
-		Store:    st,
-		Lookup:   lookup,
-		Status:   status,
-		Ready:    deps.StoreReady,
-		Interval: cfg.PollInterval,
-		Logger:   logger,
+		BMKG:       bmkgClient,
+		PVMBG:      pvmbgClient,
+		Store:      st,
+		Lookup:     lookup,
+		Status:     status,
+		Ready:      deps.StoreReady,
+		Interval:   cfg.PollInterval,
+		MaxBackoff: cfg.MaxBackoff,
+		Logger:     logger,
 	}
 
-	a := api.New(st, status, deps)
+	a := api.New(st, status, deps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
 	router := server.New(logger, a)
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: router}
 	go monitorStore(ctx, st, deps, p, logger)
 	go dispatchOutbox(ctx, st, cfg, deps, registry, logger)
+	go dispatchLifecycle(ctx, st, cfg, deps, registry, logger)
 
 	go func() {
 		logger.Info("starting aggregator", "service", "aggregator", "port", cfg.Port, "poll_interval_sec", cfg.PollInterval.Seconds())
@@ -177,5 +179,44 @@ func sleepContext(ctx context.Context, duration time.Duration) bool {
 		return false
 	case <-timer.C:
 		return true
+	}
+}
+
+func dispatchLifecycle(ctx context.Context, st *store.Store, cfg config.Config, deps *api.Dependencies, registry *avrowire.Client, logger *slog.Logger) {
+	for ctx.Err() == nil {
+		if !deps.StoreReady() {
+			if !sleepContext(ctx, time.Second) {
+				return
+			}
+			continue
+		}
+		callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		pub, err := publisher.New(callCtx, cfg.NATSURL, cfg.LifecycleStream, cfg.LifecycleSubject, registry, logger)
+		cancel()
+		if err != nil {
+			logger.Warn("lifecycle broker unavailable; retrying", "error", err)
+			if !sleepContext(ctx, 2*time.Second) {
+				return
+			}
+			continue
+		}
+		deps.SetLifecycleReady(true)
+		for ctx.Err() == nil && deps.StoreReady() && pub.Connected() {
+			callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			found, err := st.DeliverLifecycle(callCtx, pub.PublishLifecycle)
+			cancel()
+			if err != nil {
+				logger.Warn("lifecycle delivery failed; retained for retry", "error", err)
+				break
+			}
+			if !found && !sleepContext(ctx, time.Second) {
+				break
+			}
+		}
+		deps.SetLifecycleReady(false)
+		pub.Close()
+		if !sleepContext(ctx, 2*time.Second) {
+			return
+		}
 	}
 }

@@ -20,6 +20,8 @@ func New(logger *slog.Logger, a *api.API) *gin.Engine {
 	r.GET("/ready", a.Ready)
 	r.GET("/internal/hazards", a.ListHazards)
 	r.GET("/internal/hazards/:id", a.GetHazard)
+	r.GET("/internal/notices", a.ListNotices)
+	r.GET("/internal/notices/:id", a.GetNotice)
 
 	return r
 }
