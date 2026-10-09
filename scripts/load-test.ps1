@@ -10,7 +10,9 @@ param(
     [ValidateSet('sustained','mixed')][string]$Mode,
     [int]$Vus,
     [string]$Duration,
-    [string]$BaseUrl
+    [string]$BaseUrl,
+    [ValidateSet('milestone','overload')][string]$Purpose = 'milestone',
+    [ValidatePattern('^[A-Za-z0-9._-]+$')][string]$EvidenceName = 'load-test'
 )
 $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($Mode)) { throw '-Mode is required' }
@@ -18,6 +20,8 @@ if ($Vus -lt 1) { throw '-Vus must be a positive integer' }
 if ([string]::IsNullOrWhiteSpace($Duration)) { throw '-Duration is required' }
 if ([string]::IsNullOrWhiteSpace($BaseUrl)) { throw '-BaseUrl is required' }
 $root = Split-Path -Parent $PSScriptRoot
+$evidenceDir = Join-Path $root 'evidence'
+New-Item -ItemType Directory -Force $evidenceDir | Out-Null
 function Read-Env($p) {
     $h = @{}
     foreach ($l in Get-Content $p) {
@@ -32,11 +36,25 @@ if ([string]::IsNullOrWhiteSpace($env_['FIELD_CLIENT_ID']) -or [string]::IsNullO
 if ($Mode -eq 'mixed') {
     $pv = Read-Env (Join-Path $root 'pvmbg-mock/.env')
     if ($pv['PVMBG_MIN_DELAY_MS'] -ne '3000' -or $pv['PVMBG_MAX_DELAY_MS'] -ne '3000') {
-        Write-Warning "pvmbg-mock/.env has PVMBG delay $($pv['PVMBG_MIN_DELAY_MS'])..$($pv['PVMBG_MAX_DELAY_MS']) ms, not 3000. The mixed run only proves P2.1 with a 3 s delay (README, Demo D)."
+        throw "Mixed milestone run requires PVMBG_MIN_DELAY_MS=3000 and PVMBG_MAX_DELAY_MS=3000; verify live source timing using runbook 6.0."
     }
 }
-docker run --rm -i `
+# Windows PowerShell treats redirected native stderr as error records. Docker
+# writes normal image-pull progress there, so let its exit code decide success.
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    docker run --rm -i `
     -v "${PSScriptRoot}:/scripts:ro" `
-    -e BASE_URL=$BaseUrl -e MODE=$Mode -e VUS=$Vus -e DURATION=$Duration `
+    -v "${evidenceDir}:/evidence" `
+    --add-host=host.docker.internal:host-gateway `
+    -e BASE_URL=$BaseUrl -e MODE=$Mode -e VUS=$Vus -e DURATION=$Duration -e PURPOSE=$Purpose `
+    -e SUMMARY_PATH=/evidence/$EvidenceName.json `
     -e CLIENT_ID=$($env_['FIELD_CLIENT_ID']) -e CLIENT_SECRET=$($env_['FIELD_CLIENT_SECRET']) `
     grafana/k6 run /scripts/load-test.js
+    $dockerExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+Write-Output "k6 exit code: $dockerExitCode; JSON evidence: evidence/$EvidenceName.json"
+exit $dockerExitCode
