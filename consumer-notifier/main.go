@@ -30,11 +30,10 @@ var errRegistryUnavailable = errors.New("schema registry unavailable")
 type config struct {
 	Role, Port, DBPath, NATSURL, Stream, Subject, Durable, RegistryURL, DLQStream, DLQSubject string
 	LifecycleStream, LifecycleSubject                                                         string
-	AuthURL, AuthInternalKey                                                                  string
 }
 
 func loadConfig() (config, error) {
-	values, err := requiredEnv("CONSUMER_ROLE", "CONSUMER_PORT", "CONSUMER_DB_PATH", "NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_DURABLE", "SCHEMA_REGISTRY_URL", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT", "NATS_LIFECYCLE_STREAM", "NATS_LIFECYCLE_SUBJECT", "AUTH_BASE_URL", "AUTH_INTERNAL_KEY")
+	values, err := requiredEnv("CONSUMER_ROLE", "CONSUMER_PORT", "CONSUMER_DB_PATH", "NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_DURABLE", "SCHEMA_REGISTRY_URL", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT", "NATS_LIFECYCLE_STREAM", "NATS_LIFECYCLE_SUBJECT")
 	if err != nil {
 		return config{}, err
 	}
@@ -47,14 +46,11 @@ func loadConfig() (config, error) {
 	if err = envURL(values, "SCHEMA_REGISTRY_URL", "http", "https"); err != nil {
 		return config{}, err
 	}
-	if err = envURL(values, "AUTH_BASE_URL", "http", "https"); err != nil {
-		return config{}, err
-	}
 	if values["CONSUMER_ROLE"] != "dashboard" && values["CONSUMER_ROLE"] != "notifier" {
 		return config{}, errors.New("CONSUMER_ROLE must be dashboard or notifier")
 	}
 	lifecycleStream, lifecycleSubject := values["NATS_LIFECYCLE_STREAM"], values["NATS_LIFECYCLE_SUBJECT"]
-	return config{AuthURL: strings.TrimRight(values["AUTH_BASE_URL"], "/"), AuthInternalKey: values["AUTH_INTERNAL_KEY"], LifecycleStream: lifecycleStream, LifecycleSubject: lifecycleSubject, Role: values["CONSUMER_ROLE"], Port: values["CONSUMER_PORT"], DBPath: values["CONSUMER_DB_PATH"], NATSURL: values["NATS_URL"], Stream: values["NATS_STREAM"], Subject: values["NATS_SUBJECT"], Durable: values["NATS_DURABLE"], RegistryURL: strings.TrimRight(values["SCHEMA_REGISTRY_URL"], "/"), DLQStream: values["NATS_DLQ_STREAM"], DLQSubject: values["NATS_DLQ_SUBJECT"]}, nil
+	return config{LifecycleStream: lifecycleStream, LifecycleSubject: lifecycleSubject, Role: values["CONSUMER_ROLE"], Port: values["CONSUMER_PORT"], DBPath: values["CONSUMER_DB_PATH"], NATSURL: values["NATS_URL"], Stream: values["NATS_STREAM"], Subject: values["NATS_SUBJECT"], Durable: values["NATS_DURABLE"], RegistryURL: strings.TrimRight(values["SCHEMA_REGISTRY_URL"], "/"), DLQStream: values["NATS_DLQ_STREAM"], DLQSubject: values["NATS_DLQ_SUBJECT"]}, nil
 }
 
 type schemaClient struct {
@@ -548,7 +544,6 @@ func sleep(ctx context.Context, d time.Duration) {
 
 func (a *app) router() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /admin/resume", a.resumeHandler)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "ok", "service": "consumer-" + a.cfg.Role})
 	})
@@ -616,6 +611,13 @@ func writeJSON(w http.ResponseWriter, body any) {
 }
 
 func main() {
+	if len(os.Args) > 1 {
+		if err := runAdminCommand(context.Background(), os.Args[1:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 	cfg, err := loadConfig()
 	if err != nil {
@@ -637,6 +639,12 @@ func main() {
 	lifecycleCfg.Durable = cfg.Durable + "-lifecycle"
 	lifecycleCfg.DLQSubject = cfg.DLQSubject + ".lifecycle"
 	a.lifecycle = &app{haltController: a.haltController, cfg: lifecycleCfg, db: db, schemas: a.schemas}
+	closeAdmin, err := a.startLocalAdmin(ctx)
+	if err != nil {
+		slog.Error("local administration unavailable", "error", err)
+		os.Exit(1)
+	}
+	defer closeAdmin()
 	go a.lifecycle.run(ctx)
 	go a.run(ctx)
 	if err := a.serve(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {

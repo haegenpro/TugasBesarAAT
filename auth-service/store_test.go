@@ -110,14 +110,14 @@ func TestAccessTokenExpiresNaturally(t *testing.T) {
 	}
 }
 
-func TestRecoveryScopeOnlyForInternalIdentity(t *testing.T) {
+func TestDownstreamScopesRemainReadOnly(t *testing.T) {
 	store, err := openStore(filepath.Join(t.TempDir(), "auth.db"), time.Minute, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.db.Close()
 	for _, test := range []struct{ role, scope string }{
-		{"media", "hazards:summary"}, {"field", "hazards:raw"}, {"internal", "hazards:raw consumer:resume"},
+		{"media", "hazards:summary"}, {"field", "hazards:raw"}, {"internal", "hazards:raw"},
 	} {
 		pair, err := store.issue(context.Background(), identity{ID: test.role + "-id", Role: test.role})
 		if err != nil {

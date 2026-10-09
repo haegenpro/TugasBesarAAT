@@ -228,13 +228,13 @@ func TestInFlightLimitDisabledWhenNonPositive(t *testing.T) {
 	}
 }
 
-func TestInternalMultipleScopesPreserveRawViews(t *testing.T) {
+func TestInternalReadScopePreservesRawViews(t *testing.T) {
 	aggregator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"data":[],"count":0,"as_of":"2026-10-07T00:00:00Z","source_status":{}}`)
 	}))
 	defer aggregator.Close()
 	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"client_id":"internal-id","role":"internal","scope":"hazards:raw consumer:resume"}`)
+		io.WriteString(w, `{"client_id":"internal-id","role":"internal","scope":"hazards:raw"}`)
 	}))
 	defer auth.Close()
 	a := &api{cfg: config{AuthURL: auth.URL, AggregatorURL: aggregator.URL, AuthInternalKey: "internal-secret"}, log: slog.New(slog.NewJSONHandler(io.Discard, nil)), client: http.DefaultClient}
@@ -248,7 +248,7 @@ func TestInternalMultipleScopesPreserveRawViews(t *testing.T) {
 			t.Fatalf("%s status=%d body=%s", path, w.Code, w.Body.String())
 		}
 	}
-	if hasScope("hazards:raw-extra consumer:resume", "hazards:raw") {
+	if hasScope("hazards:raw-extra hazards:summary", "hazards:raw") {
 		t.Fatal("scope substring grants raw access")
 	}
 }
