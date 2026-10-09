@@ -30,7 +30,7 @@ func (a *api) router() *gin.Engine {
 	limited.POST("/auth/login", a.login)
 	limited.POST("/auth/refresh", a.refresh)
 	limited.POST("/auth/logout", a.logout)
-	protected := limited.Group("/", a.authenticate())
+	protected := limited.Group("/", a.authenticate(), limitInFlightPerClient(a.cfg.MaxInFlightPerClient, a.log))
 	protected.GET("/hazards", a.listHazards)
 	protected.GET("/hazards/:id", a.getHazard)
 	protected.GET("/notices", a.listNotices)

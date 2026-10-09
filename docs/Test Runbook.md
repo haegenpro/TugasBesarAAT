@@ -998,6 +998,14 @@ PVMBG line shows anything other than about 3 s, stop and fix it before running k
 
 ### 6.1 P2.1: BMKG-only stays fast while PVMBG is slow
 
+Client API uses example capacities of 128 globally and 32 per verified
+`client_id`. Both configuration variables are required; `0` disables the
+respective cap. Global rejection occurs before Auth, whereas per-client
+rejection occurs after Auth and before the Aggregator. All VUs below use
+Field and share its budget across tokens, sessions, and hazard/notice routes.
+429 is an expected controlled rejection, but its count must be reported.
+Counts are per API instance; these are concurrency limits, not request-rate limits.
+
 > Capture: run `step 6.1` first. Output is saved to `evidence/6.1.txt`.
 
 **Quick manual look**: fire PVMBG-path requests and time a BMKG-only request in parallel:
@@ -1032,9 +1040,13 @@ echo "k6 exit code: ${PIPESTATUS[0]}"
 "k6 exit code: $LASTEXITCODE"
 ```
 
-**Desired state:** in the summary, `http_req_duration{kind:seismic}` shows
+**Desired state:** in the summary, `successful_hazard_duration{kind:seismic}` shows
 **`p(95) < 300ms`**, the threshold line is marked passed (`✓`), and k6 exits `0`.
-Record: p50/p95/p99 for `kind:seismic` and `kind:volcanic`, `http_reqs` rate. **Criterion:** P2.1.
+Both `successful_hazard_requests{kind:seismic}` and `{kind:volcanic}` must
+be greater than zero. Record p50/p95/p99 of successful responses for both
+kinds, `http_reqs` rate, successful hazard throughput, and the 429 count.
+The unfiltered HTTP duration includes rejected requests and is not the
+success-latency gate. **Criterion:** P2.1.
 
 Notes from the first run (seismic p95 was 278 ms, only 22 ms under the limit):
 - **Thin margin.** Seismic and volcanic latencies are nearly equal because both read the Canonical
@@ -1063,10 +1075,14 @@ docker compose ps --format '{{.Service}} {{.Health}}' | Where-Object { $_ -notma
 ```
 
 **Desired state:** report **throughput** (`http_reqs`/s), **p50 (`med`) / p95 / p99** of
-`http_req_duration`, **error rate** (`http_req_failed` **< 1 %**), and the count
+`http_req_duration` and `successful_hazard_duration`, **error rate**
+(`http_req_failed` and `unexpected_failure_rate` **< 1 %**), and the count
 `controlled_rejections_429` (reported explicitly; 429s are not failures). Run lasts at least 60 s with
 **≥ 50** concurrent VUs. `unexpected_errors` is `0` (or negligible). No container restarted or
-became unhealthy.
+became unhealthy. Also report `successful_hazard_requests`/s separately from
+total HTTP throughput. `unexpected_failure_rate` excludes 429 from its
+denominator as well as its numerator. Do not assume zero 429s with 60 VUs:
+all sessions share the Field identity's 32-slot budget.
 
 **Criterion:** P2.2.
 
@@ -1074,9 +1090,10 @@ became unhealthy.
 
 > Capture: run `step 6.2b` first. Output is saved to `evidence/6.2b.txt`.
 
-The first run produced no 429s, so the report had no evidence that overload is rejected
-instead of queued. Lower the in-flight cap, overload it, and report the count (the spec only
-excuses 429s if they are reported).
+To capture global rejection, lower the global cap to 5 while leaving the
+per-client cap at its example value of 32, overload it, and report the count.
+The spec only excuses 429s if they are reported. Logs for this scenario use
+`reason=max_in_flight`; do not infer the rejecting layer from status alone.
 
 ```bash
 CAP_ORIG=$(envget client-api/.env CLIENT_API_MAX_INFLIGHT)
@@ -1107,6 +1124,17 @@ always shown, even at 0); `http_req_failed` stays **< 1 %** (429 is an expected 
 script) and `unexpected_errors` is `0`; `/health` answers `200` during saturation; the Client API
 logs `request rejected`; no container crashes. The original cap is restored afterwards (check
 with `envget client-api/.env CLIENT_API_MAX_INFLIGHT`). **Criterion:** P2.2 (controlled rejection reported).
+
+To demonstrate the per-client path, instead leave the global cap at 128 and
+temporarily set `CLIENT_API_MAX_INFLIGHT_PER_CLIENT=5` in `client-api/.env`.
+Recreate only Client API with `docker compose up -d --force-recreate --no-deps client-api`
+and run sustained load with 60 VUs for 70 s. Capture 429s with
+`reason=max_in_flight_per_client`, verified `client_id`, `limit=5`, and
+`correlation_id`. `/health` and `/ready` remain exempt. Restore the original
+per-client setting and recreate Client API afterward. Automated tests also
+hold client A's request while verifying that client B of the same role can
+read normally and A's other token cannot bypass the cap; all four data routes
+share the same budget.
 
 ### 6.3 P2.3: PVMBG outage, graceful degradation, recovery without restart
 

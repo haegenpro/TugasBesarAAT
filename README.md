@@ -321,6 +321,7 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | `AUTH_INTERNAL_KEY` | Same key as in `auth-service/.env` | Required |
 | `AUTH_BASE_URL`, `AGGREGATOR_BASE_URL` | Internal upstream URLs | Compose service URLs |
 | `CLIENT_API_MAX_INFLIGHT` | Max concurrent Client API requests, excess gets `429` (`0` disables) | `128` |
+| `CLIENT_API_MAX_INFLIGHT_PER_CLIENT` | Max concurrent protected reads per verified `client_id`, across all sessions (`0` disables) | `32` |
 | `BNPB_API_URL` | TUI destination URL | `http://localhost:18080` |
 | `MEDIA_CLIENT_ID`, `FIELD_CLIENT_ID`, `INTERNAL_CLIENT_ID` | Public client IDs shown by the TUI | Required |
 
@@ -379,13 +380,23 @@ on its own and retries the read, and you do not have to log in again. After
 that, the "Uji token lama" menu item confirms that the old token now gets
 `401`.
 
-About concurrency: Go serves each request on its own goroutine, and the
-Client API caps in-flight requests at `CLIENT_API_MAX_INFLIGHT`. A request
-over the cap is rejected right away with `429` and `Retry-After: 1`. It is
-not queued and it never reaches Auth, so an overload cannot pile work up on
-the upstream services. Each upstream call has a 5 second timeout. `/health`
-and `/ready` are exempt from the cap, so they keep answering under load.
-Rejections show up in the log as `request rejected`.
+About concurrency: Go serves each request on its own goroutine. Client API
+applies `CLIENT_API_MAX_INFLIGHT` before authentication and
+`CLIENT_API_MAX_INFLIGHT_PER_CLIENT` after authentication on all hazard and
+notice list/detail routes. Example capacities are 128 globally and 32 per
+client; both settings are required nonnegative integers, and `0` disables
+the respective limit. All tokens and sessions of the same verified
+`client_id` share one budget, regardless of role or client-supplied headers.
+The counts are local to each Client API instance, not requests per second.
+
+Requests over either cap immediately receive `429` and `Retry-After: 1`,
+without queueing. Global rejections never reach Auth; per-client rejections
+have already reached Auth but never reach the Aggregator. Login, refresh,
+and logout use the global cap only. `/health` and `/ready` are exempt from
+both caps. Each upstream call has a 5 second timeout. Logs use
+`request rejected` with `reason=max_in_flight` for the global cap or
+`reason=max_in_flight_per_client`, the verified `client_id`, and `limit` for
+the client cap; both include `correlation_id`.
 
 About logging and isolation: the Client API and the Auth Service write JSON
 logs that carry `correlation_id`. The Client API forwards `X-Correlation-ID`
@@ -1102,12 +1113,18 @@ In `mixed` mode both wrappers warn when `pvmbg-mock/.env` does not hold a 3000 m
 delay. Set that delay by editing the file, as in Demo D, not through the shell.
 
 `sustained` reports throughput, p50/p95/p99, error rate, and the number of
-`429` responses (`controlled_rejections_429`). With the example cap of 128
-and 60 VUs you should see none. To see controlled rejections, raise `-Vus`
-(for example to 300) or lower `CLIENT_API_MAX_INFLIGHT`.
+`429` responses (`controlled_rejections_429`). All VUs use the same Field
+identity and share its example budget of 32, even though each logs in
+separately. Rejections can occur with the example limits and must be
+reported. To demonstrate rejection, raise `-Vus` or lower either cap.
+`unexpected_failure_rate` excludes 429 responses from both its numerator
+and denominator. `successful_hazard_requests` reports served-data
+throughput, while `successful_hazard_duration` reports only successful
+hazard reads; a run with no successful hazard reads fails.
 
 `mixed` splits the VUs between `hazard_type=SEISMIC` and `VOLCANIC`, and
-fails unless the SEISMIC p95 is under 300 ms. Run it with PVMBG's delay at 3
+fails unless the successful SEISMIC p95 is under 300 ms and both kinds have
+successful reads. Fast 429 responses cannot hide slow data responses. Run it with PVMBG's delay at 3
 seconds, as set up in Demo D. Volcanic reads come from the Canonical Store,
 so this shows the request path does not depend on the slow PVMBG poller.
 

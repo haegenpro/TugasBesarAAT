@@ -8,15 +8,16 @@ import (
 )
 
 type config struct {
-	Port            string
-	AuthURL         string
-	AggregatorURL   string
-	AuthInternalKey string
-	MaxInFlight     int
+	Port                 string
+	AuthURL              string
+	AggregatorURL        string
+	AuthInternalKey      string
+	MaxInFlight          int
+	MaxInFlightPerClient int
 }
 
 func loadConfig() (config, error) {
-	v, err := requiredEnv("CLIENT_API_PORT", "AUTH_BASE_URL", "AGGREGATOR_BASE_URL", "AUTH_INTERNAL_KEY", "CLIENT_API_MAX_INFLIGHT")
+	v, err := requiredEnv("CLIENT_API_PORT", "AUTH_BASE_URL", "AGGREGATOR_BASE_URL", "AUTH_INTERNAL_KEY", "CLIENT_API_MAX_INFLIGHT", "CLIENT_API_MAX_INFLIGHT_PER_CLIENT")
 	if err != nil {
 		return config{}, err
 	}
@@ -32,7 +33,11 @@ func loadConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
-	return config{Port: v["CLIENT_API_PORT"], AuthURL: v["AUTH_BASE_URL"], AggregatorURL: v["AGGREGATOR_BASE_URL"], AuthInternalKey: v["AUTH_INTERNAL_KEY"], MaxInFlight: maxInFlight}, nil
+	perClient, err := envInt(v, "CLIENT_API_MAX_INFLIGHT_PER_CLIENT", 0, 0)
+	if err != nil {
+		return config{}, err
+	}
+	return config{Port: v["CLIENT_API_PORT"], AuthURL: v["AUTH_BASE_URL"], AggregatorURL: v["AGGREGATOR_BASE_URL"], AuthInternalKey: v["AUTH_INTERNAL_KEY"], MaxInFlight: maxInFlight, MaxInFlightPerClient: perClient}, nil
 }
 
 func main() {
