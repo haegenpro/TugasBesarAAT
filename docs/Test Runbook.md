@@ -1206,6 +1206,8 @@ Milestone mode rejects fewer than 50 VUs or shorter than 60 s. The independent
 
 To capture global rejection, lower the global cap to 5 while leaving the
 per-client cap at its example value of 32, overload it, and report the count.
+Keep `-Purpose overload` in the PowerShell command (`PURPOSE=overload` in Bash):
+the 30 s rejection test is separate from the milestone's minimum 60 s load test.
 The spec only excuses 429s if they are reported. Logs for this scenario use
 `reason=max_in_flight`; do not infer the rejecting layer from status alone.
 
@@ -1297,9 +1299,24 @@ docker compose logs aggregator --since 1m 2>&1 | grep '"level":"warn"' | grep -i
 docker compose logs aggregator --since 1m 2>&1 | grep -c '"level":"error"'      # => 0 (handled degradation is warn, not error)
 # recover
 curl -s -X POST -H "Authorization: Bearer $PVMBG_ADMIN" -H 'Content-Type: application/json' -d '{"enabled":false}' $PVMBG/admin/outage   # {"outage":false}
-sleep 12
-hz "$T" '/hazards?hazard_type=VOLCANIC' | jget source_status.PVMBG.state          # fresh
-started > evidence/6.3-started-after.txt; diff evidence/6.3-started-before.txt evidence/6.3-started-after.txt && echo "NO RESTART"
+# Wait for a successful poll; retries can back off to 60 s in the example config.
+RECOVERY_DEADLINE=$((SECONDS + 90))
+PVMBG_STATE=unknown
+while [ "$SECONDS" -lt "$RECOVERY_DEADLINE" ]; do
+  T=$(login "$MEDIA_ID" "$MEDIA_SECRET" | jget access_token)
+  PVMBG_STATE=$(hz "$T" '/hazards?hazard_type=VOLCANIC' | jget source_status.PVMBG.state)
+  echo "PVMBG recovery: $PVMBG_STATE"
+  [ "$PVMBG_STATE" = fresh ] && break
+  sleep 3
+done
+echo "after: $PVMBG_STATE"
+if [ "$PVMBG_STATE" = fresh ]; then
+  echo "seismic after: $(code -H "Authorization: Bearer $T" "$API/hazards?hazard_type=SEISMIC")"
+  started > evidence/6.3-started-after.txt; diff evidence/6.3-started-before.txt evidence/6.3-started-after.txt && echo "NO RESTART"
+else
+  echo "FAIL: PVMBG did not recover to fresh within 90 s ($PVMBG_STATE)." >&2
+  false
+fi
 ```
 ```powershell
 Started | Set-Content evidence/6.3-started-before.txt -Encoding utf8
@@ -1320,8 +1337,19 @@ $sw.Restart(); $seis = Invoke-WebRequest -UseBasicParsing -Uri "$API/hazards?haz
 docker compose logs aggregator --since 1m 2>&1 | Select-String '"level":"warn"' | Select-String -SimpleMatch -Pattern 'pvmbg' | Select-Object -First 3
 (docker compose logs aggregator --since 1m 2>&1 | Select-String '"level":"error"').Count                              # => 0
 Invoke-RestMethod -Method Post -Uri "$PvmbgUrl/admin/outage" -Headers $AdminH -ContentType 'application/json' -Body '{"enabled":false}' | ConvertTo-Json -Compress   # {"outage":false}
-Start-Sleep 12
-"after: $((Hz $mt '/hazards?hazard_type=VOLCANIC').source_status.PVMBG.state)"     # fresh
+# Wait for a successful poll; retries can back off to 60 s in the example config.
+$RecoveryDeadline = (Get-Date).AddSeconds(90)
+$PvmbgState = 'unknown'
+do {
+  $mt = (Login $Creds.MEDIA.id $Creds.MEDIA.secret).access_token
+  $PvmbgState = (Hz $mt '/hazards?hazard_type=VOLCANIC').source_status.PVMBG.state
+  "PVMBG recovery: $PvmbgState"
+  if ($PvmbgState -eq 'fresh') { break }
+  Start-Sleep 3
+} while ((Get-Date) -lt $RecoveryDeadline)
+"after: $PvmbgState"
+if ($PvmbgState -ne 'fresh') { throw "PVMBG did not recover to fresh within 90 s ($PvmbgState)." }
+$mh = @{Authorization="Bearer $mt"}
 "seismic after: $(Code "$API/hazards?hazard_type=SEISMIC" 'GET' $mh)"            # 200
 Started | Set-Content evidence/6.3-started-after.txt -Encoding utf8
 if (-not (Compare-Object (Get-Content evidence/6.3-started-before.txt) (Get-Content evidence/6.3-started-after.txt))) { 'NO RESTART' }
@@ -1334,6 +1362,12 @@ if (-not (Compare-Object (Get-Content evidence/6.3-started-before.txt) (Get-Cont
 | Before outage | `200`, normal | `200`, `source_status.PVMBG.state = fresh` |
 | During outage | `200`, normal latency | **`200`** (not 500, not a hang) with last-known rows, `source_status.PVMBG.state = stale` and a `stale_since` timestamp; answered in well under the client timeout |
 | After outage off | `200` | back to `state = fresh` and newly ingested records within configured maximum retry delay plus response/processing time |
+
+Recovery checks run every 3 s for up to 90 s with the example configuration,
+allowing for the 60 s retry cap and the 3 s PVMBG response delay. Each check
+obtains a new Media token so the 60 s access-token lifetime does not interrupt
+the wait. If PVMBG remains stale/unavailable, the recovery step fails explicitly.
+Capture `after: fresh`; `NO RESTART` alone does not establish source recovery.
 
 Also: PVMBG direct data endpoint `503` while `/health` stays `200`; Aggregator logs `warn` (never `error`/500)
 for the PVMBG failures; **no container restarted**. If volcanic rows were absent (cold start), an explicit
