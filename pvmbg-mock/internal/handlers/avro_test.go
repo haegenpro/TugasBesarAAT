@@ -69,6 +69,10 @@ func TestAvroSchemaEvolutionWithRegistry(t *testing.T) {
 	require.Equal(t, 0.75, after[0]["confidence_level"])
 	require.NotContains(t, after[1], "confidence_level")
 	require.Len(t, after, len(before)+1)
-	require.Equal(t, "rep-schema-00001", after[len(after)-1]["report_id"])
+	newReportID := after[len(after)-1]["report_id"]
+	require.Equal(t, h.Reports[len(h.Reports)-1].ReportID, newReportID)
+	for _, report := range before {
+		require.NotEqual(t, report["report_id"], newReportID)
+	}
 	require.Equal(t, 0.88, after[len(after)-1]["confidence_level"])
 }
