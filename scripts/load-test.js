@@ -21,10 +21,11 @@ if (!durationMatch) throw new Error('DURATION must be integer seconds, minutes, 
 const durationSeconds = Number(durationMatch[1]) * ({ s: 1, m: 60, h: 3600 }[durationMatch[2]]);
 if (durationSeconds <= 0) throw new Error('DURATION must be positive');
 const PURPOSE = __ENV.PURPOSE || 'milestone';
-if (!['milestone', 'overload'].includes(PURPOSE)) throw new Error('PURPOSE must be milestone or overload');
+if (!['milestone', 'isolation', 'overload'].includes(PURPOSE)) throw new Error('PURPOSE must be milestone, isolation, or overload');
 if (PURPOSE === 'milestone' && (VUS < 50 || durationSeconds < 60)) {
-  throw new Error('Milestone evidence requires at least 50 VUs and 60 seconds; use PURPOSE=overload for the separate rejection test');
+  throw new Error('Milestone load evidence requires at least 50 VUs and 60 seconds; use PURPOSE=isolation for the separate mixed P2.1 probe');
 }
+if (PURPOSE === 'isolation' && (MODE !== 'mixed' || VUS < 2)) throw new Error('Isolation requires mixed mode and at least two VUs');
 required('CLIENT_ID');
 required('CLIENT_SECRET');
 if (!['sustained', 'mixed'].includes(MODE)) throw new Error('MODE must be sustained or mixed');

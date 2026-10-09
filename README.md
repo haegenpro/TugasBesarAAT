@@ -595,8 +595,8 @@ warnings.
 
 | Method | Path | Auth | Notes |
 | --- | --- | --- | --- |
-| GET | `/seismic-events?since=<ISO8601>` | `X-BMKG-Key` | `since` is optional. Without it, or with an invalid value, you get the full current dataset |
-| GET | `/tsunami-warnings?since=<ISO8601>` | `X-BMKG-Key` | Same `since` behavior |
+| GET | `/seismic-events?since=<ISO8601>` | `X-BMKG-Key` | Filters source `updated_at`. Optional; missing/invalid returns the full current dataset |
+| GET | `/tsunami-warnings?since=<ISO8601>` | `X-BMKG-Key` | Same `updated_at` filtering; independent of estimated arrival |
 | GET | `/health` | none | `{"status":"ok","service":"bmkg-mock"}` |
 
 ### Sample requests
@@ -651,7 +651,7 @@ has two admin toggles that the demos rely on.
 
 | Method | Path | Auth | Notes |
 | --- | --- | --- | --- |
-| GET | `/volcanic-reports?since=<ISO8601>` | Bearer `PVMBG_TOKEN` | `confidence_level` appears only while the schema toggle is on |
+| GET | `/volcanic-reports?since=<ISO8601>` | Bearer `PVMBG_TOKEN` | Filters `updated_at`; `confidence_level` appears only while the schema toggle is on |
 | POST | `/admin/schema-version` | Bearer `PVMBG_ADMIN_TOKEN` | Toggles `confidence_level` visibility in memory, no restart |
 | POST | `/admin/outage` | Bearer `PVMBG_ADMIN_TOKEN` | Toggles outage mode in memory, no restart |
 | GET | `/health` | none | Always `200`, even during an outage, because the outage is simulated and the process itself is fine |
@@ -705,14 +705,57 @@ that the Client API calls.
 
 ### Polling
 
-Each source has its own goroutine with its own `time.Ticker`, firing every
-`POLL_INTERVAL` seconds (example 3, and the spec suggests 2 to 5). The two
-pollers share no lock, so a slow or failing PVMBG call never delays the BMKG
-poller, and the other way around.
+The seismic, tsunami-warning and volcanic endpoints have independent goroutines.
+Each waits `POLL_INTERVAL` seconds after its attempt (example 3, and the spec
+suggests 2 to 5); failures use bounded retry backoff. Network requests run outside
+database transactions, so a slow PVMBG response does not hold up BMKG polling.
 
-Each cycle fetches the full current dataset from the mock. We do not track a
-last-poll timestamp, because at this data volume it is simpler and safer to
-let the Store's unique constraint handle duplicates.
+Live polling reads each endpoint's persisted `source_poll_state.last_success`.
+When it is missing or zero, the request omits `since` and fetches the full
+available dataset. Otherwise it sends `since=last_success-1s`; the overlap
+includes equal timestamps despite the mocks' strict `>` filter. Existing
+deduplication handles repeated records in this small window.
+
+`last_success` stores the **start time of the last successfully committed poll**,
+not its completion time. This avoids skipping records created while a previous
+response was being received or stored. The value is replaced only after response
+validation and the data transaction succeed, including successful empty
+responses. Failed HTTP requests, invalid responses and failed data commits retain
+the previous value. If the later status write fails, data may be fetched again
+and deduplicated; the boundary cannot advance ahead of uncommitted data. Restarting
+the Aggregator resumes from PostgreSQL without an additional database or cursor
+column. A failed state read retries instead of being treated as an empty cursor.
+
+The three source endpoints interpret `since` as **records created or updated
+strictly after the supplied timestamp**, using source-managed `updated_at` in
+JSON and Avro. Event times (`occurred_at`, `estimated_arrival`, `reported_at`)
+retain their domain meanings. Each mock initializes seed records when exposing
+them at startup; meaningful inserts/updates advance `updated_at`, while identical
+input leaves it unchanged. This includes old events received late and corrections
+to an existing source ID. Future tsunami arrival times no longer make unchanged
+warnings appear in every delta.
+
+PVMBG schema toggles advance `updated_at` for reports whose confidence field
+visibility changes and publish durable history revisions before exposing the
+new view. This also covers reports evicted from the live window. Failed archive
+writes preserve the old view and timestamps. The Avro field is nullable with a
+null default so older source schemas and archive records remain readable.
+
+There is no periodic full reconciliation. Independent history replay remains
+active to recover records missing from the bounded live window. Availability
+follows successful source checks (including empty deltas), with the existing
+freshness TTL and retry rules. `last_seen_at` records when a particular record
+was actually returned; it is not refreshed artificially and does not make an
+unchanged record unavailable by itself. Event age is still exposed separately
+as `historical`.
+
+An empty incremental tsunami-warning response never proves that older warnings
+are absent. Definitive absence requires a full snapshot with a caught-up warning
+archive, or the independent history assessment. Previously stored warnings remain
+available for correlation.
+
+The Client API/Aggregator `/hazards?since=...` filter remains based on canonical
+`occurred_at`; it is a client event-time filter, not the source ingestion cursor.
 
 ### Mapping
 
@@ -794,6 +837,37 @@ What we support and what we do not:
   of serving an incomplete hazard. The TUI likewise reports an invalid
   response if a required field disappears from its list.
 - **Unknown schema IDs and unregistered versions** are rejected.
+
+Client API decodes hazard lists into presence-aware typed wire records and
+validates the decoded values, avoiding a second raw-message map parse for
+each record. Required fields still reject missing/null values and incorrect
+types; zero coordinates and empty lists remain valid.
+Ambiguous duplicate JSON keys are rejected, including inside nested records,
+so repeated arrays cannot reuse previously decoded fields to bypass validation.
+Added source attributes, role-based projection, stale markers, and legacy detail
+responses retain their existing behavior. Its outbound logs record total `latency_ms` through body
+decoding, plus `headers_latency_ms` and `decode_latency_ms` separately. The
+decode duration includes response-body reads as well as JSON processing.
+
+Source writer schemas may declare field rules using `x-validation`:
+
+```json
+{"name":"confidence_level","type":["null","double"],"default":null,
+ "x-validation":{"minimum":0,"maximum":1}}
+```
+
+The Aggregator compiles and caches those rules with each writer schema ID.
+Avro checks structure and types; the custom validator checks inclusive numeric
+bounds and typed scalar `allowedValues` lists. Rules also work on nested scalar
+schemas, including array items and map values. See
+[Schema validation](docs/Schema%20Validation.md) for supported types and failure policy.
+Both live polling and `/history` replay request Avro when the registry is configured;
+a JSON response is rejected rather than silently bypassing validation. JSON source
+reads remain available to operators. Archive storage remains JSON in source-owned
+SQLite; history responses embed the live payload schema in an Avro page envelope.
+A PVMBG toggle pre-registers both live and history versions before publishing the
+visibility change. Null optional record fields remain omitted from canonical
+attributes; null map entries remain present. Integer values retain their precision.
 
 If the registry goes down, a process keeps working with the schema IDs and
 codecs it has already cached. With a cold cache, Avro source reads and the
@@ -1228,6 +1302,19 @@ reported. To demonstrate rejection, raise `-Vus` or lower either cap.
 and denominator. `successful_hazard_requests` reports served-data
 throughput, while `successful_hazard_duration` reports only successful
 hazard reads; a run with no successful hazard reads fails.
+
+P2.1, P2.2 and P2.3 are separate tests. Only P2.2 specifies at least
+50 connections and 60 seconds. For a separate P2.1 isolation measurement on a
+running Compose project whose PVMBG delay is already 3000 ms, use:
+
+```bash
+python3 scripts/p2-profile.py mixed --purpose isolation --project YOUR_PROJECT --vus 2 --duration 60s --output evidence/p2-isolation
+```
+
+This uses one requester per hazard type. The 60 seconds is a sampling choice,
+not a P2.1 minimum in the assignment. The default 50-VU mixed run additionally
+checks isolation under load. P2.2 has no 300 ms threshold; it checks throughput,
+latency percentiles, errors and process stability. P2.3 exercises outage and recovery.
 
 `mixed` splits the VUs between `hazard_type=SEISMIC` and `VOLCANIC`, and
 fails unless the successful SEISMIC p95 is under 300 ms and both kinds have

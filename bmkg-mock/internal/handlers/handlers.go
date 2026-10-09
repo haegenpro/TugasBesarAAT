@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"reflect"
 	"slices"
 	"strconv"
 	"sync"
@@ -20,9 +21,7 @@ import (
 	"bmkg-mock/internal/timeutil"
 )
 
-// maxLive bounds the generated events kept in memory. The Aggregator
-// re-fetches the whole dataset on every poll, so it must not grow forever;
-// evicted events have already been ingested. Seed events are never evicted.
+// maxLive bounds the live window. Durable history retains evicted records.
 const maxLive = 100
 
 type Handler struct {
@@ -33,32 +32,95 @@ type Handler struct {
 	DelayMs  int
 	Registry *avrowire.Client
 
-	mu      sync.RWMutex // guards Events, Warnings, liveIDs
-	liveIDs []string
+	mu        sync.RWMutex // guards Events, Warnings, liveIDs
+	liveIDs   []string
+	updatedAt time.Time
 }
 
 func New(events []domain.SeismicEvent, warnings []domain.TsunamiWarning, delayMs int) *Handler {
-	return &Handler{Logger: middleware.NewLogger(), Events: events, Warnings: warnings, DelayMs: delayMs}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	events = slices.Clone(events)
+	warnings = slices.Clone(warnings)
+	for i := range events {
+		events[i].UpdatedAt = timeutil.New(now)
+	}
+	for i := range warnings {
+		warnings[i].UpdatedAt = timeutil.New(now)
+		warnings[i].AffectedZones = slices.Clone(warnings[i].AffectedZones)
+	}
+	return &Handler{Logger: middleware.NewLogger(), Events: events, Warnings: warnings, DelayMs: delayMs, updatedAt: now}
 }
 
-// AddEvent appends a generated event and its optional tsunami warning,
-// evicting the oldest generated event once maxLive is exceeded.
+// AddEvent inserts or updates an event and its optional warning. Changed
+// records receive a source-owned updated_at only after durable publication.
+// New generated events evict the oldest generated one past maxLive.
 func (h *Handler) AddEvent(ev domain.SeismicEvent, warning *domain.TsunamiWarning) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	ei := slices.IndexFunc(h.Events, func(e domain.SeismicEvent) bool { return e.EventID == ev.EventID })
+	changed := ei < 0
+	if ei >= 0 {
+		ev.UpdatedAt = h.Events[ei].UpdatedAt
+		changed = !reflect.DeepEqual(ev, h.Events[ei])
+	}
+	wi := -1
+	var w domain.TsunamiWarning
+	warningChanged := false
+	if warning != nil {
+		w = *warning
+		w.AffectedZones = slices.Clone(w.AffectedZones)
+		wi = slices.IndexFunc(h.Warnings, func(old domain.TsunamiWarning) bool { return old.WarningID == w.WarningID })
+		warningChanged = wi < 0
+		if wi >= 0 {
+			w.UpdatedAt = h.Warnings[wi].UpdatedAt
+			warningChanged = !reflect.DeepEqual(w, h.Warnings[wi])
+		}
+	}
+	if !changed && !warningChanged {
+		return
+	}
+	// Timestamp precision matches JSON/Avro milliseconds. Ensure successive
+	// mutations remain visible even within the same millisecond.
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if !now.After(h.updatedAt) {
+		now = h.updatedAt.Add(time.Millisecond)
+	}
+	if changed {
+		ev.UpdatedAt = timeutil.New(now)
+	}
+	if warningChanged {
+		w.UpdatedAt = timeutil.New(now)
+	}
 	if h.Archive != nil {
-		records := []history.Record{{Entity: "seismic-events", ID: ev.EventID, Payload: ev}}
-		if warning != nil {
-			records = append(records, history.Record{Entity: "tsunami-warnings", ID: warning.WarningID, Payload: *warning})
+		records := []history.Record{}
+		if changed {
+			records = append(records, history.Record{Entity: "seismic-events", ID: ev.EventID, Payload: ev})
+		}
+		if warningChanged {
+			records = append(records, history.Record{Entity: "tsunami-warnings", ID: w.WarningID, Payload: w})
 		}
 		if err := h.Archive.Append(records...); err != nil {
 			h.Logger.Error("archive write failed; observation not exposed", "service", "bmkg-mock", "error", err)
 			return
 		}
 	}
-	h.Events = append(h.Events, ev)
-	if warning != nil {
-		h.Warnings = append(h.Warnings, *warning)
+	h.updatedAt = now
+	if changed {
+		if ei >= 0 {
+			h.Events[ei] = ev
+		} else {
+			h.Events = append(h.Events, ev)
+		}
+	}
+	if warningChanged {
+		if wi >= 0 {
+			h.Warnings[wi] = w
+		} else {
+			h.Warnings = append(h.Warnings, w)
+		}
+	}
+	if ei >= 0 {
+		return
 	}
 	h.liveIDs = append(h.liveIDs, ev.EventID)
 	if len(h.liveIDs) <= maxLive {
@@ -124,7 +186,7 @@ func (h *Handler) SeismicEvents(c *gin.Context) {
 	}
 	out := make([]domain.SeismicEvent, 0, len(h.Events))
 	for _, e := range h.Events {
-		if since.IsZero() || e.OccurredAt.Time.After(since) {
+		if since.IsZero() || e.UpdatedAt.Time.After(since) {
 			out = append(out, e)
 		}
 	}
@@ -160,7 +222,7 @@ func (h *Handler) TsunamiWarnings(c *gin.Context) {
 	}
 	out := make([]domain.TsunamiWarning, 0, len(h.Warnings))
 	for _, w := range h.Warnings {
-		if since.IsZero() || w.EstimatedArrival.Time.After(since) {
+		if since.IsZero() || w.UpdatedAt.Time.After(since) {
 			out = append(out, w)
 		}
 	}

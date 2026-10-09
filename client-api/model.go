@@ -40,18 +40,15 @@ func requireJSONFields(data []byte, fields ...string) error {
 }
 
 func (h *hazard) UnmarshalJSON(data []byte) error {
-	if err := requireJSONFields(data, "hazard_id", "source", "source_ref_id", "hazard_type", "severity", "area_name", "latitude", "longitude", "occurred_at", "ingested_at", "attributes"); err != nil {
-		return fmt.Errorf("invalid aggregator hazard: %w", err)
-	}
-	type plain hazard
-	var decoded plain
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	var decoded hazardWire
+	if err := unmarshalWire(data, &decoded); err != nil {
 		return err
 	}
-	if decoded.HazardID == "" || decoded.Source == "" || decoded.SourceRefID == "" || decoded.HazardType == "" || decoded.Severity == "" || decoded.OccurredAt == "" || decoded.IngestedAt == "" {
-		return fmt.Errorf("invalid aggregator hazard: required string is empty")
+	value, err := decoded.validate()
+	if err != nil {
+		return err
 	}
-	*h = hazard(decoded)
+	*h = value
 	return nil
 }
 
@@ -77,21 +74,15 @@ type sourceStatus struct {
 }
 
 func (status *sourceStatus) UnmarshalJSON(data []byte) error {
-	if err := requireJSONFields(data, "state"); err != nil {
-		return fmt.Errorf("invalid source status: %w", err)
-	}
-	type plain sourceStatus
-	var decoded plain
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	var decoded sourceStatusWire
+	if err := unmarshalWire(data, &decoded); err != nil {
 		return err
 	}
-	if decoded.State != "fresh" && decoded.State != "stale" && decoded.State != "unavailable" {
-		return fmt.Errorf("invalid source status: state %q", decoded.State)
+	value, err := decoded.validate()
+	if err != nil {
+		return err
 	}
-	if decoded.State == "stale" && decoded.StaleSince == "" {
-		return fmt.Errorf("invalid source status: stale_since is missing")
-	}
-	*status = sourceStatus(decoded)
+	*status = value
 	return nil
 }
 
@@ -104,18 +95,15 @@ type aggregatorList struct {
 }
 
 func (list *aggregatorList) UnmarshalJSON(data []byte) error {
-	if err := requireJSONFields(data, "data", "count", "as_of", "source_status"); err != nil {
-		return fmt.Errorf("invalid aggregator list: %w", err)
-	}
-	type plain aggregatorList
-	var decoded plain
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	var decoded aggregatorListWire
+	if err := unmarshalWire(data, &decoded); err != nil {
 		return err
 	}
-	if decoded.AsOf == "" {
-		return fmt.Errorf("invalid aggregator list: as_of is empty")
+	value, err := decoded.validate()
+	if err != nil {
+		return err
 	}
-	*list = aggregatorList(decoded)
+	*list = value
 	return nil
 }
 

@@ -24,9 +24,10 @@ import (
 const MediaType = "application/avro"
 
 type Schema struct {
-	ID    int
-	Text  string
-	Codec *goavro.Codec
+	ID        int
+	Text      string
+	Codec     *goavro.Codec
+	JSONCodec *goavro.Codec
 }
 
 type Client struct {
@@ -128,6 +129,10 @@ func (c *Client) Register(ctx context.Context, subject, schemaText string) (*Sch
 	if err != nil {
 		return nil, err
 	}
+	jsonCodec, err := goavro.NewCodecForStandardJSON(schemaText)
+	if err != nil {
+		return nil, err
+	}
 	part := url.PathEscape(subject)
 	if err := c.request(ctx, http.MethodPut, "/config/"+part, map[string]string{"compatibility": "FULL_TRANSITIVE"}, nil); err != nil {
 		return nil, err
@@ -141,7 +146,7 @@ func (c *Client) Register(ctx context.Context, subject, schemaText string) (*Sch
 	if result.ID <= 0 {
 		return nil, errors.New("schema registry returned invalid ID")
 	}
-	schema := &Schema{ID: result.ID, Text: schemaText, Codec: codec}
+	schema := &Schema{ID: result.ID, Text: schemaText, Codec: codec, JSONCodec: jsonCodec}
 	c.mu.Lock()
 	c.bySubject[key] = schema
 	c.byID[result.ID] = schema
@@ -166,7 +171,11 @@ func (c *Client) Lookup(ctx context.Context, id int) (*Schema, error) {
 	if err != nil {
 		return nil, err
 	}
-	schema := &Schema{ID: id, Text: result.Schema, Codec: codec}
+	jsonCodec, err := goavro.NewCodecForStandardJSON(result.Schema)
+	if err != nil {
+		return nil, err
+	}
+	schema := &Schema{ID: id, Text: result.Schema, Codec: codec, JSONCodec: jsonCodec}
 	c.mu.Lock()
 	c.byID[id] = schema
 	c.mu.Unlock()

@@ -49,7 +49,13 @@ func (s *Store) PollStatuses(ctx context.Context, endpoints []string) (map[strin
 	return out, rows.Err()
 }
 
-func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success bool, interval, maxBackoff time.Duration) error {
+// RecordAttempt replaces the endpoint state. started is the request start time;
+// last_success advances only after the caller has committed its response data.
+// Omitting started preserves the completion-time behavior for other callers.
+func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success bool, interval, maxBackoff time.Duration, started ...time.Time) error {
+	if len(started) > 1 {
+		return errors.New("at most one poll attempt start is allowed")
+	}
 	ctx = middleware.WithCorrelationID(ctx, cid)
 	tx, err := s.sourceTx(ctx, "poll:"+endpoint)
 	if err != nil {
@@ -64,11 +70,24 @@ func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success
 	}
 	previous := p.State
 	now := domain.Now()
-	p.LastAttempt = &now
+	attemptedAt := now
+	if len(started) > 0 {
+		attemptedAt = started[0].UTC()
+		if attemptedAt.IsZero() || attemptedAt.After(now) {
+			return errors.New("poll attempt start must be nonzero and not in the future")
+		}
+	}
+	// Concurrent one-shot diagnostics must not let an older request overwrite
+	// a newer attempt's health or move its successful polling boundary backward.
+	// A future stored timestamp is allowed to recover after a clock correction.
+	if p.LastAttempt != nil && !p.LastAttempt.After(now) && attemptedAt.Before(*p.LastAttempt) {
+		return tx.Commit(ctx)
+	}
+	p.LastAttempt = &attemptedAt
 	delay := interval
 	if success {
 		p.State = "fresh"
-		p.LastSuccess = &now
+		p.LastSuccess = &attemptedAt
 		p.StaleSince = nil
 		p.Failures = 0
 	} else {

@@ -27,6 +27,7 @@ type Schema struct {
 	ID    int
 	Text  string
 	Codec *goavro.Codec
+	plan  *schemaPlan
 }
 
 type Client struct {
@@ -128,6 +129,10 @@ func (c *Client) Register(ctx context.Context, subject, schemaText string) (*Sch
 	if err != nil {
 		return nil, err
 	}
+	plan, err := compilePlan(schemaText)
+	if err != nil {
+		return nil, err
+	}
 	part := url.PathEscape(subject)
 	if err := c.request(ctx, http.MethodPut, "/config/"+part, map[string]string{"compatibility": "FULL_TRANSITIVE"}, nil); err != nil {
 		return nil, err
@@ -141,7 +146,7 @@ func (c *Client) Register(ctx context.Context, subject, schemaText string) (*Sch
 	if result.ID <= 0 {
 		return nil, errors.New("schema registry returned invalid ID")
 	}
-	schema := &Schema{ID: result.ID, Text: schemaText, Codec: codec}
+	schema := &Schema{ID: result.ID, Text: schemaText, Codec: codec, plan: plan}
 	c.mu.Lock()
 	c.bySubject[key] = schema
 	c.byID[result.ID] = schema
@@ -166,7 +171,11 @@ func (c *Client) Lookup(ctx context.Context, id int) (*Schema, error) {
 	if err != nil {
 		return nil, err
 	}
-	schema := &Schema{ID: id, Text: result.Schema, Codec: codec}
+	plan, err := compilePlan(result.Schema)
+	if err != nil {
+		return nil, err
+	}
+	schema := &Schema{ID: id, Text: result.Schema, Codec: codec, plan: plan}
 	c.mu.Lock()
 	c.byID[id] = schema
 	c.mu.Unlock()
@@ -199,50 +208,11 @@ func (c *Client) Decode(ctx context.Context, framed []byte) (any, error) {
 	if len(rest) != 0 {
 		return nil, errors.New("trailing Avro bytes")
 	}
-	return native, nil
-}
-
-// JSONValue converts generic Avro values to JSON-compatible values. A nullable
-// union's null branch is omitted by callers, matching the source JSON contract.
-func JSONValue(value any) any {
-	switch v := value.(type) {
-	case int32:
-		return float64(v)
-	case int64:
-		return float64(v)
-	case float32:
-		return float64(v)
-	case []any:
-		out := make([]any, len(v))
-		for i, item := range v {
-			out[i] = JSONValue(item)
-		}
-		return out
-	case map[string]any:
-		if len(v) == 1 {
-			for key, item := range v {
-				if key == "null" {
-					return nil
-				}
-				if key == "double" || key == "float" || key == "string" || key == "int" || key == "long" || key == "boolean" {
-					return JSONValue(item)
-				}
-			}
-		}
-		out := make(map[string]any, len(v))
-		for key, item := range v {
-			if normalized := JSONValue(item); normalized != nil {
-				out[key] = normalized
-			}
-		}
-		return out
-	default:
-		return value
-	}
+	return schema.plan.walk(native, "$", 0, nil)
 }
 
 func Records(value any) ([]map[string]any, error) {
-	items, ok := JSONValue(value).([]any)
+	items, ok := value.([]any)
 	if !ok {
 		return nil, errors.New("Avro response is not an array")
 	}

@@ -73,7 +73,7 @@ func TestSeismicEvents_ValidAuth_SeededRecords(t *testing.T) {
 
 func TestSeismicEvents_SinceFilter(t *testing.T) {
 	r := newTestServer()
-	req := httptest.NewRequest(http.MethodGet, "/seismic-events?since=2026-09-01T00:00:00.000Z", nil)
+	req := httptest.NewRequest(http.MethodGet, "/seismic-events?since="+time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), nil)
 	req.Header.Set("X-BMKG-Key", testKey)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -146,11 +146,12 @@ func TestGeneratedEvents_VisibleAndBounded(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	now := time.Now().UTC()
 
+	cursor := getSeismic(t, r, "")[0]["updated_at"].(string)
 	first, warning := seed.NextEvent(1700000000, 1, now, rng)
 	h.AddEvent(first, warning)
 	assert.Len(t, getSeismic(t, r, ""), 21)
 
-	recent := getSeismic(t, r, "?since="+now.Add(-time.Minute).Format(time.RFC3339))
+	recent := getSeismic(t, r, "?since="+cursor)
 	require.Len(t, recent, 1)
 	assert.Equal(t, first.EventID, recent[0]["event_id"])
 

@@ -19,6 +19,7 @@ type SeismicEvent struct {
 	EpicenterLon     float64       `json:"epicenter_lon"`
 	RegionName       string        `json:"region_name"`
 	OccurredAt       timeutil.Time `json:"occurred_at"`
+	UpdatedAt        timeutil.Time `json:"updated_at"`
 	PotentialTsunami bool          `json:"potential_tsunami"`
 }
 
@@ -28,4 +29,5 @@ type TsunamiWarning struct {
 	ThreatLevel      ThreatLevel   `json:"threat_level"`
 	AffectedZones    []string      `json:"affected_zones"`
 	EstimatedArrival timeutil.Time `json:"estimated_arrival"`
+	UpdatedAt        timeutil.Time `json:"updated_at"`
 }

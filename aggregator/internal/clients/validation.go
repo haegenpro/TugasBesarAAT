@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -28,9 +29,28 @@ func requiredString(record map[string]any, field string) (string, error) {
 }
 
 func requiredNumber(record map[string]any, field string) (float64, error) {
-	value, ok := record[field].(float64)
-	if !ok {
+	var value float64
+	switch v := record[field].(type) {
+	case float64:
+		value = v
+	case float32:
+		value = float64(v)
+	case int32:
+		value = float64(v)
+	case int64:
+		value = float64(v)
+	case json.Number:
+		var err error
+		value, err = v.Float64()
+		if err != nil {
+			return 0, fmt.Errorf("%w: invalid number %q", ErrContractViolation, field)
+		}
+	default:
+
 		return 0, fmt.Errorf("%w: missing or invalid required field %q", ErrContractViolation, field)
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, fmt.Errorf("%w: nonfinite field %q", ErrContractViolation, field)
 	}
 	return value, nil
 }
