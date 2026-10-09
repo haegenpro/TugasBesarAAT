@@ -231,6 +231,7 @@ services:
     networks: [backend]
 
   nats-exporter:
+    profiles: [monitoring]
     build:
       context: ./monitoring
       target: nats-exporter
@@ -245,6 +246,7 @@ services:
     networks: [backend, monitoring]
 
   grafana:
+    profiles: [monitoring]
     build:
       context: ./monitoring
       target: grafana
@@ -275,6 +277,7 @@ services:
     networks: [monitoring]
 
   prometheus:
+    profiles: [monitoring]
     build:
       context: ./monitoring
       target: prometheus
@@ -295,6 +298,7 @@ services:
     networks: [monitoring]
 
   loki:
+    profiles: [monitoring]
     build:
       context: ./monitoring
       target: loki
@@ -313,6 +317,7 @@ services:
     networks: [monitoring]
 
   alloy:
+    profiles: [monitoring]
     build:
       context: ./monitoring
       target: alloy

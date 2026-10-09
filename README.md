@@ -46,7 +46,9 @@ Here is how the broker is set up:
 
 ## Continuous monitoring
 
-Grafana, Prometheus, Loki, Alloy, and a NATS exporter start with the application stack. Alloy embeds
+Grafana, Prometheus, Loki, Alloy, and a NATS exporter are optional services in the
+`monitoring` Compose profile. Enable them with
+`docker compose --profile monitoring up -d --build`. Alloy embeds
 Blackbox probing for existing health/readiness endpoints and collects this Compose
 project's Docker logs. Grafana provides endpoint history, logged outbound latency,
 correlation-ID search, DLQ archive size, consumer delivery metrics, and alerts.
@@ -106,6 +108,23 @@ points out. Then, from the repository root, run:
 ```powershell
 docker compose up -d --build
 ```
+
+This starts the eleven application containers. To include the five monitoring
+containers, run:
+
+```powershell
+docker compose --profile monitoring up -d --build
+```
+
+To stop monitoring while keeping the application running:
+
+```powershell
+docker compose --profile monitoring stop grafana prometheus loki alloy nats-exporter
+```
+
+Starting without the profile does not stop monitoring containers that are already
+running. Use `docker compose --profile monitoring down` to stop and remove both
+the application and monitoring containers while retaining their volumes.
 
 A few things are worth knowing about startup:
 
@@ -299,7 +318,8 @@ configuration stays in `monitoring/loki/.env`. See
 [Port configuration](docs/Port%20Configuration.md) for the full ownership table,
 database URL interpolation, migration, and native execution.
 
-To apply an env change, run `docker compose up -d --force-recreate` and
+To apply an env change, run `docker compose up -d --force-recreate` (include
+`--profile monitoring` before `up` when updating monitoring too) and
 restart the TUI if you have one open. You only need to rebuild images when
 the code changes.
 

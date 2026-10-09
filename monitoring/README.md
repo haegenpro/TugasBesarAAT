@@ -1,5 +1,8 @@
 # Monitoring
 
+All five use the optional `monitoring` Compose profile. A plain
+`docker compose up -d --build` starts only the application services.
+
 Five containers provide continuous endpoint history, broker metrics, and searchable logs:
 
 | Service | Pinned upstream image | Responsibility |
@@ -59,9 +62,19 @@ application databases or their private networks.
 From the repository root, with all environment files configured:
 
 ```bash
-docker compose up -d --build
+docker compose --profile monitoring up -d --build
 docker compose ps
 ```
+
+To stop only monitoring and retain its data:
+
+```bash
+docker compose --profile monitoring stop grafana prometheus loki alloy nats-exporter
+```
+
+Running `up` without the profile does not stop existing monitoring containers.
+To stop and remove the application and monitoring together, retaining volumes,
+use `docker compose --profile monitoring down`.
 
 Open the address and port you explicitly configured. Sign in with the configured
 Grafana credentials, then open **Monitoring → AAT Health, DLQ and Correlation Logs**.

@@ -12,7 +12,7 @@ const names = ['BMKG_PORT', 'PVMBG_PORT', 'AGGREGATOR_PORT', 'AUTH_PORT', 'CLIEN
 const ports = Object.fromEntries(names.map((key, i) => [key, String(24000 + i)]));
 function config(overrides = {}) {
   return spawnSync('docker', ['compose', '--profile', 'demo', '--profile', 'consumer-demo',
-    '--profile', 'tools', 'config', '--format', 'json'], {
+    '--profile', 'tools', '--profile', 'monitoring', 'config', '--format', 'json'], {
     cwd: root, env: { ...process.env, ...ports, ...overrides }, encoding: 'utf8', maxBuffer: 4 << 20,
   });
 }

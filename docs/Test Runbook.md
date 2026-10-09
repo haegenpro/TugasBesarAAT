@@ -234,7 +234,7 @@ as readable text in any editor, and the header line `### step 1.1` is the first 
 
 ---
 
-## Monitoring-assisted workflow (Windows and Unix)
+## Optional monitoring-assisted workflow (Windows and Unix)
 
 Use the commands below to trigger scenarios and assert exact results. Use Grafana
 for repeated observation instead of repeatedly running Docker log filters or NATS
@@ -242,7 +242,20 @@ reports. Saved command outputs remain the acceptance evidence; dashboard capture
 add context. All Bash commands support Linux, macOS, and Git Bash; PowerShell
 commands support Windows PowerShell 5.1 and PowerShell 7.
 
-After Phase 1.1, open Grafana using your root `.env` settings:
+After Phase 1.1, enable the five monitoring services if you want dashboard
+observation during testing. This command works in Bash and PowerShell:
+
+```bash
+docker compose --profile monitoring up -d --build
+```
+
+Without this profile, use the API, SQL, Docker logs, and k6 assertions directly.
+Record whether monitoring is enabled when comparing load-test results.
+To stop only monitoring, run
+`docker compose --profile monitoring stop grafana prometheus loki alloy nats-exporter`.
+Omitting the profile from a later `up` does not stop containers already running.
+
+Once monitoring is running, open Grafana using your root `.env` settings:
 
 ```bash
 GRAFANA_ADDR=$(envget .env GRAFANA_BIND_ADDRESS)
@@ -324,22 +337,23 @@ prove successful recovery.
 > canonical store, auth sessions, consumer SQLite, registry). Skip it to keep data.
 
 ```bash
-docker compose --profile consumer-demo down -v --remove-orphans
+docker compose --profile monitoring --profile consumer-demo down -v --remove-orphans
 docker compose up -d --build 2>&1 | tee evidence/1.1-up.txt
 until ! docker compose ps --format '{{.Health}}' | grep -qv '^healthy$'; do sleep 3; done
 docker compose ps --format 'table {{.Service}}\t{{.Status}}' | tee evidence/1.1-ps.txt
 ```
 ```powershell
-docker compose --profile consumer-demo down -v --remove-orphans
+docker compose --profile monitoring --profile consumer-demo down -v --remove-orphans
 docker compose up -d --build 2>&1 | ForEach-Object { "$_" } | Tee8 1.1-up.txt
 do { Start-Sleep 3; $bad = docker compose ps --format '{{.Health}}' | Where-Object { $_ -ne 'healthy' } } while ($bad)
 docker compose ps --format 'table {{.Service}}\t{{.Status}}' | Tee8 1.1-ps.txt
 ```
 
-**Desired state:** exactly 16 default-profile containers, all `healthy`: `broker, postgres,
+**Desired state:** exactly 11 default-profile containers, all `healthy`: `broker, postgres,
 registry-db, schema-registry, bmkg-mock, pvmbg-mock, aggregator, auth-service,
-client-api, consumer-dashboard, consumer-notifier, grafana, prometheus, loki, alloy,
-nats-exporter`. Optional profile containers are not included in this count. The one command is
+client-api, consumer-dashboard, consumer-notifier`. Enabling the optional
+`monitoring` profile adds `grafana, prometheus, loki, alloy, nats-exporter`, for
+16 containers. Other optional profile containers are not included in these counts. The one command is
 `docker compose up -d --build`. **Criterion:** Ketentuan 3.
 
 ### 1.2 Health endpoints
@@ -1412,8 +1426,8 @@ docker compose --profile consumer-demo stop consumer-dashboard-demo
 Stop the system (keeps data) or wipe everything:
 
 ```bash
-docker compose down        # keep volumes
-docker compose down -v     # also delete all volumes (fresh start next time)
+docker compose --profile monitoring --profile consumer-demo down        # keep volumes
+docker compose --profile monitoring --profile consumer-demo down -v     # also delete all volumes (fresh start next time)
 ```
 
 ---
@@ -1492,7 +1506,7 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 
 | Step | File(s) | Must show |
 | --- | --- | --- |
-| 1.1 | `1.1.txt` | 16 default-profile containers `healthy` |
+| 1.1 | `1.1.txt` | 11 default-profile containers `healthy`; 16 with optional monitoring |
 | 1.3 | `1.3.txt`, `1.3-volcanic-before.json` | counts at least 20/20/40 and higher on the second reading 25 s later; no `confidence_level` before the toggle; **seismic sample row too** |
 | 1.4 | `1.4.txt` | one `correlation_id` in client-api, auth-service **and** aggregator, with `latency_ms` |
 | 2.x | `2.1-started-before.txt`, `2.3-new-report.json`, `2.4-started-after.txt`, `2.2.txt`, `2.3.txt`, `2.4.txt` | toggle returns `v2`; new row has the field in `attributes`; `NO RESTART`; 0 contract violations |
