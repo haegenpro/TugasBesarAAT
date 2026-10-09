@@ -28,6 +28,14 @@ Evidence: **every numbered step is captured to `evidence/<step>.txt` as UTF-8** 
 `.gitignore` (log excerpts; never print login JSON, it contains tokens). Appendix C lists
 every file a complete run must produce.
 
+Screenshot-ready checks also use `node scripts/evidence-probes.mjs` (Node.js 18+).
+Each command prints its measured values and `PASS`/`FAIL`, saves a UTF-8 text
+summary plus JSON snapshots in `evidence/`, and exits nonzero on failure.
+These commands run only when explicitly invoked; `--help` is offline.
+Use `--project <name>` if the system uses a named Compose project, and use the
+same project for all other Compose commands. URLs come from the root `.env`.
+Keep failed runs as evidence; desired values and examples are not measured results.
+
 ---
 
 ## Phase 0: Setup
@@ -381,6 +389,29 @@ Counts                                                                          
 
 **Criterion:** P1.1.
 
+For source-to-canonical proof, run this after the baseline is ingested (same
+command in Bash and PowerShell):
+
+```text
+node scripts/evidence-probes.mjs mapping --name 1.3-mapping
+```
+
+The screenshot must show matched seismic/volcanic counts and a PASS for
+source fields, severity, timestamps and volcano references. The JSON includes
+each original source record, related warning/reference, and matching canonical
+row. Exact magnitude boundaries need the existing mapping tests as well:
+
+```bash
+(cd aggregator && go test -v ./internal/mapping) 2>&1 | tee evidence/1.3-boundaries.txt
+```
+```powershell
+Push-Location aggregator
+go test -v ./internal/mapping 2>&1 | ForEach-Object { "$_" } | Tee-Object ../evidence/1.3-boundaries.txt
+Pop-Location
+```
+
+Capture `ExactlyFive`, `ExactlySixFive`, and warning-precedence test results.
+
 ### 1.4 Correlation ID flows across services (Ketentuan 7)
 
 > Capture: run `step 1.4` first. Output is saved to `evidence/1.4.txt`.
@@ -401,6 +432,14 @@ docker compose logs client-api auth-service aggregator 2>&1 | Select-String $cid
 **Desired state:** JSON log lines containing the **same** `correlation_id` from
 at least `client-api` and `auth-service` (the login call), and `client-api` +
 `aggregator` (the read), including outbound-call latency fields. **Criterion:** Ketentuan 7.
+
+Also run `node scripts/evidence-probes.mjs health --name 1.2-all-services` and
+`node scripts/evidence-probes.mjs trace --name 1.4-ingest-delivery` after fresh
+events reach both consumers. Capture all container health commands/states and
+shared correlation IDs for each source, Aggregator, and both consumers, with
+outbound target and `latency_ms`. Postgres uses a database readiness probe;
+the TUI is a CLI client rather than an HTTP service. Keep the client-request
+trace above too: polling and client reads are separate request flows.
 
 ---
 
@@ -437,8 +476,8 @@ $v[0].PSObject.Properties.Name -contains 'confidence_level'                     
 ```
 
 **Desired state:** POST answers `{"schema_version":"v2","confidence_level_visible":true}`;
-PVMBG now emits `confidence_level`; the response also contains a new report
-(`rep-schema-00001`). **Criterion:** P1.2.
+PVMBG now emits `confidence_level`; its next data response contains a new report
+with ID `rep-schema-<timestamp>-<activation>`. **Criterion:** P1.2.
 
 ### 2.3 Aggregator still produces valid HazardEvents, with the new field policy
 
@@ -446,25 +485,47 @@ PVMBG now emits `confidence_level`; the response also contains a new report
 
 ```bash
 sleep 8
-agg '/internal/hazards?hazard_type=VOLCANIC' | jfind data source_ref_id rep-schema-00001 | tee evidence/2.3-new-report.json
+# Discover the generated ID; it is deliberately different on every activation.
+NEW_REPORT=$(curl -s -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const r=JSON.parse(s).filter(x=>x.report_id.startsWith("rep-schema-")).sort((a,b)=>b.reported_at.localeCompare(a.reported_at));if(!r.length)process.exit(1);console.log(r[0].report_id)})')
+echo "new report: $NEW_REPORT"
+agg '/internal/hazards?hazard_type=VOLCANIC' | jfind data source_ref_id "$NEW_REPORT" | tee evidence/2.3-new-report.json
+test "$(cat evidence/2.3-new-report.json | jlen .)" -gt 0 || { echo 'FAIL: schema report not ingested; retry after polling'; false; }
 agg '/internal/hazards?hazard_type=VOLCANIC' | jget count
 ```
 ```powershell
 Start-Sleep 8
+$source = Invoke-RestMethod -Uri "$PvmbgUrl/volcanic-reports" -Headers @{Authorization="Bearer $PvmbgToken"}
+$newReport = $source | Where-Object { $_.report_id -like 'rep-schema-*' } | Sort-Object reported_at -Descending | Select-Object -First 1
+if (-not $newReport) { throw 'No new schema report was returned' }
+"new report: $($newReport.report_id)"
 $va = Agg '/internal/hazards?hazard_type=VOLCANIC'
-$va.data | Where-Object source_ref_id -eq 'rep-schema-00001' | ConvertTo-Json -Depth 6 | Tee8 2.3-new-report.json
+$mapped = $va.data | Where-Object source_ref_id -eq $newReport.report_id
+if (-not $mapped) { throw 'Schema report not yet ingested; retry after the configured polling interval' }
+$mapped | ConvertTo-Json -Depth 6 | Tee8 2.3-new-report.json
 $va.count
 ```
 
 **Desired state:**
-- `rep-schema-00001` exists as a new canonical row with `attributes.confidence_level = 0.88`.
+- The discovered schema report exists as a new canonical row with `attributes.confidence_level = 0.88`.
 - Its top-level keys are the **same canonical set** as in 1.3 (no new top-level column, so the field went to `attributes`).
-- Count is higher than the pre-toggle count. Do not expect exactly one more: the toggle adds `rep-schema-00001`, and the mock keeps generating a report every 10 s.
+- Count is higher than the pre-toggle count. Do not expect exactly one more: the toggle adds a schema report, and the mock keeps generating a report every 10 s.
 - Reports generated after the toggle (`rep-<boot>-<n>`) also carry `attributes.confidence_level`.
 - Earlier rows are unchanged in identity (same `hazard_id`s as `evidence/1.3-volcanic-before.json`); their `attributes` may now include `confidence_level` where the source report has one.
 
 **Declared policy (state it in the report):** unknown/new source fields are
 **passed through to `attributes`**. **Criterion:** P1.3, P1.4.
+
+For an asserted sequence, use the following **instead of** manual steps 2.1–2.4,
+while PVMBG is still on v1. Do not toggle manually and then run this command:
+
+```text
+node scripts/evidence-probes.mjs schema --name 2-schema
+```
+
+It saves `schema-before.json`, `schema-after.json`, and `2.3-new-report.json`;
+discovers the actual new report ID; verifies the canonical fields and new
+attribute; compares container IDs/start times/restart counts; and compares
+database column catalogs across the toggle. Capture its PASS/FAIL summary.
 
 ### 2.4 No crash, no restart, no manual code change
 
@@ -674,6 +735,15 @@ foreach ($v in $secrets) {
 acceptable and are excluded). If you used the example placeholder values as your real
 secrets, matches in README are expected, but none may appear in code, compose, or Dockerfiles.
 **Criterion:** P3.4.
+
+For the broader scan, run `node scripts/evidence-probes.mjs secrets --name 3.5-secrets`.
+This examines all tracked working files and reachable historical blobs for
+current configured credentials, internal/signing keys, database passwords,
+private-key markers, and potential literal secret assignments. Findings print
+paths/object IDs with values redacted. It also rejects tracked real env files.
+Review findings and any former secret values separately: exact-value and
+heuristic scans are evidence within their stated scope, not a guarantee that
+every possible former secret is absent. Do not save unredacted scanner output.
 
 ---
 
@@ -932,9 +1002,19 @@ git log --oneline -- store/init.sql
 - No migration files; `init.sql` untouched by the schema change.
 - Both old and new rows are still readable through the API: `agg '/internal/hazards?hazard_type=VOLCANIC' | jget count` returns every row.
 
-If every pre-existing volcanic row now shows the field (they were re-polled
-and updated, per the README), compare with the pre-toggle snapshot
-`evidence/1.3-volcanic-before.json` to show the "before" rows had none.
+If every pre-existing volcanic row now shows the field, a saved snapshot alone
+does not prove coexistence. Read an old hazard by its pre-toggle `hazard_id`
+and the newly generated schema hazard from the current API/store. After the
+asserted schema sequence above, run:
+
+```text
+node scripts/evidence-probes.mjs storage --name 5.3-storage
+```
+
+Capture both IDs, their current attributes, the JSONB check, and unchanged
+column-catalog check. The JSON includes the original old snapshot alongside
+both current API rows. Old records may acquire additive fields; their identity
+and readability must still be preserved.
 **Criterion:** P4.2.
 
 ### 5.4 Only the Aggregator can reach the Canonical Store (P4.3)
@@ -1028,6 +1108,14 @@ is the decoupling the design relies on.)
 
 **Authoritative measurement (k6, p95 gate)**, 50 VUs for 65 s, half SEISMIC, half VOLCANIC:
 
+The Bash wrapper also saves JSON; use this instead of the direct Docker variant
+below when collecting the full evidence set:
+
+```bash
+BASE_URL=http://host.docker.internal:18080 EVIDENCE_NAME=6.1-k6-mixed bash scripts/load-test.sh mixed 50 65s 2>&1 | tee evidence/6.1-k6-mixed.txt
+K6_EXIT=${PIPESTATUS[0]}; echo "k6 exit code: $K6_EXIT"
+```
+
 ```bash
 # Git Bash: prefix with MSYS_NO_PATHCONV=1 so -v paths aren't mangled. Linux: add --add-host=host.docker.internal:host-gateway
 docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
@@ -1036,7 +1124,7 @@ docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal
 echo "k6 exit code: ${PIPESTATUS[0]}"
 ```
 ```powershell
-.\scripts\load-test.ps1 -Mode mixed -Vus 50 -Duration 65s -BaseUrl http://host.docker.internal:18080 2>&1 | ForEach-Object { "$_" } | Tee8 6.1-k6-mixed.txt
+.\scripts\load-test.ps1 -Mode mixed -Vus 50 -Duration 65s -BaseUrl http://host.docker.internal:18080 -EvidenceName 6.1-k6-mixed 2>&1 | ForEach-Object { "$_" } | Tee8 6.1-k6-mixed.txt
 "k6 exit code: $LASTEXITCODE"
 ```
 
@@ -1045,23 +1133,41 @@ echo "k6 exit code: ${PIPESTATUS[0]}"
 Both `successful_hazard_requests{kind:seismic}` and `{kind:volcanic}` must
 be greater than zero. Record p50/p95/p99 of successful responses for both
 kinds, `http_reqs` rate, successful hazard throughput, and the 429 count.
-The unfiltered HTTP duration includes rejected requests and is not the
-success-latency gate. **Criterion:** P2.1.
+The summary also gates seismic-attempt p95, including 429s, and separately
+requires successful responses from both paths. All-HTTP latency includes
+login; use the labeled seismic and volcanic rows in the screenshot. Threshold
+lines print ASCII `PASS`/`FAIL`. **Criterion:** P2.1.
 
-Notes from the first run (seismic p95 was 278 ms, only 22 ms under the limit):
-- **Thin margin.** Seismic and volcanic latencies are nearly equal because both read the Canonical
-  Store; what you measure is the Client API pipeline under load (auth introspection + aggregator),
-  not PVMBG isolation. Run it **twice** and keep both summaries (`6.1.txt`, then
-  `6.1-rerun.txt` via `step 6.1-rerun`). If p95 exceeds ~290 ms on the demo machine, lower `VUS`
-  (50 is the spec minimum) rather than demo at the edge.
-- **Negative `min` duration** (e.g. `min=-653984225ns`) in the k6 summary is a clock artifact of
-  Docker on Windows/WSL2 (VM clock drift), not an application fault; p95/p99 are unaffected. If it
-  shows up, mention it in the report. It is gone after `wsl --shutdown` and a Docker restart.
-- The summary now prints a `kind:volcanic` line as well as `kind:seismic` (see `scripts/load-test.js`).
+Screenshot the final `MILESTONE 1 LOAD TEST` block: workload, counts/rates,
+latency table in milliseconds, error rates, threshold results and `OVERALL`.
+The wrapper saves `evidence/6.1-k6-mixed.json`. Failed thresholds stay visible;
+a historical passing number cannot replace the result of the current run.
+Negative durations invalidate the timing evidence until investigated and rerun.
+
+For mixed and sustained runs, start this in **Terminal B** just before k6 in
+Terminal A (use `--name 6.1-runtime` for mixed):
+
+```text
+node scripts/evidence-probes.mjs runtime --seconds 80 --name 6.2-runtime
+```
+
+Keep both screenshots and matching timestamps. Runtime output shows TCP
+connections, health status/latency and container stability every ~2 s; JSON
+preserves IDs, start times and restart counts before/after. TCP counts include
+idle keep-alive sockets and probes. Report the observed min/max overlapping
+the k6 window; neither VUs nor TCP counts prove simultaneous in-flight requests.
+The workload is `constant-vus` for at least 60 s, with 50 ms think time.
 
 ### 6.2 P2.2: sustained load, 60 VUs for 70 s
 
 > Capture: run `step 6.2` first. Output is saved to `evidence/6.2.txt`.
+
+Bash wrapper alternative (saves JSON and prints the same summary):
+
+```bash
+BASE_URL=http://host.docker.internal:18080 EVIDENCE_NAME=6.2-k6-sustained bash scripts/load-test.sh sustained 60 70s 2>&1 | tee evidence/6.2-k6-sustained.txt
+K6_EXIT=${PIPESTATUS[0]}; echo "k6 exit code: $K6_EXIT"
+```
 
 ```bash
 docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
@@ -1070,7 +1176,7 @@ docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal
 docker compose ps --format '{{.Service}} {{.Status}}' | grep -v healthy || echo "NO CRASH"
 ```
 ```powershell
-.\scripts\load-test.ps1 -Mode sustained -Vus 60 -Duration 70s -BaseUrl http://host.docker.internal:18080 2>&1 | ForEach-Object { "$_" } | Tee8 6.2-k6-sustained.txt
+.\scripts\load-test.ps1 -Mode sustained -Vus 60 -Duration 70s -BaseUrl http://host.docker.internal:18080 -EvidenceName 6.2-k6-sustained 2>&1 | ForEach-Object { "$_" } | Tee8 6.2-k6-sustained.txt
 docker compose ps --format '{{.Service}} {{.Health}}' | Where-Object { $_ -notmatch 'healthy' }     # => (nothing)
 ```
 
@@ -1085,6 +1191,14 @@ denominator as well as its numerator. Do not assume zero 429s with 60 VUs:
 all sessions share the Field identity's 32-slot budget.
 
 **Criterion:** P2.2.
+
+The screenshot prints separate `hazard_failure_rate` (non-429 hazard requests)
+and `login_failure_rate` (non-429 logins), both gated below 1%. Successful
+hazard throughput excludes login, errors and 429s. The wrapper saves
+`evidence/6.2-k6-sustained.json`. Pair this with `6.2-runtime.txt/json`; final
+health alone cannot establish that a service never crashed during the run.
+Milestone mode rejects fewer than 50 VUs or shorter than 60 s. The independent
+30 s overload demonstration uses `Purpose=overload` explicitly.
 
 ### 6.2b P2.2: show the controlled-rejection (429) path
 
@@ -1101,7 +1215,8 @@ sed -i.bak 's/^CLIENT_API_MAX_INFLIGHT=.*/CLIENT_API_MAX_INFLIGHT=5/' client-api
 docker compose up -d --force-recreate --no-deps client-api; sleep 8
 docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
   -e BASE_URL=http://host.docker.internal:18080 -e MODE=sustained -e VUS=300 -e DURATION=30s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
-  grafana/k6 run /scripts/load-test.js 2>&1 | tail -40
+  -e PURPOSE=overload grafana/k6 run /scripts/load-test.js 2>&1 | tee evidence/6.2b-k6.txt
+K6_EXIT=${PIPESTATUS[0]}; echo "k6 exit code: $K6_EXIT"
 echo "health under saturation: $(code $API/health)"                               # 200
 docker compose logs client-api --since 2m 2>&1 | grep -c 'request rejected'       # > 0
 # restore
@@ -1112,7 +1227,8 @@ docker compose up -d --force-recreate --no-deps client-api
 $CapOrig = Get-EnvVal client-api/.env CLIENT_API_MAX_INFLIGHT
 (Get-Content client-api/.env) -replace '^CLIENT_API_MAX_INFLIGHT=.*','CLIENT_API_MAX_INFLIGHT=5' | Set-Content client-api/.env
 docker compose up -d --force-recreate --no-deps client-api; Start-Sleep 8
-.\scripts\load-test.ps1 -Mode sustained -Vus 300 -Duration 30s -BaseUrl http://host.docker.internal:18080 2>&1 | ForEach-Object { "$_" } | Select-Object -Last 40
+.\scripts\load-test.ps1 -Mode sustained -Vus 300 -Duration 30s -BaseUrl http://host.docker.internal:18080 -Purpose overload -EvidenceName 6.2b-k6 2>&1 | ForEach-Object { "$_" } | Tee8 6.2b-k6.txt
+"k6 exit code: $LASTEXITCODE"
 "health under saturation: $(Code "$API/health")"                                  # 200
 (docker compose logs client-api --since 2m 2>&1 | Select-String 'request rejected').Count     # > 0
 (Get-Content client-api/.env) -replace '^CLIENT_API_MAX_INFLIGHT=.*',"CLIENT_API_MAX_INFLIGHT=$CapOrig" | Set-Content client-api/.env
@@ -1124,6 +1240,11 @@ always shown, even at 0); `http_req_failed` stays **< 1 %** (429 is an expected 
 script) and `unexpected_errors` is `0`; `/health` answers `200` during saturation; the Client API
 logs `request rejected`; no container crashes. The original cap is restored afterwards (check
 with `envget client-api/.env CLIENT_API_MAX_INFLIGHT`). **Criterion:** P2.2 (controlled rejection reported).
+
+Run the runtime sampler concurrently for this scenario too (`--seconds 40
+--name 6.2b-runtime`), so `/health` is observed **during** saturation. A post-run
+health command only proves health after load stopped. Overload mode requires
+a nonzero 429 count; its 30 s run is not P2.2 sustained-load evidence.
 
 To demonstrate the per-client path, instead leave the global cap at 128 and
 temporarily set `CLIENT_API_MAX_INFLIGHT_PER_CLIENT=5` in `client-api/.env`.
@@ -1139,6 +1260,28 @@ share the same budget.
 ### 6.3 P2.3: PVMBG outage, graceful degradation, recovery without restart
 
 > Capture: run `step 6.3` first. Output is saved to `evidence/6.3.txt`.
+
+For the full 10-minute evidence sequence, use this **instead of** the short
+manual smoke sequence below (same command in both shells):
+
+```text
+node scripts/evidence-probes.mjs outage --seconds 600 --name 6.3-outage
+```
+
+The command starts with a warm/fresh cache, enables outage explicitly, verifies
+direct source HTTP 503, and compares cached canonical IDs/content against the
+pre-outage snapshot. Every ~10 s it prints seismic/volcanic HTTP statuses,
+latencies, count, elapsed outage time and `stale_since`. It refreshes Field
+tokens without printing credentials or tokens. It restores outage in `finally`,
+then waits up to configured maximum retry delay + 45 s for fresh state **and**
+a newly produced source report to reach the API, and checks container stability.
+Capture its before/during/after JSON plus timeline and final PASS/FAIL. Do not
+terminate the process forcibly. Ctrl+C requests restoration before exit; a
+forced process kill cannot execute cleanup, so disable outage manually then.
+
+The short sequence below is a smoke check only. Its 12 s waits do not establish
+a prolonged outage or a bounded-backoff recovery. The asserted command above
+supplies that evidence and avoids relying on tokens that expire mid-demo.
 
 ```bash
 started > evidence/6.3-started-before.txt
@@ -1190,11 +1333,16 @@ if (-not (Compare-Object (Get-Content evidence/6.3-started-before.txt) (Get-Cont
 | --- | --- | --- |
 | Before outage | `200`, normal | `200`, `source_status.PVMBG.state = fresh` |
 | During outage | `200`, normal latency | **`200`** (not 500, not a hang) with last-known rows, `source_status.PVMBG.state = stale` and a `stale_since` timestamp; answered in well under the client timeout |
-| After outage off | `200` | back to `state = fresh` within ~one poll interval |
+| After outage off | `200` | back to `state = fresh` and newly ingested records within configured maximum retry delay plus response/processing time |
 
 Also: PVMBG direct data endpoint `503` while `/health` stays `200`; Aggregator logs `warn` (never `error`/500)
 for the PVMBG failures; **no container restarted**. If volcanic rows were absent (cold start), an explicit
 unavailable status is also acceptable. **Criterion:** P2.3.
+
+If either path returns a timeout or unexpected status, retain the failed
+measurement. Capture source outage/recovery warning logs separately; uppercase
+`WARN`/`ERROR` is the current slog level spelling, so lowercase-only log filters
+can silently miss evidence.
 
 Optional: repeat 6.2 *during* the outage (enable outage, run sustained k6, disable) to show error rate stays **< 1 %** under degradation.
 
@@ -1272,6 +1420,26 @@ docker compose down -v     # also delete all volumes (fresh start next time)
 | 4.5 fails to become ready; `/ready` returns 503 although the container is alive | leftover `dashboard-demo-data` volume from an earlier run: the new durable replays stream sequence 1 with different bytes, the consumer halts (`consumer_incompatible`, `/ready` 503) and never becomes ready | `docker compose --profile consumer-demo rm -sf consumer-dashboard-demo`, `docker volume rm $(docker volume ls -q -f name=dashboard-demo-data)`, then `up -d --force-recreate`. The 4.5 pre-flight does this and its wait is now bounded (60 s) and prints the logs. Tear down with `--profile consumer-demo down -v --remove-orphans`. |
 
 ## Appendix C: evidence checklist (a complete run produces all of these)
+
+In addition to the manual captures below, keep these asserted outputs. Screenshot
+their final results and measured values; JSON supplies the detailed proof.
+
+| Gap covered | Command/output stem | Screenshot must show |
+| --- | --- | --- |
+| Source mapping | `mapping --name 1.3-mapping` | matched source counts, mapping PASS, boundary Go test results |
+| All-service health | `health --name 1.2-all-services` | each container/service state and health command |
+| Ingest/delivery correlation | `trace --name 1.4-ingest-delivery` | shared IDs, source/consumer names, outbound target and latency |
+| Live schema evolution | `schema --name 2-schema` on v1 | discovered new ID, valid attributes, unchanged containers and DB columns |
+| Storage coexistence | `storage --name 5.3-storage` after asserted schema | old/new IDs both readable, JSONB, unchanged columns |
+| Broader secret review | `secrets --name 3.5-secrets` | tracked-env check, scan scope, historical blob count, redacted findings |
+| Load/crash/connection evidence | `runtime --name 6.1-runtime` / `6.2-runtime` concurrently with k6 | timestamped TCP/health samples, stable containers, min/max |
+| Prolonged outage/recovery | `outage --seconds 600 --name 6.3-outage` | preserved cache, HTTP/latency timeline, stale_since, new recovery record, no restart |
+
+Invoke these as `node scripts/evidence-probes.mjs <command>`. Existing files
+marked missing below are a checklist from a prior run, not a claim about the
+results of the next run. The k6 wrappers save named JSON summaries; direct
+`docker run` variants below still print the same screenshot-ready summary,
+but use the wrappers if you also need the JSON file.
 
 Tick each file off before the demo. "Must show" is what a reviewer will look for. Rows marked
 **(missing on the first run)** are the gaps found when the first evidence set was reviewed.

@@ -20,6 +20,9 @@ case "$MODE" in sustained|mixed) ;; *) echo "mode must be sustained or mixed" >&
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
+EVIDENCE_NAME="${EVIDENCE_NAME:-load-test}"
+[[ "$EVIDENCE_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'invalid EVIDENCE_NAME' >&2; exit 2; }
+mkdir -p "$ROOT/evidence"
 
 # envget FILE KEY: value of KEY=... without surrounding quotes, CR, or trailing comment-free whitespace
 envget() {
@@ -35,7 +38,8 @@ if [ "$MODE" = mixed ]; then
   MIN="$(envget "$ROOT/pvmbg-mock/.env" PVMBG_MIN_DELAY_MS)"
   MAX="$(envget "$ROOT/pvmbg-mock/.env" PVMBG_MAX_DELAY_MS)"
   if [ "$MIN" != 3000 ] || [ "$MAX" != 3000 ]; then
-    echo "WARNING: pvmbg-mock/.env has PVMBG delay ${MIN}..${MAX} ms, not 3000. The mixed run only proves P2.1 with a 3 s delay (README, Demo D)." >&2
+    echo 'Mixed milestone run requires PVMBG_MIN_DELAY_MS=3000 and PVMBG_MAX_DELAY_MS=3000; verify live timing using runbook 6.0.' >&2
+    exit 2
   fi
 fi
 
@@ -43,6 +47,11 @@ fi
 MSYS_NO_PATHCONV=1 docker run --rm -i \
   --add-host=host.docker.internal:host-gateway \
   -v "$SCRIPT_DIR:/scripts:ro" \
+  -v "$ROOT/evidence:/evidence" \
   -e BASE_URL="$BASE_URL" -e MODE="$MODE" -e VUS="$VUS" -e DURATION="$DURATION" \
+  -e PURPOSE="${PURPOSE:-milestone}" \
+  -e SUMMARY_PATH="/evidence/$EVIDENCE_NAME.json" \
   -e CLIENT_ID="$CLIENT_ID" -e CLIENT_SECRET="$CLIENT_SECRET" \
-  grafana/k6 run /scripts/load-test.js
+  grafana/k6 run /scripts/load-test.js && K6_EXIT=0 || K6_EXIT=$?
+echo "k6 exit code: $K6_EXIT; JSON evidence: evidence/$EVIDENCE_NAME.json"
+exit "$K6_EXIT"
