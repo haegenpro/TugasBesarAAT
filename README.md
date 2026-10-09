@@ -821,7 +821,11 @@ error, the Aggregator does the following:
 ### Concurrency design
 
 Reads on the internal API go straight to Postgres and never wait for a
-polling cycle. Together with the two independent pollers, this means a slow
+polling cycle. Successful hazard list and detail reads use two SELECT queries:
+one reads the hazard fields together with revision and observation metadata,
+and one reads all three source polling statuses. Notice lists also use two
+queries; notice details use three because their history is read separately.
+Together with the two independent pollers, this means a slow
 PVMBG call has no way to slow down a BMKG-only read such as
 `/internal/hazards?hazard_type=SEISMIC`.
 

@@ -141,13 +141,21 @@ func (s *Store) DeliverNext(ctx context.Context, publish func(context.Context, O
 }
 
 func scanRow(row pgx.Row) (domain.HazardEvent, error) {
+	return scanHazard(row, nil)
+}
+
+func scanHazard(row pgx.Row, metadata *domain.RecordMetadata) (domain.HazardEvent, error) {
 	var e domain.HazardEvent
 	var source, hazardType, severity string
 	var occurredAt, ingestedAt time.Time
 	var attrsJSON []byte
 
-	err := row.Scan(&e.HazardID, &source, &e.SourceRefID, &hazardType, &severity,
-		&e.AreaName, &e.Latitude, &e.Longitude, &occurredAt, &ingestedAt, &attrsJSON)
+	dest := []any{&e.HazardID, &source, &e.SourceRefID, &hazardType, &severity,
+		&e.AreaName, &e.Latitude, &e.Longitude, &occurredAt, &ingestedAt, &attrsJSON}
+	if metadata != nil {
+		dest = append(dest, &metadata.Revision, &metadata.LastSeenAt)
+	}
+	err := row.Scan(dest...)
 	if err != nil {
 		return e, err
 	}
@@ -156,6 +164,9 @@ func scanRow(row pgx.Row) (domain.HazardEvent, error) {
 	e.Severity = domain.Severity(severity)
 	e.OccurredAt = timeutil.New(occurredAt)
 	e.IngestedAt = timeutil.New(ingestedAt)
+	if metadata != nil {
+		metadata.ObservationTime = occurredAt
+	}
 	e.Attributes = map[string]interface{}{}
 	if len(attrsJSON) > 0 {
 		if err := json.Unmarshal(attrsJSON, &e.Attributes); err != nil {
@@ -166,17 +177,25 @@ func scanRow(row pgx.Row) (domain.HazardEvent, error) {
 }
 
 const selectColumns = `hazard_id, source, source_ref_id, hazard_type, severity, area_name, latitude, longitude, occurred_at, ingested_at, attributes`
+const selectColumnsWithMetadata = selectColumns + `, revision, last_seen_at`
 
 var ErrNotFound = errors.New("hazard not found")
 
 func (s *Store) GetByID(ctx context.Context, hazardID string) (domain.HazardEvent, error) {
+	event, _, err := s.GetByIDWithMetadata(ctx, hazardID)
+	return event, err
+}
+
+// GetByIDWithMetadata reads the canonical record and its revision metadata from the same row.
+func (s *Store) GetByIDWithMetadata(ctx context.Context, hazardID string) (domain.HazardEvent, domain.RecordMetadata, error) {
 	ctx = middleware.EnsureCorrelationID(ctx)
-	row := s.Pool.QueryRow(ctx, `SELECT `+selectColumns+` FROM hazard_events WHERE hazard_id = $1`, hazardID)
-	e, err := scanRow(row)
+	row := s.Pool.QueryRow(ctx, `SELECT `+selectColumnsWithMetadata+` FROM hazard_events WHERE hazard_id = $1`, hazardID)
+	var metadata domain.RecordMetadata
+	e, err := scanHazard(row, &metadata)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.HazardEvent{}, ErrNotFound
+		return domain.HazardEvent{}, domain.RecordMetadata{}, ErrNotFound
 	}
-	return e, err
+	return e, metadata, err
 }
 
 type Filters struct {
@@ -188,8 +207,14 @@ type Filters struct {
 
 // Query performs all filtering in SQL, not in memory.
 func (s *Store) Query(ctx context.Context, f Filters) ([]domain.HazardEvent, error) {
+	events, _, err := s.QueryWithMetadata(ctx, f)
+	return events, err
+}
+
+// QueryWithMetadata preserves the list filters and ordering while reading metadata in the same query.
+func (s *Store) QueryWithMetadata(ctx context.Context, f Filters) ([]domain.HazardEvent, map[string]domain.RecordMetadata, error) {
 	ctx = middleware.EnsureCorrelationID(ctx)
-	sql := `SELECT ` + selectColumns + ` FROM hazard_events WHERE 1=1`
+	sql := `SELECT ` + selectColumnsWithMetadata + ` FROM hazard_events WHERE 1=1`
 	args := []interface{}{}
 	n := 0
 	next := func() string { n++; return "$" + strconv.Itoa(n) }
@@ -214,19 +239,22 @@ func (s *Store) Query(ctx context.Context, f Filters) ([]domain.HazardEvent, err
 
 	rows, err := s.Pool.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
 	out := []domain.HazardEvent{}
+	metadata := map[string]domain.RecordMetadata{}
 	for rows.Next() {
-		e, err := scanRow(rows)
+		var m domain.RecordMetadata
+		e, err := scanHazard(rows, &m)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		out = append(out, e)
+		metadata[e.HazardID] = m
 	}
-	return out, rows.Err()
+	return out, metadata, rows.Err()
 }
 
 // LastKnownVolcanic returns the most recently stored VOLCANIC hazard events,

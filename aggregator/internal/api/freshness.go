@@ -13,26 +13,26 @@ import (
 )
 
 func (a *API) statuses(ctx context.Context) (map[string]sourceStatus, error) {
+	endpoints := []string{"BMKG", "BMKG_TSUNAMI", "PVMBG"}
+	stored, err := a.Store.PollStatuses(ctx, endpoints)
+	if err != nil {
+		return nil, err
+	}
 	out := map[string]sourceStatus{}
-	for _, key := range []string{"BMKG", "BMKG_TSUNAMI", "PVMBG"} {
-		p, err := a.Store.PollStatus(ctx, key)
-		if err != nil {
-			return nil, err
-		}
+	now := domain.Now()
+	for _, key := range endpoints {
+		p := stored[key]
 		ttl := a.BMKGFreshness
 		if key == "PVMBG" {
 			ttl = a.PVMBGFreshness
 		}
-		ss := statusAt(p, domain.Now(), ttl)
+		ss := statusAt(p, now, ttl)
 		out[key] = ss
 	}
 	return out, nil
 }
-func (a *API) recordMetadata(ctx context.Context, events []domain.HazardEvent, status map[string]sourceStatus) (map[string]domain.RecordMetadata, error) {
-	out, err := a.Store.Metadata(ctx, events)
-	if err != nil {
-		return nil, err
-	}
+func (a *API) recordMetadata(events []domain.HazardEvent, status map[string]sourceStatus, out map[string]domain.RecordMetadata) map[string]domain.RecordMetadata {
+	now := domain.Now()
 	for _, e := range events {
 		m := out[e.HazardID]
 		ttl := a.BMKGFreshness
@@ -47,13 +47,13 @@ func (a *API) recordMetadata(ctx context.Context, events []domain.HazardEvent, s
 				m.AssessmentState = "complete"
 			}
 		}
-		m.Historical = time.Since(e.OccurredAt.Time) > ttl
-		if m.LastSeenAt == nil || time.Since(*m.LastSeenAt) > ttl {
+		m.Historical = now.Sub(e.OccurredAt.Time) > ttl
+		if m.LastSeenAt == nil || now.Sub(*m.LastSeenAt) > ttl {
 			m.State = "unavailable"
 		}
 		out[e.HazardID] = m
 	}
-	return out, nil
+	return out
 }
 func (a *API) ListNotices(c *gin.Context) {
 	if !a.Deps.StoreReady() {

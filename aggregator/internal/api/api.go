@@ -59,7 +59,7 @@ func (a *API) ListHazards(c *gin.Context) {
 		}
 	}
 
-	events, err := a.Store.Query(c.Request.Context(), f)
+	events, metadata, err := a.Store.QueryWithMetadata(c.Request.Context(), f)
 	if err != nil {
 		a.Deps.SetStoreReady(false)
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "store unavailable"})
@@ -70,11 +70,7 @@ func (a *API) ListHazards(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "store unavailable"})
 		return
 	}
-	metadata, err := a.recordMetadata(c.Request.Context(), events, status)
-	if err != nil {
-		c.JSON(503, gin.H{"error": "store unavailable"})
-		return
-	}
+	metadata = a.recordMetadata(events, status, metadata)
 
 	c.JSON(http.StatusOK, listResponse{
 		Data:         events,
@@ -95,7 +91,7 @@ func (a *API) GetHazard(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid hazard ID"})
 		return
 	}
-	event, err := a.Store.GetByID(c.Request.Context(), id)
+	event, storedMetadata, err := a.Store.GetByIDWithMetadata(c.Request.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "hazard not found"})
@@ -110,11 +106,7 @@ func (a *API) GetHazard(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "store unavailable"})
 		return
 	}
-	metadata, err := a.recordMetadata(c.Request.Context(), []domain.HazardEvent{event}, status)
-	if err != nil {
-		c.JSON(503, gin.H{"error": "store unavailable"})
-		return
-	}
+	metadata := a.recordMetadata([]domain.HazardEvent{event}, status, map[string]domain.RecordMetadata{event.HazardID: storedMetadata})
 	c.JSON(http.StatusOK, gin.H{"data": event, "source_status": status, "metadata": metadata[event.HazardID], "as_of": timeutil.New(domain.Now())})
 }
 

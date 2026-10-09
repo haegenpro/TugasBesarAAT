@@ -26,6 +26,29 @@ func (s *Store) PollStatus(ctx context.Context, endpoint string) (domain.Endpoin
 	}
 	return p, err
 }
+
+// PollStatuses returns every requested endpoint, including unavailable defaults for missing rows.
+func (s *Store) PollStatuses(ctx context.Context, endpoints []string) (map[string]domain.EndpointStatus, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
+	out := make(map[string]domain.EndpointStatus, len(endpoints))
+	for _, endpoint := range endpoints {
+		out[endpoint] = domain.EndpointStatus{Endpoint: endpoint, State: "unavailable"}
+	}
+	rows, err := s.Pool.Query(ctx, `SELECT `+statusColumns+` FROM source_poll_state WHERE endpoint=ANY($1::text[])`, endpoints)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		p, err := scanStatus(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[p.Endpoint] = p
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success bool, interval, maxBackoff time.Duration) error {
 	ctx = middleware.WithCorrelationID(ctx, cid)
 	tx, err := s.sourceTx(ctx, "poll:"+endpoint)
@@ -184,31 +207,6 @@ func (s *Store) Notice(ctx context.Context, id string) (domain.Notice, []domain.
 		out = append(out, e)
 	}
 	return n, out, rows.Err()
-}
-func (s *Store) Metadata(ctx context.Context, events []domain.HazardEvent) (map[string]domain.RecordMetadata, error) {
-	ctx = middleware.EnsureCorrelationID(ctx)
-	out := map[string]domain.RecordMetadata{}
-	if len(events) == 0 {
-		return out, nil
-	}
-	ids := []string{}
-	for _, e := range events {
-		ids = append(ids, e.HazardID)
-	}
-	rows, err := s.Pool.Query(ctx, `SELECT hazard_id::text,revision,last_seen_at,occurred_at FROM hazard_events WHERE hazard_id::text=ANY($1)`, ids)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var m domain.RecordMetadata
-		if err = rows.Scan(&id, &m.Revision, &m.LastSeenAt, &m.ObservationTime); err != nil {
-			return nil, err
-		}
-		out[id] = m
-	}
-	return out, rows.Err()
 }
 func (s *Store) DeliverLifecycle(ctx context.Context, publish func(context.Context, domain.LifecycleEvent) error) (bool, error) {
 	ctx = middleware.EnsureCorrelationID(ctx)
