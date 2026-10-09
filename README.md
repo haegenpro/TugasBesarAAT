@@ -336,8 +336,6 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | `NATS_DLQ_SUBJECT` | This consumer's dead-letter subject prefix | `hazard.dlq.dashboard` | `hazard.dlq.notifier` |
 | `NATS_URL`, `NATS_STREAM`, `NATS_SUBJECT`, `NATS_DLQ_STREAM` | Same values as `broker/.env` | | |
 | `SCHEMA_REGISTRY_URL` | Registry for decoding events | | |
-| `AUTH_BASE_URL` | Auth Service URL for recovery introspection only | `http://auth-service:8083` | `http://auth-service:8083` |
-| `AUTH_INTERNAL_KEY` | Same service key as Auth Service; used only for recovery introspection | Required | Required |
 | `NATS_LIFECYCLE_STREAM`, `NATS_LIFECYCLE_SUBJECT` | Same lifecycle values as `broker/.env` | | |
 
 ### Client API and TUI
@@ -881,19 +879,28 @@ for processing availability and inspect its reported halt reason and the error
 logs to diagnose the halt. Use broker backlog and `/records` checks to verify
 delivery progress; a healthy container alone does not prove delivery.
 
-The halt survives restarts. Fix the cause, obtain an Internal access token through
-Client API `/auth/login`, then call the affected consumer's `POST /admin/resume`.
-The consumer checks the token through Auth Service and requires `consumer:resume`.
-Media and Field tokens are rejected. The consumer transactionally clears its shared
-halt and records the authenticated client and correlation ID; no database editing
-or container restart is needed. Verify `/ready`, processing logs, `/records`, and
-broker backlog afterward.
+The halt survives restarts. Fix the cause, then use the local administration
+command inside the affected consumer container:
 
-Auth Service availability is required for this recovery request, but not for
-normal consumer processing. Resume preserves retry/storm history and does not
-replay previously quarantined messages. Recent storms or an unresolved cause can
-halt processing again. Recover before original stream retention expires.
-See [Consumer recovery](docs/consumer-recovery.md) for commands and response codes.
+```bash
+docker compose exec -T consumer-dashboard consumer resume \
+  --operator "your-name" --reason "fixed the cause of the halt"
+```
+
+Use `consumer-notifier` instead for Notifier. This command contacts the running
+consumer over an owner-only Unix socket; no HTTP resume endpoint or Auth Service
+request is involved. Docker/host access authorizes the operation. The supplied
+operator name is an audit label, not an authenticated downstream identity.
+All three downstream client identities retain read-only data scopes.
+
+The consumer transactionally clears its shared hazard/lifecycle halt and records
+the operator, repair reason, correlation ID, timestamp, and previous halt reason.
+No database editing or container restart is needed. Verify `/ready`, processing
+logs, `/records`, and broker backlog afterward. Resume preserves retry/storm
+history and does not replay or delete previously quarantined messages. Recent
+storms or an unresolved cause can halt processing again. Recover before original
+stream retention expires. See [Consumer recovery](docs/consumer-recovery.md)
+for the operator procedure and failure behavior.
 
 Consumers apply the highest hazard/notice revision across both streams.
 Lifecycle snapshots let corrections and resolutions arrive before original

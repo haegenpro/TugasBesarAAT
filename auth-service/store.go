@@ -108,10 +108,7 @@ func (s *sessionStore) pair(clientID, role, access, refresh string) tokenPair {
 }
 
 func scopeForRole(role string) string {
-	if role == "internal" {
-		return "hazards:raw consumer:resume"
-	}
-	if role == "field" {
+	if role == "internal" || role == "field" {
 		return "hazards:raw"
 	}
 	return "hazards:summary"
