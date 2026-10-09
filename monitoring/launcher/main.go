@@ -22,11 +22,11 @@ import (
 var streamName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 var required = map[string][]string{
-	"nats-exporter": {"NATS_MONITOR_URL"},
-	"grafana":       {"GRAFANA_BIND_ADDRESS", "GRAFANA_HOST_PORT", "GF_SECURITY_ADMIN_USER", "GF_SECURITY_ADMIN_PASSWORD", "PROMETHEUS_URL", "LOKI_URL", "DLQ_STREAM_NAME"},
-	"prometheus":    {"METRICS_RETENTION_DAYS", "ALLOY_METRICS_URL", "LOKI_METRICS_URL", "NATS_EXPORTER_METRICS_URL"},
-	"loki":          {"LOG_RETENTION_DAYS"},
-	"alloy":         {"COMPOSE_PROJECT_NAME", "PROMETHEUS_WRITE_URL", "LOKI_PUSH_URL", "BMKG_HEALTH_URL", "PVMBG_HEALTH_URL", "AGGREGATOR_HEALTH_URL", "AGGREGATOR_READY_URL", "AUTH_HEALTH_URL", "CLIENT_API_HEALTH_URL", "CLIENT_API_READY_URL", "DASHBOARD_HEALTH_URL", "DASHBOARD_READY_URL", "NOTIFIER_HEALTH_URL", "NOTIFIER_READY_URL", "REGISTRY_READY_URL", "NATS_HEALTH_URL"},
+	"nats-exporter": {"NATS_EXPORTER_PORT", "NATS_MONITOR_URL"},
+	"grafana":       {"GRAFANA_PORT", "GRAFANA_BIND_ADDRESS", "GRAFANA_HOST_PORT", "GF_SECURITY_ADMIN_USER", "GF_SECURITY_ADMIN_PASSWORD", "PROMETHEUS_URL", "LOKI_URL", "DLQ_STREAM_NAME"},
+	"prometheus":    {"PROMETHEUS_PORT", "METRICS_RETENTION_DAYS", "ALLOY_METRICS_URL", "LOKI_METRICS_URL", "NATS_EXPORTER_METRICS_URL"},
+	"loki":          {"LOKI_PORT", "LOKI_GRPC_PORT", "LOG_RETENTION_DAYS"},
+	"alloy":         {"ALLOY_PORT", "COMPOSE_PROJECT_NAME", "PROMETHEUS_WRITE_URL", "LOKI_PUSH_URL", "BMKG_HEALTH_URL", "PVMBG_HEALTH_URL", "AGGREGATOR_HEALTH_URL", "AGGREGATOR_READY_URL", "AUTH_HEALTH_URL", "CLIENT_API_HEALTH_URL", "CLIENT_API_READY_URL", "DASHBOARD_HEALTH_URL", "DASHBOARD_READY_URL", "NOTIFIER_HEALTH_URL", "NOTIFIER_READY_URL", "REGISTRY_READY_URL", "NATS_HEALTH_URL"},
 }
 
 func validate(service string, get func(string) string) (map[string]string, error) {
@@ -67,7 +67,7 @@ func validate(service string, get func(string) string) (map[string]string, error
 			if !streamName.MatchString(value) {
 				return nil, fmt.Errorf("%s must contain only letters, digits, underscores, or hyphens", key)
 			}
-		case key == "GRAFANA_HOST_PORT":
+		case strings.HasSuffix(key, "_PORT"):
 			if err := validPort(key, value); err != nil {
 				return nil, err
 			}
@@ -75,6 +75,13 @@ func validate(service string, get func(string) string) (map[string]string, error
 			if net.ParseIP(value) == nil {
 				return nil, fmt.Errorf("%s must be an explicit IP address", key)
 			}
+		}
+	}
+	if service == "loki" {
+		httpPort, _ := strconv.Atoi(values["LOKI_PORT"])
+		grpcPort, _ := strconv.Atoi(values["LOKI_GRPC_PORT"])
+		if httpPort == grpcPort {
+			return nil, fmt.Errorf("LOKI_PORT and LOKI_GRPC_PORT must be different")
 		}
 	}
 	return values, nil
@@ -146,6 +153,9 @@ func prepare(service string, values map[string]string, source, dest string) erro
 	if service != "grafana" {
 		return nil
 	}
+	if err := os.Setenv("GF_SERVER_HTTP_PORT", values["GRAFANA_PORT"]); err != nil {
+		return err
+	}
 	for _, kind := range []string{"datasources", "dashboards", "alerting"} {
 		dir := filepath.Join(dest, "provisioning", kind)
 		if err := os.MkdirAll(dir, 0700); err != nil {
@@ -192,8 +202,13 @@ func run(args []string) error {
 	if err := prepare(args[0], values, "/etc/monitoring/templates", "/tmp/monitoring"); err != nil {
 		return err
 	}
-	if args[0] == "nats-exporter" {
-		args = append(args, values["NATS_MONITOR_URL"])
+	switch args[0] {
+	case "nats-exporter":
+		args = append(args, "-port="+values["NATS_EXPORTER_PORT"], values["NATS_MONITOR_URL"])
+	case "prometheus":
+		args = append(args, "--web.listen-address=0.0.0.0:"+values["PROMETHEUS_PORT"])
+	case "alloy":
+		args = append(args, "--server.http.listen-addr=0.0.0.0:"+values["ALLOY_PORT"])
 	}
 	return syscall.Exec(args[1], args[1:], os.Environ())
 }

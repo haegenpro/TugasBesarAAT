@@ -32,7 +32,7 @@ func main() {
 	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
-	st, err := store.New(ctx, cfg.DatabaseURL)
+	st, err := store.New(ctx, cfg.DatabaseURL, logger)
 	if err != nil {
 		logger.Error("invalid canonical store configuration", "service", "aggregator", "error", err.Error())
 		os.Exit(1)
@@ -94,7 +94,7 @@ func monitorStore(ctx context.Context, st *store.Store, deps *api.Dependencies, 
 	pollerStarted := false
 	schemaReady := false
 	for {
-		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		checkCtx, cancel := context.WithTimeout(middleware.EnsureCorrelationID(ctx), 5*time.Second)
 		err := st.Ping(checkCtx)
 		if err == nil && !schemaReady {
 			err = st.CheckSchema(checkCtx)

@@ -38,7 +38,10 @@ const envelopeSchema = `{"type":"record","name":"HazardEnvelope","namespace":"id
 
 // New connects to NATS and requires the broker initializer's stream to exist.
 func New(ctx context.Context, url, stream, subject string, registry *avrowire.Client, logger *slog.Logger) (*Publisher, error) {
-	nc, err := nats.Connect(url, nats.Timeout(5*time.Second))
+	ctx = middleware.EnsureCorrelationID(ctx)
+	nc, err := brokerCall(ctx, logger, "broker_connect", func() (*nats.Conn, error) {
+		return nats.Connect(url, nats.Timeout(5*time.Second))
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -48,12 +51,16 @@ func New(ctx context.Context, url, stream, subject string, registry *avrowire.Cl
 		return nil, err
 	}
 
-	st, err := js.Stream(ctx, stream)
+	st, err := brokerCall(ctx, logger, "stream_lookup", func() (jetstream.Stream, error) {
+		return js.Stream(ctx, stream)
+	})
 	if err != nil {
 		nc.Close()
 		return nil, fmt.Errorf("JetStream stream %q is unavailable: %w", stream, err)
 	}
-	info, err := st.Info(ctx)
+	info, err := brokerCall(ctx, logger, "stream_info", func() (*jetstream.StreamInfo, error) {
+		return st.Info(ctx)
+	})
 	if err != nil {
 		nc.Close()
 		return nil, err
@@ -87,7 +94,6 @@ func (p *Publisher) Publish(ctx context.Context, event domain.HazardEvent, corre
 	if p.schema == nil {
 		schema, err := p.registry.Register(avrowire.WithCorrelationID(ctx, correlationID), p.subject+"-value", envelopeSchema)
 		if err != nil {
-			middleware.LogOutbound(p.logger, "aggregator", correlationID, "schema-registry", p.subject+"-value", 0, false, 0, err.Error())
 			return fmt.Errorf("register broker schema: %w", err)
 		}
 		p.schema = schema

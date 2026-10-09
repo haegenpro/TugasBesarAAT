@@ -8,5 +8,4 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /out/pvmbg-mock ./cmd/server
 FROM alpine:3.24
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /out/pvmbg-mock /usr/local/bin/pvmbg-mock
-EXPOSE 8082
 ENTRYPOINT ["/usr/local/bin/pvmbg-mock"]

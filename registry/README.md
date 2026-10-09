@@ -1,10 +1,22 @@
 # Schema Registry
 
-Apicurio Registry uses its own `registry-db` Postgres container and persistent
-`registry-data` volume. It is reachable by services at
-`http://schema-registry:8080/apis/ccompat/v7` and from the host at
-`http://localhost:18084/apis/ccompat/v7`. The registry's readiness endpoint is
-on its management port, `9000/health/ready`.
+Apicurio Registry 3.3.3 uses its own `registry-db` PostgreSQL 16 container and
+persistent `registry-data` volume. Its API is internal to the backend network;
+neither API nor management port is published to the host. Compose generates
+`SCHEMA_REGISTRY_URL` for each caller from root `SCHEMA_REGISTRY_PORT`.
+`SCHEMA_REGISTRY_MANAGEMENT_PORT` controls the readiness listener.
+
+The Registry trusts services attached to the backend network. Downstream clients
+use Client API on the separate client network. Docker/host administrators can
+inspect the Registry from its container:
+
+```bash
+docker compose exec -T schema-registry sh -c \
+  'curl --fail --silent "http://127.0.0.1:${QUARKUS_HTTP_PORT:?}/apis/ccompat/v7/subjects"'
+```
+
+Removing the host mapping does not change source registration, live schema
+evolution, consumer decoding, or monitoring; they use internal Docker addresses.
 
 Copy the registry block from the root `.env.example` to `registry/.env` before
 running Compose. Each producer registers its schema on first Avro use. The

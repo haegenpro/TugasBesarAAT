@@ -5,6 +5,7 @@ import (
 	"aggregator/internal/clients"
 	"aggregator/internal/domain"
 	"aggregator/internal/mapping"
+	"aggregator/internal/middleware"
 	"aggregator/internal/volcano"
 	"context"
 	"errors"
@@ -64,10 +65,12 @@ func (p *Poller) loop(ctx context.Context, endpoint string, fn func(context.Cont
 	for ctx.Err() == nil {
 		delay := interval
 		if p.Ready == nil || p.Ready() {
+			cid := uuid.NewString()
+			callCtx := middleware.WithCorrelationID(ctx, cid)
 			if st, ok := p.Store.(RecoveryStore); ok {
-				status, err := st.PollStatus(ctx, endpoint)
+				status, err := st.PollStatus(callCtx, endpoint)
 				if err != nil {
-					p.logSourceFailure(endpoint, "", err)
+					p.logSourceFailure(endpoint, cid, err)
 				} else if status.NextAttempt != nil && status.NextAttempt.After(time.Now()) {
 					if !sleep(ctx, time.Until(*status.NextAttempt)) {
 						return
@@ -75,8 +78,7 @@ func (p *Poller) loop(ctx context.Context, endpoint string, fn func(context.Cont
 					continue
 				}
 			}
-			cid := uuid.NewString()
-			err := fn(ctx, cid)
+			err := fn(callCtx, cid)
 			if err != nil {
 				p.logSourceFailure(endpoint, cid, err)
 				failures++
@@ -84,7 +86,7 @@ func (p *Poller) loop(ctx context.Context, endpoint string, fn func(context.Cont
 				failures = 0
 			}
 			if st, ok := p.Store.(RecoveryStore); ok {
-				if e := st.RecordAttempt(ctx, endpoint, cid, err == nil, interval, maxBackoff); e != nil {
+				if e := st.RecordAttempt(callCtx, endpoint, cid, err == nil, interval, maxBackoff); e != nil {
 					p.logSourceFailure(endpoint, cid, e)
 				}
 			}
@@ -185,6 +187,7 @@ func (p *Poller) pollVolcanic(ctx context.Context, cid string) error {
 // as their response arrives, even while the independent warning request is still running.
 func (p *Poller) PollBMKGOnce(ctx context.Context) {
 	cid := uuid.NewString()
+	ctx = middleware.WithCorrelationID(ctx, cid)
 	done := make(chan error, 2)
 	go func() { done <- p.pollSeismic(ctx, cid) }()
 	go func() { done <- p.pollWarnings(ctx, cid) }()
@@ -196,6 +199,7 @@ func (p *Poller) PollBMKGOnce(ctx context.Context) {
 }
 func (p *Poller) PollPVMBGOnce(ctx context.Context) {
 	cid := uuid.NewString()
+	ctx = middleware.WithCorrelationID(ctx, cid)
 	if err := p.pollVolcanic(ctx, cid); err != nil {
 		p.logSourceFailure("pvmbg", cid, err)
 	}

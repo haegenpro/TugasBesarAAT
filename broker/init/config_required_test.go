@@ -7,6 +7,8 @@ import (
 
 func TestConfigurationRequiresExplicitValues(t *testing.T) {
 	values := map[string]string{
+		"NATS_PORT":               "4222",
+		"NATS_MONITOR_PORT":       "8222",
 		"NATS_URL":                "nats://broker:4222",
 		"NATS_STREAM":             "HAZARDS",
 		"NATS_SUBJECT":            "hazard.events",
@@ -35,7 +37,9 @@ func TestConfigurationRequiresExplicitValues(t *testing.T) {
 		}
 	}
 	for key, invalid := range map[string]string{
-		"NATS_URL": "invalid",
+		"NATS_URL":          "invalid",
+		"NATS_PORT":         "0",
+		"NATS_MONITOR_PORT": "65536",
 	} {
 		t.Run(key+"/invalid", func(t *testing.T) {
 			t.Setenv(key, invalid)
@@ -44,6 +48,12 @@ func TestConfigurationRequiresExplicitValues(t *testing.T) {
 			}
 		})
 	}
+	t.Run("listener collision", func(t *testing.T) {
+		t.Setenv("NATS_MONITOR_PORT", values["NATS_PORT"])
+		if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "must be different") {
+			t.Fatalf("overlapping listeners accepted: %v", err)
+		}
+	})
 	t.Run("all missing", func(t *testing.T) {
 		for key := range values {
 			t.Setenv(key, "")

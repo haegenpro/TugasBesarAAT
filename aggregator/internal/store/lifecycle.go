@@ -11,6 +11,7 @@ import (
 	"aggregator/internal/clients"
 	"aggregator/internal/domain"
 	"aggregator/internal/mapping"
+	"aggregator/internal/middleware"
 	"aggregator/internal/timeutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,6 +21,7 @@ import (
 var lifecycleMigration string
 
 func (s *Store) Migrate(ctx context.Context) error {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -158,6 +160,7 @@ func advanceCursor(ctx context.Context, tx pgx.Tx, source, entity string, seq in
 	return err
 }
 func (s *Store) HistoryCursor(ctx context.Context, source, entity string) (int64, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	var n int64
 	err := s.Pool.QueryRow(ctx, `SELECT cursor FROM source_history_cursors WHERE source=$1 AND entity=$2`, source, entity).Scan(&n)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -166,6 +169,7 @@ func (s *Store) HistoryCursor(ctx context.Context, source, entity string) (int64
 	return n, err
 }
 func (s *Store) CommitSeismic(ctx context.Context, events []clients.SeismicEvent, cid string, seq int64) error {
+	ctx = middleware.WithCorrelationID(ctx, cid)
 	tx, err := s.sourceTx(ctx, "BMKG")
 	if err != nil {
 		return err
@@ -198,6 +202,7 @@ func (s *Store) CommitSeismic(ctx context.Context, events []clients.SeismicEvent
 	return tx.Commit(ctx)
 }
 func (s *Store) CommitWarnings(ctx context.Context, warnings []clients.TsunamiWarning, cid string, seq int64, checkedBefore time.Time, complete bool) error {
+	ctx = middleware.WithCorrelationID(ctx, cid)
 	tx, err := s.sourceTx(ctx, "BMKG")
 	if err != nil {
 		return err
@@ -362,6 +367,7 @@ func saveNotice(ctx context.Context, tx pgx.Tx, n domain.Notice, cid string, h *
 	return queueLifecycle(ctx, tx, domain.LifecycleEvent{EventType: "notice_" + n.State, RecordID: n.NoticeID, Revision: n.Revision, CorrelationID: cid, Notice: &n, Hazard: h})
 }
 func (s *Store) CommitVolcanic(ctx context.Context, reports []clients.VolcanicReport, hazards []domain.HazardEvent, cid string, seq int64) error {
+	ctx = middleware.WithCorrelationID(ctx, cid)
 	tx, err := s.sourceTx(ctx, "PVMBG")
 	if err != nil {
 		return err
@@ -448,6 +454,7 @@ func (s *Store) assessVolcanic(ctx context.Context, tx pgx.Tx, r clients.Volcani
 	return saveNotice(ctx, tx, n, cid, nil)
 }
 func (s *Store) PendingVolcanic(ctx context.Context) ([]clients.VolcanicReport, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	rows, err := s.Pool.Query(ctx, `SELECT o.payload FROM source_observations o JOIN report_notices n ON n.source=o.source AND n.source_ref_id=o.record_id WHERE o.source='PVMBG' AND o.entity='volcanic-reports' AND n.state<>'resolved' LIMIT 100`)
 	if err != nil {
 		return nil, err
@@ -469,6 +476,7 @@ func (s *Store) PendingVolcanic(ctx context.Context) ([]clients.VolcanicReport, 
 }
 
 func (s *Store) ResolveVolcanic(ctx context.Context, r clients.VolcanicReport, h domain.HazardEvent, cid string) error {
+	ctx = middleware.WithCorrelationID(ctx, cid)
 	tx, err := s.sourceTx(ctx, "PVMBG")
 	if err != nil {
 		return err

@@ -18,8 +18,10 @@ func configured(service string) map[string]string {
 			values[key] = "30"
 		case key == "GRAFANA_BIND_ADDRESS":
 			values[key] = "0.0.0.0"
-		case key == "GRAFANA_HOST_PORT":
-			values[key] = "13000"
+		case key == "LOKI_GRPC_PORT":
+			values[key] = "19095"
+		case strings.HasSuffix(key, "_PORT"):
+			values[key] = "19080"
 		default:
 			values[key] = "configured-secret"
 		}
@@ -63,6 +65,9 @@ func TestInvalidConfigurationDoesNotExposeValues(t *testing.T) {
 		{"prometheus", "NATS_EXPORTER_METRICS_URL", "http://exporter:99999/metrics"},
 		{"grafana", "GRAFANA_HOST_PORT", "65536"},
 		{"grafana", "GRAFANA_HOST_PORT", "-1"},
+		{"alloy", "ALLOY_PORT", "0"},
+		{"nats-exporter", "NATS_EXPORTER_PORT", "invalid"},
+		{"loki", "LOKI_GRPC_PORT", "19080"},
 		{"grafana", "PROMETHEUS_URL", "http://secret-user:secret-pass@example"},
 		{"grafana", "LOKI_URL", "ftp://example"},
 		{"grafana", "LOKI_URL", "http://example:99999"},
@@ -124,5 +129,32 @@ func TestTemplateEscaping(t *testing.T) {
 	}
 	if strings.Contains(string(b), "project\"\nwith-newline") {
 		t.Fatal("configuration injection")
+	}
+}
+
+func TestNonDefaultPortsReachGeneratedConfiguration(t *testing.T) {
+	for _, c := range []struct {
+		service, path string
+		expected      []string
+	}{
+		{"loki", "loki.yml", []string{"http_listen_port: 19080", "grpc_listen_port: 19095"}},
+		{"prometheus", "prometheus.yml", []string{"localhost:19080"}},
+		{"grafana", "provisioning/alerting/monitoring.yml", []string{"http://127.0.0.1:19080/api/health"}},
+	} {
+		t.Run(c.service, func(t *testing.T) {
+			dest := t.TempDir()
+			if err := prepare(c.service, configured(c.service), "../templates", dest); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(dest, c.path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, expected := range c.expected {
+				if !strings.Contains(string(data), expected) {
+					t.Fatalf("configured port missing from %s", c.path)
+				}
+			}
+		})
 	}
 }

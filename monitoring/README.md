@@ -16,7 +16,8 @@ container, or application instrumentation in this version.
 
 ## Required configuration
 
-Add `GRAFANA_BIND_ADDRESS` and `GRAFANA_HOST_PORT` to the root `.env`. Select an
+Configure the monitoring HTTP ports, `GRAFANA_BIND_ADDRESS`, and
+`GRAFANA_HOST_PORT` in root `.env`; see [Port configuration](../docs/Port%20Configuration.md). Select an
 explicit IP address: `127.0.0.1` restricts access to this host; `0.0.0.0` exposes
 the selected port on all host IPv4 interfaces. Other machines use the host's
 actual address, not `0.0.0.0`, to open Grafana. IPv6 bind addresses must use
@@ -27,13 +28,13 @@ root `.env.example`; do not copy the combined template wholesale:
 
 | File | Required variables |
 | --- | --- |
-| `monitoring/grafana/.env` | `GF_SECURITY_ADMIN_USER`, `GF_SECURITY_ADMIN_PASSWORD`, `PROMETHEUS_URL`, `LOKI_URL`, `DLQ_STREAM_NAME` |
-| `monitoring/prometheus/.env` | `METRICS_RETENTION_DAYS`, `ALLOY_METRICS_URL`, `LOKI_METRICS_URL`, `NATS_EXPORTER_METRICS_URL` |
-| `monitoring/nats-exporter/.env` | `NATS_MONITOR_URL` |
-| `monitoring/loki/.env` | `LOG_RETENTION_DAYS` |
-| `monitoring/alloy/.env` | `PROMETHEUS_WRITE_URL`, `LOKI_PUSH_URL`, and all thirteen health/readiness target URLs listed in `.env.example` |
+| `monitoring/grafana/.env` | `GF_SECURITY_ADMIN_USER`, `GF_SECURITY_ADMIN_PASSWORD`, `DLQ_STREAM_NAME` |
+| `monitoring/prometheus/.env` | `METRICS_RETENTION_DAYS` |
+| `monitoring/loki/.env` | `LOG_RETENTION_DAYS`, `LOKI_GRPC_PORT` |
 
-Compose supplies Alloy's `COMPOSE_PROJECT_NAME`, including when `-p` selects a
+Alloy and NATS Exporter require no per-service env file. Compose generates all
+service URLs, health probes, and scrape targets from root ports and supplies
+Alloy's `COMPOSE_PROJECT_NAME`, including when `-p` selects a
 project name. Docker log discovery filters to that project. Monitoring and
 one-shot broker-init logs are excluded; application and database/broker logs
 are included. Optional demo consumers can appear in logs but are not permanent
@@ -48,9 +49,10 @@ and hyphens. Set `DLQ_STREAM_NAME` to the broker's `NATS_DLQ_STREAM`.
 Root host mappings use Compose's required-variable checks separately. There are
 no environment fallback values. Examples are suggested values only.
 
-The internal URLs in `.env.example` match the documented container ports. Update
-the probe URLs whenever you change those service ports. Monitoring does not
-connect to application databases or their private networks.
+Changing a root monitoring port updates its listener, health check, data source
+URLs, and scrape/push destinations together after container recreation. Loki's
+private gRPC port stays in its service env. Monitoring does not connect to
+application databases or their private networks.
 
 ## Start and inspect
 
@@ -70,7 +72,7 @@ Grafana's user settings; changing the environment alone does not rotate it.
 Grafana is the only published monitoring port. Prometheus, Loki, Alloy, and the
 NATS exporter are reachable on the internal monitoring network. Alloy and the
 exporter also join `backend` to probe endpoints and read broker statistics. The
-exporter exposes `/metrics` internally on port 7777; it has no database or volume. Services do not depend on the monitoring components at
+exporter exposes `/metrics` internally on `NATS_EXPORTER_PORT`; it has no database or volume. Services do not depend on the monitoring components at
 startup and continue operating when monitoring is stopped.
 
 ## Dashboard interpretation
@@ -87,6 +89,9 @@ startup and continue operating when monitoring is stopped.
 - **HTTP probe duration** measures synthetic checks. **Logged outbound latency
   p95** comes from JSON `latency_ms` fields with `target_service`, in milliseconds.
   It is not end-to-end request latency. Missing logs are not converted to zero.
+- Consumer `consumer_fetch` logs include waiting for the broker's complete batch
+  response and final error, before local processing and ACK. An empty two-second
+  long poll can therefore record about 2000 ms with `success=true`.
 - Select services and a time window. Enter an exact correlation ID in the text
   field to view its matching JSON log entries across services. The general log
   panel also shows non-JSON infrastructure output.
@@ -138,12 +143,14 @@ Notification delivery remains muted by the existing dashboard-only policy.
 
 ### Manual inspection and republishing
 
-The examples below require Go, `jq`, `base64`, and the external NATS CLI.
-From `broker/`, supply explicit connection settings and a consumer DLQ prefix:
+The examples below require Docker, `jq`, and `base64` on the host. Run them from
+the repository root. The broker image includes the DLQ inspector; it uses the
+container's configured broker connection. Broker host ports remain closed. These
+commands require Docker/host operator access, independently of downstream client
+identities. See the [broker access boundary](../README.md#broker-access-boundary).
 
 ```bash
-NATS_URL=nats://localhost:14222 NATS_DLQ_STREAM=HAZARDS_DLQ \
-  go run ./cmd/inspect-dlq hazard.dlq.dashboard > /tmp/dlq-record.json
+docker compose exec -T broker inspect-dlq hazard.dlq.dashboard > /tmp/dlq-record.json
 jq -r '.record.raw' /tmp/dlq-record.json | base64 --decode > /tmp/dlq-payload.bin
 ```
 
@@ -151,23 +158,27 @@ The inspector prints the latest retained record under that prefix. Its JSON
 wrapper is **not** the application event. Inspect `reason_code`, fix the cause,
 and confirm the original bytes are valid before republishing. Corrupt Avro must
 be regenerated in the correct framed format; editing the DLQ JSON does not repair
-the event. For a valid original payload, an externally installed NATS CLI can
-publish the decoded binary bytes to the record's `original_subject`:
+the event. For a valid original payload, run the NATS CLI in a temporary container
+on the same backend network as the broker. The network is discovered from the
+current Compose broker, so the project name need not be hardcoded:
 
 ```bash
-nats --server nats://localhost:14222 pub --jetstream --force-stdin --no-templates \
+BROKER_NETWORK=$(docker inspect -f '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}' "$(docker compose ps -q broker)")
+NATS_URL=$(docker compose exec -T broker printenv NATS_URL)
+docker run --rm -i --network "$BROKER_NETWORK" natsio/nats-box:latest \
+  nats --server "$NATS_URL" pub --jetstream --force-stdin --no-templates \
   "$(jq -r '.record.original_subject' /tmp/dlq-record.json)" < /tmp/dlq-payload.bin
 ```
 
-Use your configured broker address, not the example blindly. Preserve the
-record's correlation ID with `-H 'X-Correlation-ID:the-record-id'` when present.
+These commands use the internal Compose broker address. Preserve the record's
+correlation ID with `-H 'X-Correlation-ID:the-record-id'` when present.
 Verify processing logs and resulting data: successful publishing alone does not
 prove recovery. Republishing reaches both subscribers and gets a new stream
 sequence, so transport deduplication cannot identify it as the old delivery.
 Business-record checks may suppress duplicate effects; replaying changed payloads
 under an existing hazard ID may instead halt an incompatible consumer. Lifecycle
 events retain their own event-ID/revision rules. A halted consumer may additionally
-need the authenticated resume operation described in
+need the local operator resume command described in
 [Consumer recovery](../docs/consumer-recovery.md) after fixing the cause.
 
 Republishing neither removes the DLQ record nor adds a recovery status. Records
@@ -217,7 +228,9 @@ Capture health panels and logs from an actual flow. For example, send a known ID
 to Client API `/ready`, using your explicitly configured host port:
 
 ```bash
-curl -i -H 'X-Correlation-ID: monitoring-evidence-001' http://localhost:18080/ready
+source scripts/demo-common.sh
+API_URL="http://localhost:$(demo_env_value "$DEMO_ROOT/.env" CLIENT_API_HOST_PORT)"
+curl -i -H 'X-Correlation-ID: monitoring-evidence-001' "$API_URL/ready"
 ```
 
 Search that ID in Grafana across Client API, Auth, and Aggregator. Separately

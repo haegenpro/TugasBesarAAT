@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,6 +29,7 @@ type session struct {
 type app struct {
 	input          *bufio.Reader
 	client         *http.Client
+	log            *slog.Logger
 	baseURL        string
 	session        session
 	previousAccess string
@@ -39,7 +42,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	a := &app{input: bufio.NewReader(os.Stdin), client: &http.Client{Timeout: 8 * time.Second}, baseURL: strings.TrimRight(baseURL, "/")}
+	a := &app{log: slog.New(slog.NewJSONHandler(os.Stderr, nil)), input: bufio.NewReader(os.Stdin), client: &http.Client{Timeout: 8 * time.Second}, baseURL: strings.TrimRight(baseURL, "/")}
 	a.run()
 }
 
@@ -117,6 +120,23 @@ func (a *app) pause() {
 }
 
 func (a *app) request(method, path string, payload any, access string) (int, []byte, error) {
+	return a.requestWithCorrelation(method, path, payload, access, rand.Text())
+}
+
+func (a *app) requestWithCorrelation(method, path string, payload any, access, cid string) (status int, data []byte, requestErr error) {
+	started := time.Now()
+	defer func() {
+		logger := a.log
+		if logger == nil {
+			logger = slog.Default()
+		}
+		endpoint := strings.SplitN(path, "?", 2)[0]
+		fields := []any{"service", "client-tui", "correlation_id", cid, "target_service", "client-api", "target_endpoint", endpoint, "method", method, "status_code", status, "latency_ms", time.Since(started).Milliseconds(), "success", requestErr == nil && status < 400}
+		if requestErr != nil {
+			fields = append(fields, "error", "request failed")
+		}
+		logger.Info("outbound call", fields...)
+	}()
 	var body io.Reader
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
@@ -135,22 +155,24 @@ func (a *app) request(method, path string, payload any, access string) (int, []b
 	if access != "" {
 		req.Header.Set("Authorization", "Bearer "+access)
 	}
+	req.Header.Set("X-Correlation-ID", cid)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	data, err = io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	return resp.StatusCode, data, err
 }
 
 func (a *app) protected(method, path string) (int, []byte, error) {
-	status, data, err := a.request(method, path, nil, a.session.AccessToken)
+	cid := rand.Text()
+	status, data, err := a.requestWithCorrelation(method, path, nil, a.session.AccessToken, cid)
 	if err != nil || status != http.StatusUnauthorized || a.session.RefreshToken == "" {
 		return status, data, err
 	}
 	oldAccess := a.session.AccessToken
-	refreshStatus, refreshData, refreshErr := a.request(http.MethodPost, "/auth/refresh", map[string]string{"refresh_token": a.session.RefreshToken}, "")
+	refreshStatus, refreshData, refreshErr := a.requestWithCorrelation(http.MethodPost, "/auth/refresh", map[string]string{"refresh_token": a.session.RefreshToken}, "", cid)
 	if refreshErr != nil {
 		return status, data, fmt.Errorf("auth service belum tersedia: %w", refreshErr)
 	}
@@ -168,7 +190,7 @@ func (a *app) protected(method, path string) (int, []byte, error) {
 	a.session = next
 	a.previousAccess = oldAccess
 	fmt.Println("Access token kedaluwarsa; token baru diterbitkan tanpa login ulang.")
-	return a.request(method, path, nil, a.session.AccessToken)
+	return a.requestWithCorrelation(method, path, nil, a.session.AccessToken, cid)
 }
 
 func (a *app) login(prefix string) {

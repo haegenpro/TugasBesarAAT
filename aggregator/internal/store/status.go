@@ -2,6 +2,7 @@ package store
 
 import (
 	"aggregator/internal/domain"
+	"aggregator/internal/middleware"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ func scanStatus(row pgx.Row) (domain.EndpointStatus, error) {
 const statusColumns = `endpoint,state,last_success,last_attempt,stale_since,next_attempt,failures,revision`
 
 func (s *Store) PollStatus(ctx context.Context, endpoint string) (domain.EndpointStatus, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	p, err := scanStatus(s.Pool.QueryRow(ctx, `SELECT `+statusColumns+` FROM source_poll_state WHERE endpoint=$1`, endpoint))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.EndpointStatus{Endpoint: endpoint, State: "unavailable"}, nil
@@ -25,6 +27,7 @@ func (s *Store) PollStatus(ctx context.Context, endpoint string) (domain.Endpoin
 	return p, err
 }
 func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success bool, interval, maxBackoff time.Duration) error {
+	ctx = middleware.WithCorrelationID(ctx, cid)
 	tx, err := s.sourceTx(ctx, "poll:"+endpoint)
 	if err != nil {
 		return err
@@ -120,6 +123,7 @@ func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success
 	return tx.Commit(ctx)
 }
 func (s *Store) Notices(ctx context.Context, state string) ([]domain.Notice, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	q := `SELECT payload FROM report_notices`
 	args := []any{}
 	if state == "" || state == "open" {
@@ -149,6 +153,7 @@ func (s *Store) Notices(ctx context.Context, state string) ([]domain.Notice, err
 	return out, rows.Err()
 }
 func (s *Store) Notice(ctx context.Context, id string) (domain.Notice, []domain.LifecycleEvent, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	var b []byte
 	var n domain.Notice
 	err := s.Pool.QueryRow(ctx, `SELECT payload FROM report_notices WHERE notice_id=$1`, id).Scan(&b)
@@ -181,6 +186,7 @@ func (s *Store) Notice(ctx context.Context, id string) (domain.Notice, []domain.
 	return n, out, rows.Err()
 }
 func (s *Store) Metadata(ctx context.Context, events []domain.HazardEvent) (map[string]domain.RecordMetadata, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	out := map[string]domain.RecordMetadata{}
 	if len(events) == 0 {
 		return out, nil
@@ -205,6 +211,7 @@ func (s *Store) Metadata(ctx context.Context, events []domain.HazardEvent) (map[
 	return out, rows.Err()
 }
 func (s *Store) DeliverLifecycle(ctx context.Context, publish func(context.Context, domain.LifecycleEvent) error) (bool, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -223,6 +230,7 @@ func (s *Store) DeliverLifecycle(ctx context.Context, publish func(context.Conte
 	if err = json.Unmarshal(b, &e); err != nil {
 		return true, err
 	}
+	ctx = middleware.WithCorrelationID(ctx, e.CorrelationID)
 	if err = publish(ctx, e); err != nil {
 		return true, err
 	}

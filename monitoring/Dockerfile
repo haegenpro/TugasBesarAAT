@@ -20,9 +20,9 @@ CMD ["-config.file=/tmp/monitoring/loki.yml"]
 FROM grafana/alloy:v1.20.1 AS alloy
 COPY --from=launcher /monitoring-launch /usr/local/bin/monitoring-launch
 ENTRYPOINT ["/usr/local/bin/monitoring-launch", "alloy", "/bin/alloy"]
-CMD ["run", "/tmp/monitoring/config.alloy", "--storage.path=/var/lib/alloy/data", "--server.http.listen-addr=0.0.0.0:12345"]
+CMD ["run", "/tmp/monitoring/config.alloy", "--storage.path=/var/lib/alloy/data"]
 
 FROM natsio/prometheus-nats-exporter:0.20.2 AS nats-exporter
 COPY --from=launcher /monitoring-launch /usr/local/bin/monitoring-launch
 ENTRYPOINT ["/usr/local/bin/monitoring-launch", "nats-exporter", "/usr/local/bin/prometheus-nats-exporter"]
-CMD ["-addr=0.0.0.0", "-port=7777", "-path=/metrics", "-varz", "-jsz=all"]
+CMD ["-addr=0.0.0.0", "-path=/metrics", "-varz", "-jsz=all"]

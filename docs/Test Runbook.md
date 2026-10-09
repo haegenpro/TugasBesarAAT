@@ -50,9 +50,12 @@ Keep failed runs as evidence; desired values and examples are not measured resul
 | k6 | load test | **not installed**: runs as `grafana/k6` container | same |
 | nats CLI | broker inspection | **not installed**: runs as `natsio/nats-box` container | same |
 
-Run everything from the repository root. The 16 per-service `.env` files (including five monitoring files) must
+Run everything from the repository root. The 14 per-service `.env` files (including three monitoring files) must
 exist (see README, "Per-service environment files"). The root `.env` must
-contain all seven host-port settings plus `GRAFANA_BIND_ADDRESS`. All service settings in `.env.example`
+contain the complete deployment port plan plus `GRAFANA_BIND_ADDRESS`; see
+[Port configuration](Port%20Configuration.md). Broker ports are internal only; use
+`docker compose exec` or the backend-network NATS helper below for operator
+inspection. No additional Compose file is needed. All service settings in `.env.example`
 are required; there are no configuration fallbacks. Startup is independent of
 external service availability. Consumer container health is liveness only;
 processing proofs use `/ready` and record/backlog checks.
@@ -74,7 +77,10 @@ for r in MEDIA FIELD INTERNAL; do
   eval "${r}_ID=\$(envget auth-service/.env ${r}_CLIENT_ID)"
   eval "${r}_SECRET=\$(envget auth-service/.env ${r}_CLIENT_SECRET)"
 done
-API=http://localhost:18080; BMKG=http://localhost:18081; PVMBG=http://localhost:18082
+API="http://localhost:$(envget .env CLIENT_API_HOST_PORT)"
+BMKG="http://localhost:$(envget .env BMKG_HOST_PORT)"
+PVMBG="http://localhost:$(envget .env PVMBG_HOST_PORT)"
+K6_API="http://host.docker.internal:$(envget .env CLIENT_API_HOST_PORT)"
 # NET is resolved when `nats` runs (the network only exists once the stack is up; see the nats helper)
 
 # ---- JSON helpers: jget <path>, jkeys <path>, jlen <path>, jfind <path> <field> <value> ----
@@ -106,15 +112,16 @@ code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }                       # s
 login(){ curl -s -X POST "$API/auth/login" -H 'Content-Type: application/json' \
          ${3:+-H "X-Correlation-ID: $3"} -d "{\"client_id\":\"$1\",\"client_secret\":\"$2\"}"; }
 hz(){ curl -s -H "Authorization: Bearer $1" "$API$2"; }                      # hz <token> </path>
-agg(){ docker compose exec -T aggregator wget -qO- "http://localhost:8080$1"; }   # internal API (not published)
-rec(){ docker compose exec -T "$1" wget -qO- "http://localhost:$2/records"; }     # rec <service> <port>
+agg(){ docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}$1"' sh "$1"; }   # internal API (not published)
+rec(){ docker compose exec -T "$1" sh -c 'wget -qO- "http://localhost:${CONSUMER_PORT:?}/records"'; } # rec <service>
 sql(){ echo "$1" | docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; }
-nats(){ local NET; NET=$(docker network ls --format '{{.Name}}' | grep '_backend$' | head -1); [ -n "$NET" ] || { echo "no *_backend network: is the stack up? (Phase 1.1)" >&2; return 1; }
-      docker run --rm --network "$NET" natsio/nats-box nats -s nats://broker:4222 "$@"; }
+nats(){ local NET BROKER_URL; NET=$(docker network ls --format '{{.Name}}' | grep '_backend$' | head -1); [ -n "$NET" ] || { echo "no *_backend network: is the stack up? (Phase 1.1)" >&2; return 1; }
+      BROKER_URL=$(docker compose exec -T broker printenv NATS_URL) || return
+      docker run --rm --network "$NET" natsio/nats-box nats -s "$BROKER_URL" "$@"; }
 started(){ docker inspect -f '{{.Name}} {{.State.StartedAt}}' $(docker compose ps -q); }  # container start times
 # Both mocks emit a new event every 10 s on their own, so tests follow one specific event instead of counting.
 latest(){ agg '/internal/hazards' | jget data.0.hazard_id; }                  # newest hazard in the Aggregator
-wait_has(){ for i in $(seq 1 30); do rec "$1" "$2" | grep -q "$3" && { echo "$1 has $3"; return 0; }; sleep 2; done; echo "$1 MISSING $3"; return 1; }   # wait_has <service> <port> <hazard_id>
+wait_has(){ for i in $(seq 1 30); do rec "$1" | grep -q "$2" && { echo "$1 has $2"; return 0; }; sleep 2; done; echo "$1 MISSING $2"; return 1; }   # wait_has <service> <hazard_id>
 ```
 
 **PowerShell** (Windows PowerShell 5.1 or PowerShell 7; no external tools):
@@ -131,7 +138,10 @@ $Creds = @{}
 foreach ($r in 'MEDIA','FIELD','INTERNAL') {
   $Creds[$r] = @{ id = Get-EnvVal auth-service/.env "${r}_CLIENT_ID"; secret = Get-EnvVal auth-service/.env "${r}_CLIENT_SECRET" }
 }
-$API = 'http://localhost:18080'; $BmkgUrl = 'http://localhost:18081'; $PvmbgUrl = 'http://localhost:18082'
+$API = "http://localhost:$(Get-EnvVal .env CLIENT_API_HOST_PORT)"
+$BmkgUrl = "http://localhost:$(Get-EnvVal .env BMKG_HOST_PORT)"
+$PvmbgUrl = "http://localhost:$(Get-EnvVal .env PVMBG_HOST_PORT)"
+$K6_API = "http://host.docker.internal:$(Get-EnvVal .env CLIENT_API_HOST_PORT)"
 $AdminH = @{ Authorization = "Bearer $PvmbgAdmin" }
 
 # ---- HTTP / stack helpers ----
@@ -144,17 +154,19 @@ function Login($id,$sec,$cid=$null){ $h=@{}; if($cid){$h['X-Correlation-ID']=$ci
     -Body (@{client_id=$id;client_secret=$sec}|ConvertTo-Json -Compress) }
 function Hz($tok,$path,$cid=$null){ $h=@{Authorization="Bearer $tok"}; if($cid){$h['X-Correlation-ID']=$cid}
   Invoke-RestMethod -Uri "$API$path" -Headers $h }
-function Agg($path){ docker compose exec -T aggregator wget -qO- "http://localhost:8080$path" | Out-String | ConvertFrom-Json }
-function Rec($svc,$port){ docker compose exec -T $svc wget -qO- "http://localhost:$port/records" | Out-String | ConvertFrom-Json }
+function Agg($path){ docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}$1"' sh $path | Out-String | ConvertFrom-Json }
+function Rec($svc){ docker compose exec -T $svc sh -c 'wget -qO- "http://localhost:${CONSUMER_PORT:?}/records"' | Out-String | ConvertFrom-Json }
 function Sql($q){ $q | docker compose exec -T postgres sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB' }
 function Nats { $net = docker network ls --format '{{.Name}}' | Where-Object { $_ -like '*_backend' } | Select-Object -First 1   # looked up per call: the network only exists once the stack is up
   if (-not $net) { Write-Error 'no *_backend network: is the stack up? (Phase 1.1)'; return }
-  docker run --rm --network $net natsio/nats-box nats -s nats://broker:4222 @args }
+  $brokerUrl = (docker compose exec -T broker printenv NATS_URL | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0) { Write-Error 'cannot read broker NATS_URL'; return }
+  docker run --rm --network $net natsio/nats-box nats -s $brokerUrl @args }
 function Started { docker inspect -f '{{.Name}} {{.State.StartedAt}}' (docker compose ps -q) }
 # Both mocks emit a new event every 10 s on their own, so tests follow one specific event instead of counting.
 function Latest { (Agg '/internal/hazards').data[0].hazard_id }             # newest hazard in the Aggregator
-function Wait-Has($svc,$port,$id){ for($i=0;$i -lt 30;$i++){                # Wait-Has <service> <port> <hazard_id>
-  if((Rec $svc $port).data.hazard_id -contains $id){ "$svc has $id"; return }; Start-Sleep 2 }; "$svc MISSING $id" }
+function Wait-Has($svc,$id){ for($i=0;$i -lt 30;$i++){                # Wait-Has <service> <hazard_id>
+  if((Rec $svc).data.hazard_id -contains $id){ "$svc has $id"; return }; Start-Sleep 2 }; "$svc MISSING $id" }
 ```
 
 **Desired state:** no output, no errors. Quick self-check:
@@ -784,14 +796,14 @@ references the consumers. **Criterion:** P5.1, P5.2.
 
 ```bash
 H0=$(latest); sleep 12; H=$(latest); echo "previous=$H0 new=$H"            # different: a new event arrived on its own
-wait_has consumer-dashboard 8091 "$H"; wait_has consumer-notifier 8092 "$H"
-CID=$(rec consumer-dashboard 8091 | jfind data hazard_id "$H" | jget 0.correlation_id); echo "correlation_id=$CID"
+wait_has consumer-dashboard "$H"; wait_has consumer-notifier "$H"
+CID=$(rec consumer-dashboard | jfind data hazard_id "$H" | jget 0.correlation_id); echo "correlation_id=$CID"
 docker compose logs aggregator 2>&1 | grep "$CID" | tail -3 | tee evidence/4.2-correlation.txt
 ```
 ```powershell
 $h0 = Latest; Start-Sleep 12; $h = Latest; "previous=$h0 new=$h"            # different: a new event arrived on its own
-Wait-Has consumer-dashboard 8091 $h; Wait-Has consumer-notifier 8092 $h
-$cid = ((Rec consumer-dashboard 8091).data | Where-Object hazard_id -eq $h).correlation_id; "correlation_id=$cid"
+Wait-Has consumer-dashboard $h; Wait-Has consumer-notifier $h
+$cid = ((Rec consumer-dashboard).data | Where-Object hazard_id -eq $h).correlation_id; "correlation_id=$cid"
 docker compose logs aggregator 2>&1 | Select-String $cid | Select-Object -Last 3 | Tee8 4.2-correlation.txt
 ```
 
@@ -808,7 +820,7 @@ Aggregator log (its poll and publish lines). A `MISSING` line is a failure.
 ```bash
 docker compose stop consumer-notifier
 sleep 25; MISSED=$(latest); echo "published while notifier is down: $MISSED"   # several events arrive in 25 s
-wait_has consumer-dashboard 8091 "$MISSED"                                      # dashboard not blocked
+wait_has consumer-dashboard "$MISSED"                                      # dashboard not blocked
 sql "SELECT count(*) AS outbox_pending FROM hazard_outbox;"                     # 0  (producer not stuck)
 docker compose ps --format '{{.Service}} {{.Health}}' | grep -E 'aggregator|dashboard'
 consreport | tee evidence/4.3-consumers-during.txt            # notifier-v1 Unprocessed > 0
@@ -817,7 +829,7 @@ docker compose logs aggregator --since 1m 2>&1 | grep -ci '"level":"error"'     
 ```powershell
 docker compose stop consumer-notifier
 Start-Sleep 25; $missed = Latest; "published while notifier is down: $missed"   # several events arrive in 25 s
-Wait-Has consumer-dashboard 8091 $missed                                         # dashboard not blocked
+Wait-Has consumer-dashboard $missed                                         # dashboard not blocked
 Sql "SELECT count(*) AS outbox_pending FROM hazard_outbox;"                      # 0
 docker compose ps --format '{{.Service}} {{.Health}}' | Select-String 'aggregator|dashboard'
 Consreport | Tee8 4.3-consumers-during.txt      # notifier-v1 Unprocessed > 0
@@ -837,14 +849,14 @@ broker keeps those events for its durable cursor. Keep `MISSED` / `$missed` for 
 
 ```bash
 docker compose start consumer-notifier
-until docker compose exec -T consumer-notifier wget -q --spider http://localhost:8092/ready; do sleep 2; done
-wait_has consumer-notifier 8092 "$MISSED"                                       # the event it missed is delivered
+until docker compose exec -T consumer-notifier sh -c 'wget -q --spider "http://localhost:${CONSUMER_PORT:?}/ready"'; do sleep 2; done
+wait_has consumer-notifier "$MISSED"                                       # the event it missed is delivered
 consreport | tee evidence/4.4-consumers-after.txt            # notifier-v1 Unprocessed back to 0 (or 1)
 ```
 ```powershell
 docker compose start consumer-notifier
-do { docker compose exec -T consumer-notifier wget -q --spider http://localhost:8092/ready; $readyExit = $LASTEXITCODE; if ($readyExit -ne 0) { Start-Sleep 2 } } until ($readyExit -eq 0)
-Wait-Has consumer-notifier 8092 $missed                                          # the event it missed is delivered
+do { docker compose exec -T consumer-notifier sh -c 'wget -q --spider "http://localhost:${CONSUMER_PORT:?}/ready"'; $readyExit = $LASTEXITCODE; if ($readyExit -ne 0) { Start-Sleep 2 } } until ($readyExit -eq 0)
+Wait-Has consumer-notifier $missed                                          # the event it missed is delivered
 Consreport | Tee8 4.4-consumers-after.txt
 ```
 
@@ -868,13 +880,13 @@ docker volume rm $(docker volume ls -q -f name=dashboard-demo-data) 2>/dev/null 
 docker compose --profile consumer-demo up -d --force-recreate consumer-dashboard-demo
 for i in $(seq 1 30); do                                    # bounded wait, max ~60 s
   st=not_ready
-  if docker compose exec -T consumer-dashboard-demo wget -q --spider http://localhost:8093/ready; then st=ready; break; fi
+  if docker compose exec -T consumer-dashboard-demo sh -c 'wget -q --spider "http://localhost:${CONSUMER_PORT:?}/ready"'; then st=ready; break; fi
   sleep 2
 done
 [ "$st" = ready ] || { echo "demo consumer NOT ready ($st):"; docker compose --profile consumer-demo logs --tail 5 consumer-dashboard-demo; }
 sleep 12; H=$(latest); echo "event published after the third consumer joined: $H"
-for s in "consumer-dashboard 8091" "consumer-notifier 8092" "consumer-dashboard-demo 8093"; do wait_has $s "$H"; done   # all three have it
-echo "demo consumer records: $(rec consumer-dashboard-demo 8093 | jget count)"                                          # history replayed
+for s in consumer-dashboard consumer-notifier consumer-dashboard-demo; do wait_has $s "$H"; done   # all three have it
+echo "demo consumer records: $(rec consumer-dashboard-demo | jget count)"                                          # history replayed
 started | grep -E 'aggregator' ; grep aggregator evidence/4.5-started-before.txt                                      # same StartedAt
 consreport
 ```
@@ -885,12 +897,12 @@ docker compose --profile consumer-demo rm -sf consumer-dashboard-demo
 docker volume ls -q -f name=dashboard-demo-data | ForEach-Object { docker volume rm $_ }
 docker compose --profile consumer-demo up -d --force-recreate consumer-dashboard-demo
 for ($i = 0; $i -lt 30; $i++) {                              # bounded wait, max ~60 s
-  $st = 'not_ready'; docker compose exec -T consumer-dashboard-demo wget -q --spider http://localhost:8093/ready
+  $st = 'not_ready'; docker compose exec -T consumer-dashboard-demo sh -c 'wget -q --spider "http://localhost:${CONSUMER_PORT:?}/ready"'
   if ($LASTEXITCODE -eq 0) { $st = 'ready'; break }; Start-Sleep 2 }
 if ($st -ne 'ready') { "demo consumer NOT ready ($st):"; docker compose --profile consumer-demo logs --tail 5 consumer-dashboard-demo }
 Start-Sleep 12; $h = Latest; "event published after the third consumer joined: $h"
-foreach ($s in @(@('consumer-dashboard',8091),@('consumer-notifier',8092),@('consumer-dashboard-demo',8093))) { Wait-Has $s[0] $s[1] $h }   # all three have it
-"demo consumer records: $((Rec consumer-dashboard-demo 8093).count)"                                              # history replayed
+foreach ($s in 'consumer-dashboard','consumer-notifier','consumer-dashboard-demo') { Wait-Has $s $h }   # all three have it
+"demo consumer records: $((Rec consumer-dashboard-demo).count)"                                              # history replayed
 Started | Select-String aggregator; Select-String aggregator evidence/4.5-started-before.txt                    # same StartedAt
 Consreport
 ```
@@ -930,7 +942,7 @@ docker compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}\t{{.Port
 ```
 
 **Desired state:** every component is its own container/image. Host-published ports are
-only `18080` (client-api), `18081`, `18082`, `14222/18222` (broker), `18084` (registry), and `127.0.0.1:13000` (Grafana) with the template settings. Host ports must be set in the root `.env`.
+only `18080` (client-api), `18081`, `18082`, and `127.0.0.1:13000` (Grafana) with the template settings. Broker and Schema Registry ports are internal only. Host ports must be set in the root `.env`.
 `postgres`, `aggregator`, `auth-service`, and both consumers publish **no** host port.
 
 ### 5.2 Stop, rebuild, restart ONE container, nothing else restarts (P4.1, part 2)
@@ -1112,19 +1124,19 @@ The Bash wrapper also saves JSON; use this instead of the direct Docker variant
 below when collecting the full evidence set:
 
 ```bash
-BASE_URL=http://host.docker.internal:18080 EVIDENCE_NAME=6.1-k6-mixed bash scripts/load-test.sh mixed 50 65s 2>&1 | tee evidence/6.1-k6-mixed.txt
+BASE_URL=$K6_API EVIDENCE_NAME=6.1-k6-mixed bash scripts/load-test.sh mixed 50 65s 2>&1 | tee evidence/6.1-k6-mixed.txt
 K6_EXIT=${PIPESTATUS[0]}; echo "k6 exit code: $K6_EXIT"
 ```
 
 ```bash
 # Git Bash: prefix with MSYS_NO_PATHCONV=1 so -v paths aren't mangled. Linux: add --add-host=host.docker.internal:host-gateway
 docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
-  -e BASE_URL=http://host.docker.internal:18080 -e MODE=mixed -e VUS=50 -e DURATION=65s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
+  -e BASE_URL=$K6_API -e MODE=mixed -e VUS=50 -e DURATION=65s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
   grafana/k6 run /scripts/load-test.js 2>&1 | tee evidence/6.1-k6-mixed.txt
 echo "k6 exit code: ${PIPESTATUS[0]}"
 ```
 ```powershell
-.\scripts\load-test.ps1 -Mode mixed -Vus 50 -Duration 65s -BaseUrl http://host.docker.internal:18080 -EvidenceName 6.1-k6-mixed 2>&1 | ForEach-Object { "$_" } | Tee8 6.1-k6-mixed.txt
+.\scripts\load-test.ps1 -Mode mixed -Vus 50 -Duration 65s -BaseUrl $K6_API -EvidenceName 6.1-k6-mixed 2>&1 | ForEach-Object { "$_" } | Tee8 6.1-k6-mixed.txt
 "k6 exit code: $LASTEXITCODE"
 ```
 
@@ -1165,18 +1177,18 @@ The workload is `constant-vus` for at least 60 s, with 50 ms think time.
 Bash wrapper alternative (saves JSON and prints the same summary):
 
 ```bash
-BASE_URL=http://host.docker.internal:18080 EVIDENCE_NAME=6.2-k6-sustained bash scripts/load-test.sh sustained 60 70s 2>&1 | tee evidence/6.2-k6-sustained.txt
+BASE_URL=$K6_API EVIDENCE_NAME=6.2-k6-sustained bash scripts/load-test.sh sustained 60 70s 2>&1 | tee evidence/6.2-k6-sustained.txt
 K6_EXIT=${PIPESTATUS[0]}; echo "k6 exit code: $K6_EXIT"
 ```
 
 ```bash
 docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
-  -e BASE_URL=http://host.docker.internal:18080 -e MODE=sustained -e VUS=60 -e DURATION=70s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
+  -e BASE_URL=$K6_API -e MODE=sustained -e VUS=60 -e DURATION=70s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
   grafana/k6 run /scripts/load-test.js 2>&1 | tee evidence/6.2-k6-sustained.txt
 docker compose ps --format '{{.Service}} {{.Status}}' | grep -v healthy || echo "NO CRASH"
 ```
 ```powershell
-.\scripts\load-test.ps1 -Mode sustained -Vus 60 -Duration 70s -BaseUrl http://host.docker.internal:18080 -EvidenceName 6.2-k6-sustained 2>&1 | ForEach-Object { "$_" } | Tee8 6.2-k6-sustained.txt
+.\scripts\load-test.ps1 -Mode sustained -Vus 60 -Duration 70s -BaseUrl $K6_API -EvidenceName 6.2-k6-sustained 2>&1 | ForEach-Object { "$_" } | Tee8 6.2-k6-sustained.txt
 docker compose ps --format '{{.Service}} {{.Health}}' | Where-Object { $_ -notmatch 'healthy' }     # => (nothing)
 ```
 
@@ -1216,7 +1228,7 @@ CAP_ORIG=$(envget client-api/.env CLIENT_API_MAX_INFLIGHT)
 sed -i.bak 's/^CLIENT_API_MAX_INFLIGHT=.*/CLIENT_API_MAX_INFLIGHT=5/' client-api/.env && rm -f client-api/.env.bak
 docker compose up -d --force-recreate --no-deps client-api; sleep 8
 docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
-  -e BASE_URL=http://host.docker.internal:18080 -e MODE=sustained -e VUS=300 -e DURATION=30s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
+  -e BASE_URL=$K6_API -e MODE=sustained -e VUS=300 -e DURATION=30s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
   -e PURPOSE=overload grafana/k6 run /scripts/load-test.js 2>&1 | tee evidence/6.2b-k6.txt
 K6_EXIT=${PIPESTATUS[0]}; echo "k6 exit code: $K6_EXIT"
 echo "health under saturation: $(code $API/health)"                               # 200
@@ -1229,7 +1241,7 @@ docker compose up -d --force-recreate --no-deps client-api
 $CapOrig = Get-EnvVal client-api/.env CLIENT_API_MAX_INFLIGHT
 (Get-Content client-api/.env) -replace '^CLIENT_API_MAX_INFLIGHT=.*','CLIENT_API_MAX_INFLIGHT=5' | Set-Content client-api/.env
 docker compose up -d --force-recreate --no-deps client-api; Start-Sleep 8
-.\scripts\load-test.ps1 -Mode sustained -Vus 300 -Duration 30s -BaseUrl http://host.docker.internal:18080 -Purpose overload -EvidenceName 6.2b-k6 2>&1 | ForEach-Object { "$_" } | Tee8 6.2b-k6.txt
+.\scripts\load-test.ps1 -Mode sustained -Vus 300 -Duration 30s -BaseUrl $K6_API -Purpose overload -EvidenceName 6.2b-k6 2>&1 | ForEach-Object { "$_" } | Tee8 6.2b-k6.txt
 "k6 exit code: $LASTEXITCODE"
 "health under saturation: $(Code "$API/health")"                                  # 200
 (docker compose logs client-api --since 2m 2>&1 | Select-String 'request rejected').Count     # > 0
@@ -1494,7 +1506,7 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 | 4.3 | `4.3.txt` **(missing)** | notifier stopped; dashboard has the event published during the stop; `outbox_pending = 0`; aggregator healthy, 0 errors; notifier Unprocessed above 0 |
 | 4.4 | `4.4.txt` | notifier prints `has <hazard_id>` for the event it missed; Unprocessed back to 0 (or briefly 1) (plain-ASCII `consreport` output) |
 | 4.5 | `4.5.txt`, `4.5-started-before.txt` **(per-consumer id comparison was missing)** | all three consumers print `has <hazard_id>` for the same new event; aggregator `StartedAt` unchanged |
-| 5.1 | `5.1.txt` | one image per component; only 18080/18081/18082/14222/18222/18084 and host-only Grafana 13000 published with the template settings |
+| 5.1 | `5.1.txt` | one image per component; only 18080/18081/18082 and host-only Grafana 13000 published; broker and Registry ports internal with the template settings |
 | 5.2 | `5.2.txt`, `5.2-started-before.txt`, `5.2-started-after.txt`, Terminal-A probe log (`5.2-probe.txt`) **(all missing)** | image ID of the notifier changes; only its `StartedAt` differs; probe prints `200 / 200` throughout. Capture Terminal A with `... \| tee evidence/5.2-probe.txt` / `\| Tee8 5.2-probe.txt`. |
 | 5.3 | `5.3.txt`, `5.3-side-by-side.txt` | `attributes` is `jsonb`; rows with and without `confidence_level`; no migration files |
 | 5.4 | `5.4.txt` **(missing)** | `store` network = postgres + aggregator only; others cannot resolve `postgres`; no host port |

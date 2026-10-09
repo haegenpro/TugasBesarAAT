@@ -611,7 +611,7 @@
           "type": "webhook",
           "disableResolveMessage": true,
           "settings": {
-            "url": "http://127.0.0.1:3000/api/health",
+            "url": {{quote (printf "http://127.0.0.1:%s/api/health" .GRAFANA_PORT)}},
             "httpMethod": "POST"
           }
         }

@@ -8,7 +8,7 @@ storage:
 scrape_configs:
   - job_name: prometheus
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: [{{quote (printf "localhost:%s" .PROMETHEUS_PORT)}}]
   - job_name: alloy
     metrics_path: {{quote (urlPath .ALLOY_METRICS_URL)}}
     static_configs:

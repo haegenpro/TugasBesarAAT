@@ -507,23 +507,17 @@ func (a *app) run(ctx context.Context) {
 			a.markReady()
 			started = time.Now()
 			batch, err := consumer.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
-			logOutbound(ctx, "consumer_fetch", "nats", 0, started, err)
 			if err != nil {
+				logOutbound(ctx, "consumer_fetch", "nats", 0, started, err)
 				slog.Warn("fetch failed", "service", a.cfg.Role, "error", err)
 				break
 			}
-			continueFetch := true
-			for msg := range batch.Messages() {
-				if !a.process(ctx, js, msg) {
-					continueFetch = false
-					break
-				}
-			}
-			if !continueFetch {
+			msg, batchErr := receiveFetch(ctx, batch, started)
+			if msg != nil && !a.process(ctx, js, msg) {
 				break
 			}
-			if err := batch.Error(); err != nil && !errors.Is(err, nats.ErrTimeout) && !errors.Is(err, jetstream.ErrNoMessages) {
-				slog.Warn("fetch batch failed", "service", a.cfg.Role, "error", err)
+			if batchErr != nil && !errors.Is(batchErr, nats.ErrTimeout) && !errors.Is(batchErr, jetstream.ErrNoMessages) {
+				slog.Warn("fetch batch failed", "service", a.cfg.Role, "error", batchErr)
 				break
 			}
 		}
@@ -591,7 +585,7 @@ func (a *app) router() http.Handler {
 		}
 		writeJSON(w, map[string]any{"data": items, "count": len(items)})
 	})
-	return mux
+	return a.httpRequestLog(mux)
 }
 
 func (a *app) serve(ctx context.Context) error {

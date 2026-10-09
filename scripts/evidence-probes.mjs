@@ -216,7 +216,7 @@ async function runtime() {
     const containers = snapshot();
     const health = await request(`${base}/health`);
     const tcp = compose(['exec', '-T', 'client-api', 'cat', '/proc/net/tcp', '/proc/net/tcp6']);
-    const port = Number(env('client-api/.env').CLIENT_API_PORT).toString(16).toUpperCase().padStart(4, '0');
+    const port = Number(compose(['exec', '-T', 'client-api', 'printenv', 'CLIENT_API_PORT']).trim()).toString(16).toUpperCase().padStart(4, '0');
     const connections = tcp.split('\n').filter(l => {
       const fields = l.trim().split(/\s+/); return fields[1]?.endsWith(`:${port}`) && fields[3] === '01';
     }).length;
@@ -253,7 +253,7 @@ async function trace() {
     check(Boolean(pair), `correlation ID shared by aggregator and ${service}`);
     const [cid, group] = pair;
     say(`correlation_id=${cid}; services=${[...new Set(group.map(r => r.service))].join(',')}`);
-    const calls = group.filter(r => r.msg === 'outbound call' && Number.isFinite(r.latency_ms));
+    const calls = group.filter(r => (r.message ?? r.msg) === 'outbound call' && Number.isFinite(r.latency_ms));
     check(calls.length > 0, `${cid}: outbound latency recorded`);
     for (const r of calls) say(`  ${r.service} -> ${r.target_service || r.operation || 'outbound'} latency_ms=${r.latency_ms}`);
     selected.push(...group);

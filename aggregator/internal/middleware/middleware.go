@@ -17,6 +17,29 @@ import (
 const CorrelationIDHeader = "X-Correlation-ID"
 const correlationIDKey = "correlation_id"
 
+type contextCorrelationIDKey struct{}
+
+func WithCorrelationID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return EnsureCorrelationID(ctx)
+	}
+	return context.WithValue(ctx, contextCorrelationIDKey{}, id)
+}
+
+func CorrelationFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(contextCorrelationIDKey{}).(string)
+	return id
+}
+
+// EnsureCorrelationID gives background operations their own trace while
+// preserving an existing request, poll, or event correlation ID.
+func EnsureCorrelationID(ctx context.Context) context.Context {
+	if CorrelationFromContext(ctx) != "" {
+		return ctx
+	}
+	return context.WithValue(ctx, contextCorrelationIDKey{}, uuid.NewString())
+}
+
 func CorrelationID() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cid := c.GetHeader(CorrelationIDHeader)
@@ -24,6 +47,7 @@ func CorrelationID() gin.HandlerFunc {
 			cid = uuid.NewString()
 		}
 		c.Set(correlationIDKey, cid)
+		c.Request = c.Request.WithContext(WithCorrelationID(c.Request.Context(), cid))
 		c.Writer.Header().Set(CorrelationIDHeader, cid)
 		c.Next()
 	}

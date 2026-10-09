@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -14,19 +15,29 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"aggregator/internal/domain"
+	"aggregator/internal/middleware"
 	"aggregator/internal/timeutil"
 )
 
 type Store struct {
-	Pool *pgxpool.Pool
+	Pool   *pgxpool.Pool
+	logger *slog.Logger
 }
 
-func New(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{Pool: pool}, nil
+	cfg.ConnConfig.Tracer = &sqlTracer{logger: logger}
+	pool, err := pgxpool.NewWithConfig(middleware.EnsureCorrelationID(ctx), cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{Pool: pool, logger: logger}, nil
 }
 
 func (s *Store) Close() {
@@ -34,11 +45,16 @@ func (s *Store) Close() {
 }
 
 func (s *Store) Ping(ctx context.Context) error {
-	return s.Pool.Ping(ctx)
+	ctx = middleware.EnsureCorrelationID(ctx)
+	started := time.Now()
+	err := s.Pool.Ping(ctx)
+	logSQL(s.logger, ctx, "ping", "", started, err)
+	return err
 }
 
 // CheckSchema applies idempotent lifecycle migrations before validating the canonical tables.
 func (s *Store) CheckSchema(ctx context.Context) error {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	if err := s.Migrate(ctx); err != nil {
 		return err
 	}
@@ -62,6 +78,7 @@ func (s *Store) CheckSchema(ctx context.Context) error {
 // observations only refresh last-seen metadata. Canonical initial snapshots
 // remain revision 1 in the original outbox.
 func (s *Store) SaveDedup(ctx context.Context, e domain.HazardEvent, correlationID string) (inserted bool, err error) {
+	ctx = middleware.WithCorrelationID(ctx, correlationID)
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -82,6 +99,7 @@ type OutboxEvent struct {
 // DeliverNext holds a row lock until publish is acknowledged. A failed publish
 // or interrupted transaction leaves the row pending for the next attempt.
 func (s *Store) DeliverNext(ctx context.Context, publish func(context.Context, OutboxEvent) error) (bool, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -105,6 +123,7 @@ func (s *Store) DeliverNext(ctx context.Context, publish func(context.Context, O
 		return false, err
 	}
 
+	ctx = middleware.WithCorrelationID(ctx, correlationID)
 	var hazard domain.HazardEvent
 	if err := json.Unmarshal(payload, &hazard); err != nil {
 		return true, err
@@ -151,6 +170,7 @@ const selectColumns = `hazard_id, source, source_ref_id, hazard_type, severity, 
 var ErrNotFound = errors.New("hazard not found")
 
 func (s *Store) GetByID(ctx context.Context, hazardID string) (domain.HazardEvent, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	row := s.Pool.QueryRow(ctx, `SELECT `+selectColumns+` FROM hazard_events WHERE hazard_id = $1`, hazardID)
 	e, err := scanRow(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -168,6 +188,7 @@ type Filters struct {
 
 // Query performs all filtering in SQL, not in memory.
 func (s *Store) Query(ctx context.Context, f Filters) ([]domain.HazardEvent, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
 	sql := `SELECT ` + selectColumns + ` FROM hazard_events WHERE 1=1`
 	args := []interface{}{}
 	n := 0

@@ -6,6 +6,8 @@ package store_test
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -25,7 +27,7 @@ func testStore(t *testing.T) *store.Store {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	s, err := store.New(ctx, url)
+	s, err := store.New(ctx, url, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	require.NoError(t, s.Ping(ctx))
 	require.NoError(t, s.CheckSchema(ctx))

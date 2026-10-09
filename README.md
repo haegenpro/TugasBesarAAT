@@ -12,7 +12,7 @@ an interactive downstream client, and two durable broker consumers.
 | PVMBG mock | [`pvmbg-mock/`](pvmbg-mock/) | 18082 | Simulated volcanic-activity source |
 | Aggregator | [`aggregator/`](aggregator/) | internal (8080) | Polls both mocks, maps to canonical `HazardEvent`, owns the Store, publishes to NATS, serves the internal read API |
 | Canonical Store | [`store/`](store/) | internal (5432) | PostgreSQL 16, accessed only by the Aggregator |
-| Schema Registry | [`registry/`](registry/) | 18084 | Apicurio Registry with its own persistent PostgreSQL database |
+| Schema Registry | [`registry/`](registry/) | internal (8080) | Apicurio Registry with its own persistent PostgreSQL database |
 | Auth Service | [`auth-service/`](auth-service/) | internal (8083) | Owns persistent sessions, issues and rotates tokens |
 | Client API | [`client-api/`](client-api/) | 18080 | Authenticated downstream reads and server-side field projection |
 | Client TUI | [`client-tui/`](client-tui/) | interactive | One terminal app for Media, Field, and Internal identities |
@@ -55,8 +55,8 @@ Blackbox container is required.
 
 Each monitoring image adds a small startup validator to its pinned official image.
 Missing/empty/whitespace-only required settings are reported together by name;
-there are no environment fallbacks. Create the five monitoring service `.env`
-files from their sections in `.env.example`, plus the root Grafana address/port.
+there are no environment fallbacks. Create the three monitoring service `.env`
+files from their sections in `.env.example`, plus the root deployment port plan.
 See [Monitoring setup and evidence](monitoring/README.md) for all required settings,
 access, retention, dashboard interpretation, and verification.
 
@@ -96,8 +96,9 @@ docs/             # Team contract docs (wire format, stack, deployment)
 
 ## Quick start: Docker Compose
 
-First, create the root `.env` with the six application host ports and the
-Grafana bind address and host port, then the sixteen service env files by hand.
+First, create root `.env` with the deployment port plan and Grafana bind address,
+then the fourteen service env files by hand. Shared listener ports and URLs are
+injected by Compose; see [Port configuration](docs/Port%20Configuration.md).
 Use the root `.env.example` together with the tables below, and copy into each file only
 the variables that service needs, including the shared ones the template
 points out. Then, from the repository root, run:
@@ -113,7 +114,7 @@ A few things are worth knowing about startup:
   Postgres and the tables from `store/init.sql` are ready, and queues events
   in the outbox until NATS is back. Its `/ready` endpoint reports store and
   broker availability.
-- The broker health check uses `NATS_URL` from `broker/.env` and passes only
+- The broker health check uses the Compose-injected `NATS_URL` and passes only
   once the stream is initialized and reachable. If you need to reapply the
   stream configuration, run
   `docker compose --profile tools run --rm broker-init`.
@@ -135,15 +136,45 @@ A few things are worth knowing about startup:
 - The Registry container keeps retrying if its database is absent. Its API
   and readiness probe remain unavailable until initialization succeeds.
   Set `REGISTRY_RETRY_DELAY_SEC` explicitly in `registry/.env` (example `5`).
-  See [Independent startup verification](docs/Independent%20Startup%20Verification.md).
+  See the [startup and independent restart procedure](docs/Test%20Runbook.md).
+
+For host-side commands below, load the configured host URLs once in each terminal.
+Bash (requires Python 3, like the demo scripts):
+
+```bash
+source scripts/demo-common.sh
+API_URL="http://localhost:$(demo_env_value "$DEMO_ROOT/.env" CLIENT_API_HOST_PORT)"
+BMKG_URL="http://localhost:$(demo_env_value "$DEMO_ROOT/.env" BMKG_HOST_PORT)"
+PVMBG_URL="http://localhost:$(demo_env_value "$DEMO_ROOT/.env" PVMBG_HOST_PORT)"
+K6_BASE_URL="http://host.docker.internal:$(demo_env_value "$DEMO_ROOT/.env" CLIENT_API_HOST_PORT)"
+```
+
+PowerShell:
+
+```powershell
+function Root-Port($key) {
+  $line = Get-Content .env | Where-Object { $_ -match "^\s*$key\s*=" } | Select-Object -First 1
+  if (-not $line) { throw "$key is required in root .env" }
+  $value = ($line -split '=',2)[1].Trim().Trim('"',"'")
+  if ($value -notmatch '^\d+$' -or [int]$value -lt 1 -or [int]$value -gt 65535) { throw "$key must be a valid port" }
+  return $value
+}
+$API_URL = "http://localhost:$(Root-Port CLIENT_API_HOST_PORT)"
+$BMKG_URL = "http://localhost:$(Root-Port BMKG_HOST_PORT)"
+$PVMBG_URL = "http://localhost:$(Root-Port PVMBG_HOST_PORT)"
+$K6_BASE_URL = "http://host.docker.internal:$(Root-Port CLIENT_API_HOST_PORT)"
+```
+
+These snippets target a stack running on this host. For a remote deployment, use
+the server's address in the host URLs or run the demo commands on that server.
 
 Once everything is healthy, these should all respond:
 
 ```bash
-curl http://localhost:18081/health   # {"status":"ok","service":"bmkg-mock"}
-curl http://localhost:18082/health   # {"status":"ok","service":"pvmbg-mock"}
-curl http://localhost:18080/health   # client-api
-curl http://localhost:18080/ready    # auth and aggregator readiness
+curl "${BMKG_URL}/health"   # {"status":"ok","service":"bmkg-mock"}
+curl "${PVMBG_URL}/health"   # {"status":"ok","service":"pvmbg-mock"}
+curl "${API_URL}/health"   # client-api
+curl "${API_URL}/ready"    # auth and aggregator readiness
 ```
 
 ### Per-service environment files
@@ -153,29 +184,28 @@ gitignored files yourself, each with just the variables its service needs:
 
 | File | Used by | Configuration |
 | --- | --- | --- |
-| `.env` | Compose | Required application host ports and Grafana address/port; copy only the root section |
-| `bmkg-mock/.env` | BMKG mock | Port, API key, delay, event interval, schema registry URL, archive path |
-| `pvmbg-mock/.env` | PVMBG mock | Port, source/admin tokens, delays, report interval, schema registry URL, archive path |
-| `broker/.env` | Broker and optional broker-init tool | NATS URL, streams, subjects, retention |
+| `.env` | Compose | Internal and published ports plus Grafana bind address; copy the root section |
+| `bmkg-mock/.env` | BMKG mock | API key, delay, event interval, archive path |
+| `pvmbg-mock/.env` | PVMBG mock | Source/admin tokens, delays, report interval, archive path |
+| `broker/.env` | Broker and optional broker-init tool | Streams, subjects, retention |
 | `store/.env` | PostgreSQL | Database name, user, password |
 | `registry/.env` | Schema Registry and its database | Separate database credentials and Apicurio storage settings |
-| `aggregator/.env` | Aggregator | Source URLs/credentials, database URL, NATS publication, schema registry URL, polling |
+| `aggregator/.env` | Aggregator | Source credentials, database URL, NATS stream settings, polling |
 | `auth-service/.env` | Auth Service | Three client credentials, internal key, TTLs, SQLite path |
-| `client-api/.env` | Client API | Port, Auth/Aggregator URLs, internal key |
-| `client-tui/.env` | Interactive TUI | API URL and public client IDs, no login secrets |
-| `consumer-dashboard/.env` | Dashboard consumer | Role, durable name, SQLite path, broker and registry URLs, DLQ subject |
-| `consumer-notifier/.env` | Notifier consumer | Role, durable name, SQLite path, broker and registry URLs, DLQ subject |
-| `monitoring/grafana/.env` | Grafana | Administrator credentials, data source URLs, and DLQ stream name |
-| `monitoring/prometheus/.env` | Prometheus | Required metrics retention and monitoring scrape URLs |
-| `monitoring/nats-exporter/.env` | NATS exporter | Required broker monitoring URL |
-| `monitoring/loki/.env` | Loki | Required log retention |
-| `monitoring/alloy/.env` | Alloy | Required metrics/log destinations and health/readiness target URLs |
+| `client-api/.env` | Client API | Internal key, request limits |
+| `client-tui/.env` | Interactive TUI | Public client IDs, no login secrets |
+| `consumer-dashboard/.env` | Dashboard consumer | Role, durable name, SQLite path, stream settings, DLQ subject |
+| `consumer-notifier/.env` | Notifier consumer | Role, durable name, SQLite path, stream settings, DLQ subject |
+| `monitoring/grafana/.env` | Grafana | Administrator credentials and DLQ stream name |
+| `monitoring/prometheus/.env` | Prometheus | Required metrics retention |
+| `monitoring/loki/.env` | Loki | Required log retention and private gRPC port |
 
 Some notes on how these files are used:
 
 - Compose passes the values in through `env_file`. It does not mount the
-  files, and `.dockerignore` keeps them out of the build context. The root `.env` supplies Compose host-port
-  mappings; it is not passed to the service processes.
+  files, and `.dockerignore` keeps them out of the build context. Compose uses root
+  ports to inject selected listeners and matching URLs; it never passes the entire
+  root `.env` to a container.
 - The secrets in `.env.example` are placeholders for demos. Put your real
   values in the service files.
 - Each value has to fit on one line. Use single quotes when the value
@@ -188,8 +218,8 @@ Several values appear in more than one file and must match:
   Aggregator.
 - The internal Auth key is in Auth and in the Client API.
 - The client IDs are in Auth and in the TUI.
-- The NATS URL, stream, and subject are in the Broker, the Aggregator, and
-  both consumers.
+- NATS streams and subjects match across Broker, Aggregator, and consumers.
+  Compose generates their NATS URLs from the root port plan.
 - The Aggregator's `DATABASE_URL` is built from the credentials in
   `store/.env`. URI-encode the user, password, or database name if they
   contain special characters.
@@ -207,22 +237,67 @@ must be set explicitly:
 | Client API | 18080 | `CLIENT_API_HOST_PORT` | 8080 |
 | BMKG | 18081 | `BMKG_HOST_PORT` | 8081 |
 | PVMBG | 18082 | `PVMBG_HOST_PORT` | 8082 |
-| Schema Registry | 18084 | `SCHEMA_REGISTRY_HOST_PORT` | 8080 |
-| NATS | 14222 | `NATS_HOST_PORT` | 4222 |
-| NATS monitoring | 18222 | `NATS_MONITOR_HOST_PORT` | 8222 |
+| Schema Registry | internal only | `SCHEMA_REGISTRY_PORT` controls its internal listener | 8080 |
+| NATS | internal only | No default host mapping | 4222 |
+| NATS monitoring | internal only | No default host mapping | 8222 |
 | Grafana | 13000 | `GRAFANA_HOST_PORT` (also requires `GRAFANA_BIND_ADDRESS`) | 3000 |
 
-Copy only the **root `.env` host ports** section of `.env.example` into a root `.env`, or export those variables in
+Copy the complete **root deployment ports** section of `.env.example` into a root `.env`, or export those variables in
 your shell. Compose uses these variables when creating containers; putting
-one in a service's `.env` does not change its published port. Compose refuses
+a duplicate managed port in a service's `.env` is overridden by Compose. Compose refuses
 to run if any of these settings is missing or empty. Do not copy the entire
 combined template into one file: it contains separate service credentials and repeated variable names.
 
-Keep `CLIENT_API_PORT=8080`, `BMKG_PORT=8081`, `PVMBG_PORT=8082` and the
-container URLs from `.env.example`. Containers have separate network
-namespaces, so the Aggregator, Client API and Registry can each listen on
-8080. Host commands in this README use the suggested host ports; adapt their
-URLs when you select other ports. Native source ports must also be explicitly set.
+### Broker access boundary
+
+Default Compose publishes neither NATS (`4222`) nor its monitoring API (`8222`).
+Downstream clients use Client API; the TUI belongs only to the `client` network,
+while the broker belongs only to `backend`. Aggregator, consumers, and NATS
+Exporter use internal Docker DNS and need no host mapping. The broker trusts
+members of the backend network; this is network isolation, not broker user/ACL
+authentication. Docker/host administrators can access that network.
+
+Schema Registry also belongs to the trusted backend network and publishes no
+host port. Source mocks and Aggregator register schemas over internal HTTP;
+consumers resolve schema IDs there. Its API trusts backend membership. Operators
+inspect schemas inside the running Registry container, using its configured port:
+
+```bash
+docker compose exec -T schema-registry sh -c \
+  'curl --fail --silent "http://127.0.0.1:${QUARKUS_HTTP_PORT:?}/apis/ccompat/v7/subjects"'
+```
+
+The schema-change, storage, and consumer demos use internal Registry access and
+continue to work without a host mapping.
+
+The broker image includes `publish-invalid` and `inspect-dlq`. Operators run
+them inside the existing container, using its Compose-injected connection settings:
+
+```bash
+docker compose exec -T broker inspect-dlq hazard.dlq.dashboard
+docker compose exec -T broker sh -c \
+  'wget -qO- "http://127.0.0.1:${NATS_MONITOR_PORT:?}/jsz?streams=true"'
+```
+
+Here `127.0.0.1` is inside the broker container, and the inner shell reads
+`NATS_MONITOR_PORT` from its environment. NATS itself reads `NATS_PORT` and
+`NATS_MONITOR_PORT` through variable references in `broker/nats.conf`. No broker port is published to
+the host, and no additional Compose file is needed. These commands require
+Docker/host operator access; downstream tokens do not authorize them. The DLQ
+inspector reports an error if no record exists under the supplied prefix.
+
+After updating from a configuration that published broker ports, rebuild and
+recreate only the broker to install the tools and remove the old mappings:
+
+```bash
+docker compose up -d --build --force-recreate broker
+```
+
+Change shared ports only in root `.env`. Compose updates listeners, published
+targets, service URLs, scrape targets, and probes together. Private Loki gRPC
+configuration stays in `monitoring/loki/.env`. See
+[Port configuration](docs/Port%20Configuration.md) for the full ownership table,
+database URL interpolation, migration, and native execution.
 
 To apply an env change, run `docker compose up -d --force-recreate` and
 restart the TUI if you have one open. You only need to rebuild images when
@@ -269,7 +344,7 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | --- | --- | --- |
 | `AGGREGATOR_PORT` | Internal HTTP port | `8080` |
 | `POLL_INTERVAL` | Polling interval in seconds (spec suggests 2 to 5) | `3` |
-| `BMKG_BASE_URL`, `PVMBG_BASE_URL` | Source URLs, use the Compose service URLs from `.env.example` | `http://bmkg-mock:8081`, `http://pvmbg-mock:8082` (Compose) |
+| `BMKG_BASE_URL`, `PVMBG_BASE_URL` | Source URLs generated by Compose from root ports | `http://bmkg-mock:8081`, `http://pvmbg-mock:8082` (Compose) |
 | `BMKG_API_KEY`, `PVMBG_TOKEN` | Source credentials, must match the mocks and differ from each other | Required |
 | `DATABASE_URL` | Canonical Store connection, must match `store/.env` | Required |
 | `NATS_URL` | Broker URL | `nats://broker:4222` (Compose) |
@@ -288,11 +363,12 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | `APICURIO_DATASOURCE_URL`, `APICURIO_DATASOURCE_USERNAME`, `APICURIO_DATASOURCE_PASSWORD` | Registry database connection, must match the `POSTGRES_*` values in `registry/.env` | Required |
 | `REGISTRY_RETRY_DELAY_SEC` | Registry supervisor delay after the child process exits (`registry/.env` only) | `5` |
 
-**`broker/.env`**
+**Broker process environment** (ports and URL injected from root `.env`; remaining settings in `broker/.env`)
 
 | Variable | Purpose | Example / required value |
 | --- | --- | --- |
-| `NATS_URL` | URL the stream initializer and health check connect to | Required |
+| `NATS_PORT`, `NATS_MONITOR_PORT` | Internal client and monitoring listener ports; distinct integers from 1 to 65535 | Required; examples `4222`, `8222` |
+| `NATS_URL` | URL the stream initializer and health check connect to; port must match `NATS_PORT` for the Compose broker | Required |
 | `NATS_STREAM`, `NATS_SUBJECT` | Main stream and its subject | Required |
 | `NATS_STREAM_MAX_AGE` | Main stream retention, for example `24h` | Required |
 | `NATS_DLQ_STREAM`, `NATS_DLQ_SUBJECT_PREFIX` | Dead-letter stream and subject prefix | Required |
@@ -325,7 +401,7 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | `BNPB_API_URL` | TUI destination URL | `http://localhost:18080` |
 | `MEDIA_CLIENT_ID`, `FIELD_CLIENT_ID`, `INTERNAL_CLIENT_ID` | Public client IDs shown by the TUI | Required |
 
-**`consumer-dashboard/.env`** and **`consumer-notifier/.env`** (all required)
+**Consumer process environment** (port and endpoint URLs injected by Compose; remaining settings in the consumer env files)
 
 | Variable | Purpose | Dashboard | Notifier |
 | --- | --- | --- | --- |
@@ -337,6 +413,10 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | `NATS_URL`, `NATS_STREAM`, `NATS_SUBJECT`, `NATS_DLQ_STREAM` | Same values as `broker/.env` | | |
 | `SCHEMA_REGISTRY_URL` | Registry for decoding events | | |
 | `NATS_LIFECYCLE_STREAM`, `NATS_LIFECYCLE_SUBJECT` | Same lifecycle values as `broker/.env` | | |
+
+Ports and endpoint URLs in the tables above describe each process's environment.
+For Compose deployment, keep those values in the root port plan; Compose generates
+the corresponding service environment. Native execution must export them explicitly.
 
 ### Client API and TUI
 
@@ -405,14 +485,14 @@ Aggregator's port is not published to the host.
 Run the smoke test to check most of this in one go:
 
 ```bash
-API_URL=http://localhost:18080 BMKG_URL=http://localhost:18081 PVMBG_URL=http://localhost:18082 \
+API_URL="${API_URL}" BMKG_URL="${BMKG_URL}" PVMBG_URL="${PVMBG_URL}" \
   scripts/smoke.sh --restart-auth --wait-for-expiry --test-outage
 ```
 
 On Windows, use PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage -ApiUrl http://localhost:18080 -BmkgUrl http://localhost:18081 -PvmbgUrl http://localhost:18082
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage -ApiUrl "${API_URL}" -BmkgUrl "${BMKG_URL}" -PvmbgUrl "${PVMBG_URL}"
 ```
 
 It checks institution credential isolation, the three client identities,
@@ -427,45 +507,31 @@ For k6, supply `BASE_URL`, `MODE`, `VUS`, `DURATION`, `CLIENT_ID`, and
 
 ## Standalone (non-Docker) run
 
-Each service reads its configuration from process environment variables. The
-Go services do not load `.env` files on their own outside Docker, so export
-the values you need before starting them, and use `localhost` URLs for
-anything running on the host. The Aggregator can start without Postgres or
-NATS and recovers once they appear. Starting the broker also initializes its
-JetStream stream.
+Go services read process environment directly. Export the complete variables in
+the per-service tables before starting a native process, including listener ports,
+credentials, storage paths and dependency URLs.
+
+Native execution needs separately managed PostgreSQL, JetStream and Apicurio
+endpoints reachable from those processes. The standard Compose broker and
+Registry have internal addresses and no host mappings. Set `NATS_URL` and
+`SCHEMA_REGISTRY_URL` to the endpoints of your native environment. Initialize
+the canonical database with `store/init.sql` and configure the broker initializer
+from the template.
+
+For example, with each terminal's service environment exported:
 
 ```bash
-# 1. Canonical Store
-docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=hazards \
-  -v $(pwd)/store/init.sql:/docker-entrypoint-initdb.d/init.sql postgres:16-alpine3.24
-
-# 2. NATS JetStream, including its stream initializer
-# Prepare broker/.env manually from the root template
-docker compose up -d broker
-
-# 3. BMKG mock
-(cd bmkg-mock && BMKG_PORT=8081 BMKG_API_KEY=devkey BMKG_DELAY_MS=100 \
-  BMKG_EVENT_INTERVAL_MS=10000 SOURCE_ARCHIVE_PATH=/tmp/bmkg-history.db \
-  SCHEMA_REGISTRY_URL=http://localhost:18084/apis/ccompat/v7 go run ./cmd/server) &
-
-# 4. PVMBG mock
-(cd pvmbg-mock && PVMBG_PORT=8082 PVMBG_TOKEN=devtoken PVMBG_ADMIN_TOKEN=devadmin \
-  PVMBG_MIN_DELAY_MS=500 PVMBG_MAX_DELAY_MS=3000 PVMBG_REPORT_INTERVAL_MS=10000 \
-  SOURCE_ARCHIVE_PATH=/tmp/pvmbg-history.db \
-  SCHEMA_REGISTRY_URL=http://localhost:18084/apis/ccompat/v7 go run ./cmd/server) &
-
-# 5. Aggregator
-cd aggregator && \
-  AGGREGATOR_PORT=8080 BMKG_API_KEY=devkey PVMBG_TOKEN=devtoken \
-  BMKG_BASE_URL=http://localhost:8081 PVMBG_BASE_URL=http://localhost:8082 \
-  POLL_INTERVAL=3 SOURCE_RETRY_MAX_SEC=60 BMKG_FRESHNESS_SEC=60 PVMBG_FRESHNESS_SEC=1800 \
-  NATS_STREAM=HAZARDS NATS_SUBJECT=hazard.events \
-  NATS_LIFECYCLE_STREAM=REPORT_LIFECYCLE NATS_LIFECYCLE_SUBJECT=report.lifecycle \
-  SCHEMA_REGISTRY_URL=http://localhost:18084/apis/ccompat/v7 \
-  DATABASE_URL=postgres://postgres:postgres@localhost:5432/hazards?sslmode=disable \
-  NATS_URL=nats://localhost:14222 \
-  go run ./cmd/server
+# Run each command in its own terminal.
+(cd broker && go run ./init)
+(cd bmkg-mock && go run ./cmd/server)
+(cd pvmbg-mock && go run ./cmd/server)
+(cd aggregator && go run ./cmd/server)
 ```
+
+Use unique listener ports for services sharing a host, and point caller URLs to
+those configured ports. Choose writable native SQLite paths instead of container
+paths such as `/data/history.db`. The main Compose deployment remains the standard
+path for the assignment demos.
 
 ## Running tests
 
@@ -516,9 +582,9 @@ warnings.
 ### Sample requests
 
 ```bash
-curl -H "X-BMKG-Key: devkey" http://localhost:18081/seismic-events | jq '.[0]'
-curl -H "X-BMKG-Key: devkey" "http://localhost:18081/seismic-events?since=2026-09-01T00:00:00Z"
-curl -H "X-BMKG-Key: devkey" http://localhost:18081/tsunami-warnings | jq '.[0]'
+curl -H "X-BMKG-Key: devkey" "${BMKG_URL}/seismic-events" | jq '.[0]'
+curl -H "X-BMKG-Key: devkey" "${BMKG_URL}/seismic-events?since=2026-09-01T00:00:00Z"
+curl -H "X-BMKG-Key: devkey" "${BMKG_URL}/tsunami-warnings" | jq '.[0]'
 ```
 
 The response is an array of objects with snake_case fields and UTC
@@ -574,17 +640,17 @@ has two admin toggles that the demos rely on.
 
 ```bash
 # Before toggle: confidence_level is absent
-curl -H "Authorization: Bearer devtoken" http://localhost:18082/volcanic-reports | jq '.[0]'
+curl -H "Authorization: Bearer devtoken" "${PVMBG_URL}/volcanic-reports" | jq '.[0]'
 
 # Toggle it on
-curl -X POST -H "Authorization: Bearer devadmin" http://localhost:18082/admin/schema-version
+curl -X POST -H "Authorization: Bearer devadmin" "${PVMBG_URL}/admin/schema-version"
 # => {"schema_version":"v2","confidence_level_visible":true}
 
 # After toggle: confidence_level now appears
-curl -H "Authorization: Bearer devtoken" http://localhost:18082/volcanic-reports | jq '.[0]'
+curl -H "Authorization: Bearer devtoken" "${PVMBG_URL}/volcanic-reports" | jq '.[0]'
 
 # Toggle back off
-curl -X POST -H "Authorization: Bearer devadmin" http://localhost:18082/admin/schema-version
+curl -X POST -H "Authorization: Bearer devadmin" "${PVMBG_URL}/admin/schema-version"
 # => {"schema_version":"v1","confidence_level_visible":false}
 ```
 
@@ -592,15 +658,15 @@ curl -X POST -H "Authorization: Bearer devadmin" http://localhost:18082/admin/sc
 
 ```bash
 # Enable outage
-curl -X POST -H "Authorization: Bearer devadmin" http://localhost:18082/admin/outage
+curl -X POST -H "Authorization: Bearer devadmin" "${PVMBG_URL}/admin/outage"
 # => {"outage":true}
 
 # Data endpoint now fails fast (503), health stays healthy
-curl -i -H "Authorization: Bearer devtoken" http://localhost:18082/volcanic-reports   # 503
-curl -i http://localhost:18082/health                                                 # 200
+curl -i -H "Authorization: Bearer devtoken" "${PVMBG_URL}/volcanic-reports"   # 503
+curl -i "${PVMBG_URL}/health"                                                 # 200
 
 # Clear outage
-curl -X POST -H "Authorization: Bearer devadmin" http://localhost:18082/admin/outage
+curl -X POST -H "Authorization: Bearer devadmin" "${PVMBG_URL}/admin/outage"
 # => {"outage":false}
 ```
 
@@ -791,9 +857,9 @@ publish the same event twice, which is why consumers deduplicate by
 | GET | `/ready` | none | Store and broker availability, `503` when the store is unavailable |
 
 ```bash
-docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards' | jq '.count'
-docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC&severity=SIAGA'
-docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards/<hazard-id>'
+docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards"' | jq '.count'
+docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards?hazard_type=VOLCANIC&severity=SIAGA"'
+docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards/<hazard-id>"'
 ```
 
 ---
@@ -919,13 +985,13 @@ each consumer env file needs `NATS_DLQ_STREAM` and its own
 ### Trying it out
 
 ```bash
-docker compose exec -T consumer-dashboard wget -qO- http://localhost:8091/records
-docker compose exec -T consumer-notifier wget -qO- http://localhost:8092/records
+docker compose exec -T consumer-dashboard sh -c 'wget -qO- "http://localhost:${CONSUMER_PORT:?}/records"'
+docker compose exec -T consumer-notifier sh -c 'wget -qO- "http://localhost:${CONSUMER_PORT:?}/records"'
 docker compose stop consumer-notifier
 # Both mocks emit a new event every 10 s, wait ~30 s and the dashboard keeps receiving them.
 docker compose start consumer-notifier
 docker compose --profile consumer-demo up -d consumer-dashboard-demo
-docker compose exec -T consumer-dashboard-demo wget -qO- http://localhost:8093/records
+docker compose exec -T consumer-dashboard-demo sh -c 'wget -qO- "http://localhost:${CONSUMER_PORT:?}/records"'
 ```
 
 While the notifier is stopped, the Aggregator keeps publishing and the
@@ -936,19 +1002,19 @@ change to the Aggregator. You can check both consumer modules with
 `go test ./...` from their directories.
 
 To show that one bad schema ID does not block later valid events, publish a
-message with a deliberately unknown ID from the broker module, then wait for
-the mocks to generate their next events:
+message with a deliberately unknown ID using the tool included in the broker
+image, then wait for the mocks to generate their next events. Run these operator
+commands from the repository root; no Go installation or broker host port is
+needed (`jq` on the host is used only to format the monitoring response):
 
 ```bash
-cd broker
-NATS_URL=nats://localhost:14222 NATS_SUBJECT=hazard.events go run ./cmd/publish-invalid
-cd ..
+docker compose exec -T broker publish-invalid
 docker compose logs consumer-dashboard consumer-notifier | grep 'message quarantined'
-curl -s 'http://localhost:18222/jsz?streams=true' | jq '[.account_details[].stream_detail[] | {name, messages: .state.messages}]'
-cd broker
-NATS_URL=nats://localhost:14222 NATS_DLQ_STREAM=HAZARDS_DLQ go run ./cmd/inspect-dlq hazard.dlq.dashboard
-NATS_URL=nats://localhost:14222 NATS_DLQ_STREAM=HAZARDS_DLQ go run ./cmd/inspect-dlq hazard.dlq.notifier
-cd ..
+docker compose exec -T broker sh -c \
+  'wget -qO- "http://127.0.0.1:${NATS_MONITOR_PORT:?}/jsz?streams=true"' | \
+  jq '[.account_details[].stream_detail[] | {name, messages: .state.messages}]'
+docker compose exec -T broker inspect-dlq hazard.dlq.dashboard
+docker compose exec -T broker inspect-dlq hazard.dlq.notifier
 ```
 
 The unknown ID is retried for at least five minutes before it is
@@ -982,17 +1048,17 @@ your own.
 ```bash
 sleep 8   # let a few poll cycles happen
 
-curl -H "X-BMKG-Key: changeme-bmkg-key" http://localhost:18081/seismic-events | jq 'length'
-curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:18082/volcanic-reports | jq 'length'
-docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards' | jq '.count, .data[0]'
+curl -H "X-BMKG-Key: changeme-bmkg-key" "${BMKG_URL}/seismic-events" | jq 'length'
+curl -H "Authorization: Bearer changeme-pvmbg-token" "${PVMBG_URL}/volcanic-reports" | jq 'length'
+docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards"' | jq '.count, .data[0]'
 ```
 
 You should see at least 20 seismic records from BMKG and at least 20
 volcanic reports from PVMBG, all of them available as canonical
 `HazardEvent`s from the Aggregator. Each mock adds one record every 10
 seconds, so the counts keep growing, and
-`docker compose logs aggregator | grep polled` shows `new_hazards` above
-zero.
+`docker compose logs aggregator | grep "outbound call"` shows source requests
+and successful publications as new hazards arrive.
 
 To see the publish acknowledgements, run
 `docker compose logs aggregator | grep "outbound call"` and look for the
@@ -1001,30 +1067,40 @@ subscriber. It receives binary Avro, which needs the registry schema to
 decode:
 
 ```bash
-docker run --rm --network tugasbesaraat_backend natsio/nats-box:latest \
-  nats sub -s nats://broker:4222 hazard.events
+BROKER_NETWORK=$(docker inspect -f '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}' "$(docker compose ps -q broker)")
+NATS_URL=$(docker compose exec -T broker printenv NATS_URL)
+NATS_SUBJECT=$(docker compose exec -T broker printenv NATS_SUBJECT)
+docker run --rm --network "$BROKER_NETWORK" natsio/nats-box:latest \
+  nats sub -s "$NATS_URL" "$NATS_SUBJECT"
 ```
 
 ### Demo B: PVMBG schema evolution
 
+Start with PVMBG on v1 (its initial state). With the full stack healthy and
+Node.js 18+ available, run from the repository root:
+
 ```bash
-curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:18082/volcanic-reports | jq '.[0] | has("confidence_level")'
-# => false
-
-curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" http://localhost:18082/admin/schema-version
-curl -H "Authorization: Bearer changeme-pvmbg-token" http://localhost:18082/volcanic-reports | jq '.[0] | has("confidence_level")'
-# => true
-
-sleep 5   # let the Aggregator's next poll cycle pick up the new shape
-
-docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | \
-  jq '.data[] | select(.source_ref_id == "rep-00001" or .source_ref_id == "rep-schema-00001") | {source_ref_id, attributes}'
+node scripts/evidence-probes.mjs schema --name schema
+node scripts/evidence-probes.mjs storage --name storage
 ```
 
-Nothing is restarted anywhere in this sequence. The two canonical rows have
-different source IDs. After the toggle, the Aggregator updates the reports
-it already had that now include `confidence_level`, and stores the new
-report with that attribute.
+The schema command reads connection settings and credentials from the local env
+files, verifies v1, then calls `POST /admin/schema-version`. It discovers the
+actual new `rep-schema-<timestamp>-<number>` ID and waits for that record to appear
+in the canonical API with `attributes.confidence_level`. It records the before/
+after container identities and column catalog, and checks that neither a restart
+nor a schema migration occurred. The storage command verifies that pre-change and
+post-change records coexist and remain readable. Keep their generated JSON and
+text files in `evidence/` for the report.
+
+The command fails if PVMBG is already on v2; first return it to v1 using the
+schema toggle, then rerun. It intentionally leaves PVMBG on v2 after success.
+For manual inspection, match the generated ID prefix rather than a fixed ID:
+
+```bash
+docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards?hazard_type=VOLCANIC"' | \
+  jq '.data[] | select(.source_ref_id == "rep-00001" or (.source_ref_id | startswith("rep-schema-"))) | {source_ref_id, attributes}'
+```
 
 If you also want to show a registry failure, stop the registry with
 `docker compose stop schema-registry`. A source that has already registered
@@ -1038,20 +1114,20 @@ its schema and the toggle works again.
 ### Demo C: PVMBG outage
 
 ```bash
-curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" http://localhost:18082/admin/outage
+curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" "${PVMBG_URL}/admin/outage"
 
-curl -i http://localhost:18082/health        # still 200
-curl -i http://localhost:18080/health        # still 200
-curl -H "X-BMKG-Key: changeme-bmkg-key" http://localhost:18081/seismic-events | jq 'length'   # unaffected
+curl -i "${PVMBG_URL}/health"        # still 200
+curl -i "${API_URL}/health"        # still 200
+curl -H "X-BMKG-Key: changeme-bmkg-key" "${BMKG_URL}/seismic-events" | jq 'length'   # unaffected
 
 sleep 5   # let the Aggregator notice PVMBG is down
-docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | jq '.source_status.PVMBG, .metadata'
+docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards?hazard_type=VOLCANIC"' | jq '.source_status.PVMBG, .metadata'
 
 docker compose logs aggregator | grep '"level":"warn"' | grep pvmbg
 
-curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" http://localhost:18082/admin/outage
+curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" "${PVMBG_URL}/admin/outage"
 sleep 5
-docker compose exec -T aggregator wget -qO- 'http://localhost:8080/internal/hazards?hazard_type=VOLCANIC' | jq '.source_status.PVMBG.state'
+docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards?hazard_type=VOLCANIC"' | jq '.source_status.PVMBG.state'
 # => "fresh", once the next successful poll verifies PVMBG
 ```
 
@@ -1066,7 +1142,7 @@ Edit the file and recreate the container instead:
 docker compose up -d --force-recreate pvmbg-mock
 
 for i in $(seq 1 20); do
-  /usr/bin/time -f "%e s" docker compose exec -T aggregator wget -qO /dev/null 'http://localhost:8080/internal/hazards?hazard_type=SEISMIC'
+  /usr/bin/time -f "%e s" docker compose exec -T aggregator sh -c 'wget -qO /dev/null "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards?hazard_type=SEISMIC"'
 done
 ```
 
@@ -1083,13 +1159,13 @@ taking 3 seconds, and asserts that the BMKG-only p95 stays under 300 ms.
 ### Demo E: institution credential isolation
 
 ```bash
-BMKG_URL=http://localhost:18081 PVMBG_URL=http://localhost:18082 scripts/isolation-demo.sh
+BMKG_URL="${BMKG_URL}" PVMBG_URL="${PVMBG_URL}" scripts/isolation-demo.sh
 ```
 
 On Windows, use PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1 -BmkgUrl http://localhost:18081 -PvmbgUrl http://localhost:18082
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1 -BmkgUrl "${BMKG_URL}" -PvmbgUrl "${PVMBG_URL}"
 ```
 
 The script prints one pass or fail line per probe:
@@ -1104,16 +1180,16 @@ It reads the credentials from the service env files and never prints them.
 ### Demo F: load test (k6 in Docker)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode sustained -Vus 60 -Duration 70s -BaseUrl http://host.docker.internal:18080
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode mixed -Vus 50 -Duration 65s -BaseUrl http://host.docker.internal:18080
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode sustained -Vus 60 -Duration 70s -BaseUrl "${K6_BASE_URL}"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode mixed -Vus 50 -Duration 65s -BaseUrl "${K6_BASE_URL}"
 ```
 
 On Linux, macOS or Git Bash use the shell twin, which takes the same options as
 positional arguments:
 
 ```bash
-BASE_URL=http://host.docker.internal:18080 scripts/load-test.sh sustained 60 70s
-BASE_URL=http://host.docker.internal:18080 scripts/load-test.sh mixed 50 65s
+BASE_URL="${K6_BASE_URL}" scripts/load-test.sh sustained 60 70s
+BASE_URL="${K6_BASE_URL}" scripts/load-test.sh mixed 50 65s
 ```
 
 In `mixed` mode both wrappers warn when `pvmbg-mock/.env` does not hold a 3000 ms
@@ -1137,7 +1213,7 @@ so this shows the request path does not depend on the slow PVMBG poller.
 
 Each VU logs in as Field and logs in again at 75% of the access token
 lifetime returned by Auth. The script needs Docker and reaches the Client
-API on host port 18080 through `host.docker.internal`.
+API on the configured `CLIENT_API_HOST_PORT` through `host.docker.internal`.
 
 ### Demo G: rebuild one service independently
 
@@ -1149,10 +1225,10 @@ docker compose ps   # note every uptime in the STATUS column
 docker compose stop pvmbg-mock
 
 # While it is down, requests that do not need it are still served.
-TOKEN=$(curl -s -X POST http://localhost:18080/auth/login -H 'Content-Type: application/json' \
+TOKEN=$(curl -s -X POST "${API_URL}/auth/login" -H 'Content-Type: application/json' \
   -d '{"client_id":"field-demo","client_secret":"replace-with-field-secret"}' | jq -r .access_token)
-curl -s -H "Authorization: Bearer $TOKEN" 'http://localhost:18080/hazards?hazard_type=SEISMIC' | jq '.count'
-curl -s -H "Authorization: Bearer $TOKEN" 'http://localhost:18080/hazards?hazard_type=VOLCANIC' | jq '.count, .source_status'
+curl -s -H "Authorization: Bearer $TOKEN" "${API_URL}/hazards?hazard_type=SEISMIC" | jq '.count'
+curl -s -H "Authorization: Bearer $TOKEN" "${API_URL}/hazards?hazard_type=VOLCANIC" | jq '.count, .source_status'
 
 docker compose build pvmbg-mock
 docker compose up -d --no-deps pvmbg-mock

@@ -9,5 +9,4 @@ FROM alpine:3.24
 RUN addgroup -S app && adduser -S app -G app
 COPY --from=build /client-api /usr/local/bin/client-api
 USER app
-EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/client-api"]

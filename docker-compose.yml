@@ -8,9 +8,12 @@ services:
     volumes:
       - ./broker/nats.conf:/etc/nats/nats.conf:ro
       - nats-data:/data
-    ports:
-      - "${NATS_HOST_PORT:?Set NATS_HOST_PORT in root .env or the shell}:4222"
-      - "${NATS_MONITOR_HOST_PORT:?Set NATS_MONITOR_HOST_PORT in root .env or the shell}:8222"
+    # No host ports: downstream clients access data through Client API only.
+    # Operators run broker tools with docker compose exec; no host mapping needed.
+    environment:
+      NATS_PORT: "${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
+      NATS_MONITOR_PORT: "${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}"
+      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/broker-ready && broker-init --check"]
       interval: 5s
@@ -27,15 +30,22 @@ services:
       - ./broker/.env
     profiles:
       - tools
+    environment:
+      NATS_PORT: "${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
+      NATS_MONITOR_PORT: "${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}"
+      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
     networks: [backend]
 
   postgres:
+    command: ["postgres", "-p", "${POSTGRES_PORT:?Set POSTGRES_PORT in root .env or the shell}"]
     image: postgres:16-alpine3.24
     env_file:
       - ./store/.env
     volumes:
       - ./store/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - postgres-data:/var/lib/postgresql/data
+    environment:
+      PGPORT: "${POSTGRES_PORT:?Set POSTGRES_PORT in root .env or the shell}"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
@@ -44,11 +54,14 @@ services:
     networks: [store]
 
   registry-db:
+    command: ["postgres", "-p", "${REGISTRY_DB_PORT:?Set REGISTRY_DB_PORT in root .env or the shell}"]
     image: postgres:16-alpine3.24
     env_file:
       - ./registry/.env
     volumes:
       - registry-data:/var/lib/postgresql/data
+    environment:
+      PGPORT: "${REGISTRY_DB_PORT:?Set REGISTRY_DB_PORT in root .env or the shell}"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
@@ -60,10 +73,12 @@ services:
     build: ./registry
     env_file:
       - ./registry/.env
-    ports:
-      - "${SCHEMA_REGISTRY_HOST_PORT:?Set SCHEMA_REGISTRY_HOST_PORT in root .env or the shell}:8080"
+    # Schema writes are trusted backend operations; no public registry port.
+    environment:
+      QUARKUS_HTTP_PORT: "${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}"
+      QUARKUS_MANAGEMENT_PORT: "${SCHEMA_REGISTRY_MANAGEMENT_PORT:?Set SCHEMA_REGISTRY_MANAGEMENT_PORT in root .env or the shell}"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:9000/health/ready"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:${SCHEMA_REGISTRY_MANAGEMENT_PORT:?Set SCHEMA_REGISTRY_MANAGEMENT_PORT in root .env or the shell}/health/ready"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -72,9 +87,12 @@ services:
   bmkg-mock:
     build: ./bmkg-mock
     volumes: [bmkg-history:/data]
-    ports: ["${BMKG_HOST_PORT:?Set BMKG_HOST_PORT in root .env or the shell}:8081"]
+    ports: ["${BMKG_HOST_PORT:?Set BMKG_HOST_PORT in root .env or the shell}:${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}"]
     env_file:
       - ./bmkg-mock/.env
+    environment:
+      BMKG_PORT: "${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$BMKG_PORT/health\""]
       interval: 5s
@@ -85,9 +103,12 @@ services:
   pvmbg-mock:
     build: ./pvmbg-mock
     volumes: [pvmbg-history:/data]
-    ports: ["${PVMBG_HOST_PORT:?Set PVMBG_HOST_PORT in root .env or the shell}:8082"]
+    ports: ["${PVMBG_HOST_PORT:?Set PVMBG_HOST_PORT in root .env or the shell}:${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}"]
     env_file:
       - ./pvmbg-mock/.env
+    environment:
+      PVMBG_PORT: "${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$PVMBG_PORT/health\""]
       interval: 5s
@@ -99,6 +120,12 @@ services:
     build: ./aggregator
     env_file:
       - ./aggregator/.env
+    environment:
+      AGGREGATOR_PORT: "${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}"
+      BMKG_BASE_URL: "http://bmkg-mock:${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}"
+      PVMBG_BASE_URL: "http://pvmbg-mock:${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}"
+      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$AGGREGATOR_PORT/health\""]
       interval: 5s
@@ -112,6 +139,8 @@ services:
       - ./auth-service/.env
     volumes:
       - auth-data:/data
+    environment:
+      AUTH_PORT: "${AUTH_PORT:?Set AUTH_PORT in root .env or the shell}"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$AUTH_PORT/health\""]
       interval: 5s
@@ -121,9 +150,13 @@ services:
 
   client-api:
     build: ./client-api
-    ports: ["${CLIENT_API_HOST_PORT:?Set CLIENT_API_HOST_PORT in root .env or the shell}:8080"]
+    ports: ["${CLIENT_API_HOST_PORT:?Set CLIENT_API_HOST_PORT in root .env or the shell}:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}"]
     env_file:
       - ./client-api/.env
+    environment:
+      CLIENT_API_PORT: "${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}"
+      AUTH_BASE_URL: "http://auth-service:${AUTH_PORT:?Set AUTH_PORT in root .env or the shell}"
+      AGGREGATOR_BASE_URL: "http://aggregator:${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$CLIENT_API_PORT/health\""]
       interval: 5s
@@ -138,6 +171,8 @@ services:
     tty: true
     env_file:
       - ./client-tui/.env
+    environment:
+      BNPB_API_URL: "http://client-api:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}"
     networks: [client]
 
   consumer-dashboard:
@@ -146,6 +181,10 @@ services:
       - ./consumer-dashboard/.env
     volumes:
       - dashboard-data:/data
+    environment:
+      CONSUMER_PORT: "${DASHBOARD_PORT:?Set DASHBOARD_PORT in root .env or the shell}"
+      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$CONSUMER_PORT/health\""]
       interval: 5s
@@ -159,6 +198,10 @@ services:
       - ./consumer-notifier/.env
     volumes:
       - notifier-data:/data
+    environment:
+      CONSUMER_PORT: "${NOTIFIER_PORT:?Set NOTIFIER_PORT in root .env or the shell}"
+      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$CONSUMER_PORT/health\""]
       interval: 5s
@@ -172,14 +215,16 @@ services:
     env_file:
       - ./consumer-dashboard/.env
     environment:
+      CONSUMER_PORT: "${DEMO_CONSUMER_PORT:?Set DEMO_CONSUMER_PORT in root .env or the shell}"
+      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
       NATS_DURABLE: dashboard-demo-v1
-      CONSUMER_PORT: "8093"
       CONSUMER_DB_PATH: /data/demo.db
       NATS_DLQ_SUBJECT: hazard.dlq.dashboard-demo
     volumes:
       - dashboard-demo-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:8093/health"]
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:$$CONSUMER_PORT/health"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -189,9 +234,11 @@ services:
     build:
       context: ./monitoring
       target: nats-exporter
-    env_file: [./monitoring/nats-exporter/.env]
+    environment:
+      NATS_EXPORTER_PORT: "${NATS_EXPORTER_PORT:?Set NATS_EXPORTER_PORT in root .env or the shell}"
+      NATS_MONITOR_URL: "http://broker:${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}"
     healthcheck:
-      test: ["CMD", "monitoring-launch", "probe", "http://localhost:7777/metrics"]
+      test: ["CMD", "monitoring-launch", "probe", "http://localhost:${NATS_EXPORTER_PORT:?Set NATS_EXPORTER_PORT in root .env or the shell}/metrics"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -203,21 +250,24 @@ services:
       target: grafana
     env_file: [./monitoring/grafana/.env]
     environment:
+      GRAFANA_PORT: "${GRAFANA_PORT:?Set GRAFANA_PORT in root .env or the shell}"
+      GF_SERVER_HTTP_PORT: "${GRAFANA_PORT:?Set GRAFANA_PORT in root .env or the shell}"
+      PROMETHEUS_URL: "http://prometheus:${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}"
+      LOKI_URL: "http://loki:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}"
       GRAFANA_BIND_ADDRESS: "${GRAFANA_BIND_ADDRESS:?Set GRAFANA_BIND_ADDRESS in root .env or the shell}"
       GRAFANA_HOST_PORT: "${GRAFANA_HOST_PORT:?Set GRAFANA_HOST_PORT in root .env or the shell}"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_SERVER_HTTP_ADDR: "0.0.0.0"
-      GF_SERVER_HTTP_PORT: "3000"
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_PLUGINS_PREINSTALL_DISABLED: "true"
     ports:
-      - "${GRAFANA_BIND_ADDRESS:?Set GRAFANA_BIND_ADDRESS in root .env or the shell}:${GRAFANA_HOST_PORT:?Set GRAFANA_HOST_PORT in root .env or the shell}:3000"
+      - "${GRAFANA_BIND_ADDRESS:?Set GRAFANA_BIND_ADDRESS in root .env or the shell}:${GRAFANA_HOST_PORT:?Set GRAFANA_HOST_PORT in root .env or the shell}:${GRAFANA_PORT:?Set GRAFANA_PORT in root .env or the shell}"
     volumes:
       - ./monitoring/templates:/etc/monitoring/templates:ro
       - grafana-data:/var/lib/grafana
     healthcheck:
-      test: ["CMD", "monitoring-launch", "probe", "http://localhost:3000/api/health"]
+      test: ["CMD", "monitoring-launch", "probe", "http://localhost:${GRAFANA_PORT:?Set GRAFANA_PORT in root .env or the shell}/api/health"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -232,8 +282,13 @@ services:
     volumes:
       - ./monitoring/templates:/etc/monitoring/templates:ro
       - prometheus-data:/prometheus
+    environment:
+      PROMETHEUS_PORT: "${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}"
+      ALLOY_METRICS_URL: "http://alloy:${ALLOY_PORT:?Set ALLOY_PORT in root .env or the shell}/metrics"
+      LOKI_METRICS_URL: "http://loki:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}/metrics"
+      NATS_EXPORTER_METRICS_URL: "http://nats-exporter:${NATS_EXPORTER_PORT:?Set NATS_EXPORTER_PORT in root .env or the shell}/metrics"
     healthcheck:
-      test: ["CMD", "monitoring-launch", "probe", "http://localhost:9090/-/ready"]
+      test: ["CMD", "monitoring-launch", "probe", "http://localhost:${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}/-/ready"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -247,8 +302,10 @@ services:
     volumes:
       - ./monitoring/templates:/etc/monitoring/templates:ro
       - loki-data:/loki
+    environment:
+      LOKI_PORT: "${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}"
     healthcheck:
-      test: ["CMD", "monitoring-launch", "probe", "http://localhost:3100/ready"]
+      test: ["CMD", "monitoring-launch", "probe", "http://localhost:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}/ready"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -259,15 +316,30 @@ services:
     build:
       context: ./monitoring
       target: alloy
-    env_file: [./monitoring/alloy/.env]
     environment:
+      ALLOY_PORT: "${ALLOY_PORT:?Set ALLOY_PORT in root .env or the shell}"
+      PROMETHEUS_WRITE_URL: "http://prometheus:${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}/api/v1/write"
+      LOKI_PUSH_URL: "http://loki:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}/loki/api/v1/push"
+      BMKG_HEALTH_URL: "http://bmkg-mock:${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}/health"
+      PVMBG_HEALTH_URL: "http://pvmbg-mock:${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}/health"
+      AGGREGATOR_HEALTH_URL: "http://aggregator:${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}/health"
+      AGGREGATOR_READY_URL: "http://aggregator:${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}/ready"
+      AUTH_HEALTH_URL: "http://auth-service:${AUTH_PORT:?Set AUTH_PORT in root .env or the shell}/health"
+      CLIENT_API_HEALTH_URL: "http://client-api:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}/health"
+      CLIENT_API_READY_URL: "http://client-api:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}/ready"
+      DASHBOARD_HEALTH_URL: "http://consumer-dashboard:${DASHBOARD_PORT:?Set DASHBOARD_PORT in root .env or the shell}/health"
+      DASHBOARD_READY_URL: "http://consumer-dashboard:${DASHBOARD_PORT:?Set DASHBOARD_PORT in root .env or the shell}/ready"
+      NOTIFIER_HEALTH_URL: "http://consumer-notifier:${NOTIFIER_PORT:?Set NOTIFIER_PORT in root .env or the shell}/health"
+      NOTIFIER_READY_URL: "http://consumer-notifier:${NOTIFIER_PORT:?Set NOTIFIER_PORT in root .env or the shell}/ready"
+      REGISTRY_READY_URL: "http://schema-registry:${SCHEMA_REGISTRY_MANAGEMENT_PORT:?Set SCHEMA_REGISTRY_MANAGEMENT_PORT in root .env or the shell}/health/ready"
+      NATS_HEALTH_URL: "http://broker:${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}/healthz"
       COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:?Compose project name must be resolved}"
     volumes:
       - ./monitoring/templates:/etc/monitoring/templates:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - alloy-data:/var/lib/alloy/data
     healthcheck:
-      test: ["CMD", "monitoring-launch", "probe", "http://localhost:12345/-/ready"]
+      test: ["CMD", "monitoring-launch", "probe", "http://localhost:${ALLOY_PORT:?Set ALLOY_PORT in root .env or the shell}/-/ready"]
       interval: 15s
       timeout: 5s
       retries: 3

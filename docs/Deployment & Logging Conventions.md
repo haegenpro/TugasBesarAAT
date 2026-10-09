@@ -1,238 +1,125 @@
-# Deployment & Logging Conventions Spec
+# Deployment and logging conventions
 
-2026-09-20 · @Someone
+Verified against the implemented stack on 2026-10-09.
 
-## Overview
+## Deployment topology
 
-This document fixes the deployment topology and observability conventions the M1 spec requires (Ketentuan Implementasi #3 and #7) but leaves open: how the docker-compose skeleton is shaped, and how correlation IDs and structured logs work across services written in different languages. Agree on this once, in Phase 0, before splitting into individual problems — changing it later means touching every service.
+[docker-compose.yml](../docker-compose.yml) is the executable deployment
+definition. Listener and host ports are supplied through root `.env`.
+The table shows template values; all internal ports remain configurable.
 
-**Applies to:** whoever writes each service's Dockerfile and app entrypoint, in any language. Examples given in Go and Python as the team's minimum baseline.
-
-## docker-compose skeleton
-
-| Service | Container port | Owner | Notes |
-| --- | --- | --- | --- |
-| `bmkg` | 8081 | Person A | mock, fixed contract |
-| `pvmbg` | 8082 | Person A | mock, fixed contract |
-| `aggregator` | internal only | Person A (P1), Person B (P2) | polls bmkg + pvmbg, publishes to broker |
-| `canonical-store` | internal only | Person B | accessed only by `aggregator` (spec rule) |
-| `client-api` | 8080 | Person B / Person C | client-facing, reads via `aggregator`'s API |
-| `auth-service` | internal only | Person C | issues/validates tokens; own container so it can be restarted independently for P4's proof |
-| `broker` | internal only | Person C | Kafka/RabbitMQ/NATS — placeholder now, pick concrete image once P5 starts |
-| `consumer-dashboard`, `consumer-notifier` | internal only | Person C | ≥ 2 independent subscribers required by P5 |
-
-```yaml
-services:
-  bmkg:
-    build: ./services/bmkg
-    ports: ["${BMKG_HOST_PORT:?Set BMKG_HOST_PORT in root .env or the shell}:8081"]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
-      interval: 5s
-      retries: 5
-
-  pvmbg:
-    build: ./services/pvmbg
-    ports: ["${PVMBG_HOST_PORT:?Set PVMBG_HOST_PORT in root .env or the shell}:8082"]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
-      interval: 5s
-      retries: 5
-
-  aggregator:
-    build: ./services/aggregator
-    env_file: .env
-
-  canonical-store:
-    image: mongo:7   # or postgres:16 if using JSONB — pick in P4
-
-  client-api:
-    build: ./services/client-api
-    ports: ["${CLIENT_API_HOST_PORT:?Set CLIENT_API_HOST_PORT in root .env or the shell}:8080"]
-
-  auth-service:
-    build: ./services/auth-service
-
-  broker:
-    image: bitnami/kafka:latest   # placeholder — confirm choice before P5
-
-  consumer-dashboard:
-    build: ./services/consumer-dashboard
-
-  consumer-notifier:
-    build: ./services/consumer-notifier
-```
-
-Each service reaches others by **compose service name** (`http://pvmbg:8082`), never hardcoded IPs — this also means the same compose file works identically whether a service is written in Go or Python.
-
-## Environment variables & .env.example
-
-One `.env.example` at the repo root, prefixed by service so there's no ambiguity about ownership:
-
-```env
-# BMKG
-BMKG_PORT=8081
-BMKG_API_KEY=changeme-bmkg-key
-
-# PVMBG
-PVMBG_PORT=8082
-PVMBG_TOKEN_SECRET=changeme-pvmbg-secret
-PVMBG_DELAY_MIN_MS=500
-PVMBG_DELAY_MAX_MS=3000
-
-# Aggregator
-AGGREGATOR_POLL_INTERVAL_SEC=3
-AGGREGATOR_LOG_LEVEL=info
-
-# Client API / Auth
-CLIENT_API_PORT=8080
-ACCESS_TOKEN_TTL_SEC=60
-JWT_SIGNING_KEY=changeme-jwt-key
-
-# Broker
-BROKER_URL=kafka://broker:9092
-```
-
-Rules:
-
-- Every variable a service reads must appear here with a placeholder value — spec requirement, and it's how graders (and teammates) know what to configure
-- No real secrets committed, ever — only `.env.example` is committed, `.env` itself is gitignored
-- Both Go (`os.Getenv`, or `godotenv` for local dev) and Python (`os.environ`, or `python-dotenv`) read this identically since it's plain `KEY=value` — no language-specific format needed
-
-## Health checks and independent startup
-
-Project HTTP services expose `GET /health` returning `200 OK` when their own listener and required local storage are working:
-
-```json
-{ "status": "ok", "service": "pvmbg" }
-```
-
-- Do not gate startup with `depends_on` or wait for external services before starting local listeners. A service with valid configuration starts on its own and retries unavailable dependencies in the background.
-- `/health` checks local operation. `/ready` checks dependency availability and processing state where supported. Consumer Compose probes use `/health`; readiness can be 503 while their containers are healthy. PVMBG outage mode can leave `/health` at 200 while data endpoints return 503.
-- Each service must survive being stopped/restarted alone without crashing its dependents. Test actual absence at startup and recovery after dependencies return.
-- Registry uses the SQL-only supervisor described in `registry/README.md`. It stays running while Apicurio initializes or retries after an exit. Its API and management readiness probe can remain unreachable until its owned database appears; Compose reports readiness separately.
-
-## Correlation ID propagation
-
-**Header name:** `X-Correlation-ID` on every inbound and outbound HTTP call.
-
-**Who generates it:** the `client-api` service generates a new UUIDv4 if an inbound request arrives without one; the `aggregator` generates its own per polling cycle (it has no inbound client request to inherit an ID from). Every downstream call made while handling that request/cycle must forward the same ID.
-
-**Go (net/http middleware):**
-
-```go
-func CorrelationID(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cid := r.Header.Get("X-Correlation-ID")
-		if cid == "" {
-			cid = uuid.NewString()
-		}
-		ctx := context.WithValue(r.Context(), correlationIDKey, cid)
-		w.Header().Set("X-Correlation-ID", cid)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-```
-
-**Python (FastAPI/Flask middleware):**
-
-```python
-import uuid
-from contextvars import ContextVar
-
-correlation_id: ContextVar[str] = ContextVar("correlation_id", default="")
-
-async def correlation_id_middleware(request, call_next):
-    cid = request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
-    correlation_id.set(cid)
-    response = await call_next(request)
-    response.headers["X-Correlation-ID"] = cid
-    return response
-```
-
-When calling another service, always forward the current correlation ID as an outgoing header — this is what makes it possible to grep one correlation ID across all three services' logs for the report's evidence requirement.
-
-## Structured logging format
-
-One JSON object per log line, same field names regardless of language:
-
-```json
-{"timestamp":"2026-09-20T14:32:07.123Z","service":"aggregator","correlation_id":"a1b2c3d4-...","level":"info","message":"polled pvmbg","latency_ms":842}
-```
-
-| Field | Required | Notes |
+| Component | Internal port | Storage owner / exposure |
 | --- | --- | --- |
-| `timestamp` | yes | ISO 8601 UTC, same format as HazardEvent fields |
-| `service` | yes | matches the compose service name |
-| `correlation_id` | yes when in a request/poll flow | empty string if genuinely none (e.g. startup logs) |
-| `level` | yes | `debug` / `info` / `warn` / `error` |
-| `message` | yes | human-readable, short |
-| `latency_ms` | when logging an outbound call | see next section |
+| BMKG mock | 8081 | Source SQLite archive; authenticated data API published |
+| PVMBG mock | 8082 | Source SQLite archive; separately authenticated data/admin API published |
+| Aggregator | 8080 | Exclusive owner of canonical PostgreSQL; internal API |
+| Canonical PostgreSQL | 5432 | Storage network shared only with Aggregator; no host port |
+| Auth Service | 8083 | Session SQLite; internal token API |
+| Client API | 8080 | Public downstream HTTP entry point; reads through Aggregator |
+| Broker | 4222 / 8222 | NATS JetStream file storage and monitoring API; internal |
+| Dashboard / Notifier | 8091 / 8092 | Independent SQLite projections; internal HTTP inspection |
+| Schema Registry | 8080 / 9000 | Schema API and management readiness; internal |
+| Registry PostgreSQL | 5432 | Separate database and network owned by Registry |
+| Client TUI | none | Interactive client on the client network |
+| Monitoring | configurable | Alloy, NATS Exporter, Prometheus, Loki and Grafana; Grafana has an explicit host bind address |
 
-**Go:** stdlib `log/slog` with a JSON handler emits this shape natively:
+Each SQLite owner and storage server has its own volume. PostgreSQL and Registry
+PostgreSQL share neither volume nor network. The client network contains Client
+API and the TUI; application services use backend addresses. Broker and Registry
+trust membership of the backend network. Host/Docker administrators can access
+containers and their internal APIs.
 
-```go
-logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-logger.Info("polled pvmbg", "service", "aggregator", "correlation_id", cid, "latency_ms", elapsed.Milliseconds())
-```
+Root `.env` owns shared deployment ports. Gitignored service env files hold
+credentials and service settings. Compose injects matching listener ports,
+dependency URLs and probes. The application programs use `os.Getenv` and do not
+load env files themselves during native execution. Use the complete
+[.env.example](../.env.example), [README](../README.md) and
+[port configuration](Port%20Configuration.md) for configuration.
 
-**Python:** `structlog` configured for JSON output:
+## Health and independent startup
 
-```python
-import structlog
-log = structlog.get_logger()
-log.info("polled pvmbg", service="aggregator", correlation_id=cid, latency_ms=elapsed_ms)
-```
+There are no Compose `depends_on` gates. With valid configuration and writable
+local storage, application listeners start while external dependencies retry in
+the background. Auth health checks its session database; other application
+`/health` endpoints principally indicate liveness. Supported `/ready` endpoints
+report dependencies and consumer processing state.
 
-Either library can be swapped for plain `json.dumps(...)` over stdout if a dependency isn't wanted — the field names in the table are what matters, not the library.
+PVMBG's simulated outage returns 503 from data/history endpoints while
+`/health` remains 200. Consumer Compose health checks use liveness; a halted
+consumer can stay healthy while `/ready` returns 503. Registry's supervisor
+retries initialization if its database is absent; its API/readiness listener can
+remain unreachable until initialization succeeds. Native infrastructure has
+its own readiness checks. See [Registry](../registry/README.md).
 
-## Outbound call latency logging
+## Correlation IDs
 
-Spec requirement (Ketentuan Implementasi #7): every outgoing call's latency must be recorded. Concretely, wrap every cross-service HTTP/broker call so it logs one line per call, success or failure:
+Application HTTP requests preserve `X-Correlation-ID` or generate a UUID when
+the header is absent. Client API forwards it to Auth and Aggregator. Aggregator
+also stores it in the request's Go context so PostgreSQL operations inherit the
+same ID.
 
-```json
-{"timestamp":"...","service":"aggregator","correlation_id":"...","level":"info","message":"outbound call","target_service":"pvmbg","target_endpoint":"/volcanic-reports","status_code":200,"latency_ms":842}
-```
+Each source polling/replay iteration has its own ID, shared by source HTTP,
+schema access and associated storage work. Background maintenance and broker
+setup generate IDs when no request exists. Pending outbox reads have a dispatcher
+ID; once an event is loaded, publication and outbox completion use the event's
+stored ID. Consumers preserve that ID through decoding, persistence, ACK and
+DLQ entries; uncached schema lookups forward it as an HTTP header.
 
-- `target_service` and `target_endpoint` identify what was called
-- `status_code` on HTTP calls; a broker publish/ack can log a boolean `success` instead
-- Log this **even on timeout or error** — that's exactly the evidence P2's graceful-degradation criteria needs (showing PVMBG's slow/failed calls without the whole system blocking)
-- Implement this once as a thin wrapper/decorator around your HTTP client (Go: wrap `http.Client.Do`; Python: wrap `requests`/`httpx` calls) rather than hand-adding a log line at every call site — it's easy to forget one call site otherwise, and a missing log line here is a specific, checkable line item in the rubric's implementation evidence.
+## Structured application logs
 
-## Log level conventions
+Application services use `log/slog` JSON handlers, with these operational fields:
 
-| Level | Use for | Example |
-| --- | --- | --- |
-| `debug` | verbose internal detail, off by default | raw response body from a mock |
-| `info` | normal operation | "polled bmkg, 3 new events" |
-| `warn` | degraded but handled — the system did the right thing | PVMBG outage detected, serving stale Canonical Store data; token near expiry |
-| `error` | genuinely unexpected — something the system could not handle | malformed JSON from a mock that isn't the declared schema-evolution case; unhandled exception |
+| Field | Meaning |
+| --- | --- |
+| `service` | Application component |
+| `correlation_id` | Request, polling, event or background operation ID |
+| `level` | Severity; handlers differ in capitalization |
+| `message` or `msg` | Operation description |
+| `timestamp` or `time` | Handler timestamp |
+| `latency_ms` | Duration of the recorded call |
+| `target_service`, `target_endpoint` | Outbound dependency and operation |
+| `status_code` / `success` | HTTP status / operation outcome |
 
-The important line: **a PVMBG outage (P2) is a `warn`, not an `error`** — the whole point of P2 is that the system handles this gracefully, so logging it as `error` would misrepresent the very behavior being demonstrated. Reserve `error` for cases where graceful handling actually failed.
+Mocks and Aggregator normalize timestamp/message field names; other Go JSON
+handlers retain standard `time`/`msg` fields. Startup logs may have no request
+ID. Monitoring parses both application formats; upstream NATS, PostgreSQL,
+Apicurio and monitoring programs retain their native logging formats.
 
-## Checklist before integration
+## Outbound latency coverage
 
-- [ ] Every service builds from its own Dockerfile and starts via `docker compose up` with no manual steps
-- [ ] Every service has a working `/health` endpoint distinguishing "process up" from business-logic outage state
-- [ ] `.env.example` lists every variable any service reads, with a placeholder value
-- [ ] `X-Correlation-ID` is generated at the entry point and forwarded on every downstream call — verified by grepping one ID across two services' logs
-- [ ] All logs are single-line JSON with the field set in the Structured Logging table above
-- [ ] Every outbound call logs `target_service`, `status_code`/`success`, and `latency_ms`, including on failure
-- [ ] PVMBG outage and similar handled-degradation cases log at `warn`, not `error`
-- [ ] No service can be stopped/restarted and take down an unrelated service alongside it
+HTTP wrappers record calls to sources, Auth, Aggregator and Registry. NATS
+wrappers record connection and stream setup as well as publication, fetches and
+ACK operations in the relevant component. Aggregator's pgx tracer records
+connection acquisition, physical connections, preparation, queries and
+transaction SQL commands. Its store wrapper also records pings, which bypass
+pgx query tracing.
 
-## Continuous monitoring
+Consumer fetch timing ends after the asynchronous batch closes and its final
+error is available, before local projection processing and acknowledgement.
+Empty long polls include their configured broker wait in the logged duration.
 
-The implemented Compose stack adds Grafana, Prometheus, Loki, Alloy, and a NATS
-exporter. The exporter reads NATS monitoring endpoints for JetStream stream and
-consumer metrics, without consuming, acknowledging, or deleting messages. Alloy
-embeds Blackbox Exporter to probe existing `/health` and supported `/ready`
-endpoints and forwards Docker logs to Loki. Prometheus stores probe metrics;
-Grafana provides dashboards and alert state. Application startup is independent
-of monitoring, and consumers keep their liveness-based Compose probes.
+SQL logs identify the operation and a SHA-256 query fingerprint. They exclude
+SQL text, bound values, DSNs and server error details. Errors use safe categories
+and PostgreSQL SQLSTATE where available. Driver query timing ends when results
+are consumed or closed; acquisition timing is recorded separately. Failed
+acquisition and timeout paths are logged as well.
 
-Monitoring uses required per-service environment files and a startup validator
-that reports every missing/empty/whitespace-only setting by name before starting
-the upstream program. Root Grafana bind address and host port use Compose's
-required-variable checks. See [Monitoring](../monitoring/README.md) for setup,
-retention, collection permissions, and evidence capture.
+Handled source outages log warnings. Contract violations and consumer halts have
+separate error records. Request latency and individual dependency latency answer
+different questions; use k6 for P2's end-to-end p95 evidence.
+
+## Monitoring and evidence
+
+Alloy embeds Blackbox checks of configured health/readiness URLs and reads Docker
+logs over the Docker Unix socket. Metrics go to Prometheus through remote write;
+logs go to Loki. NATS Exporter reads broker monitoring HTTP endpoints without
+consuming events. Grafana queries Prometheus with PromQL and Loki with LogQL.
+Monitoring availability does not gate application processing.
+
+Only Grafana, Prometheus and Loki require monitoring env files. Root ports and
+Compose supply Alloy/Exporter settings. The launcher validates configuration
+before starting each upstream program. See [monitoring](../monitoring/README.md)
+and [Test Runbook](Test%20Runbook.md) for retention, permissions and evidence.
+
+The runbook covers independent restart, live schema evolution, authentication,
+redaction, outage recovery, sustained load and fan-out/backlog scenarios.

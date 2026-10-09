@@ -12,6 +12,8 @@ import (
 )
 
 func TestLoadConfigRejectsShortDLQRetention(t *testing.T) {
+	t.Setenv("NATS_PORT", "4222")
+	t.Setenv("NATS_MONITOR_PORT", "8222")
 	t.Setenv("NATS_URL", "nats://localhost:4222")
 	t.Setenv("NATS_STREAM", "HAZARDS")
 	t.Setenv("NATS_SUBJECT", "hazard.events")

@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -28,9 +29,18 @@ type Config struct {
 }
 
 func loadConfig() (Config, error) {
-	v, err := requiredEnv("NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_STREAM_MAX_AGE", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT_PREFIX", "NATS_DLQ_MAX_AGE", "NATS_LIFECYCLE_STREAM", "NATS_LIFECYCLE_SUBJECT", "NATS_LIFECYCLE_MAX_AGE")
+	v, err := requiredEnv("NATS_PORT", "NATS_MONITOR_PORT", "NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_STREAM_MAX_AGE", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT_PREFIX", "NATS_DLQ_MAX_AGE", "NATS_LIFECYCLE_STREAM", "NATS_LIFECYCLE_SUBJECT", "NATS_LIFECYCLE_MAX_AGE")
 	if err != nil {
 		return Config{}, err
+	}
+	for _, key := range []string{"NATS_PORT", "NATS_MONITOR_PORT"} {
+		port, err := strconv.Atoi(v[key])
+		if err != nil || port < 1 || port > 65535 {
+			return Config{}, fmt.Errorf("%s must be an integer between 1 and 65535", key)
+		}
+	}
+	if v["NATS_PORT"] == v["NATS_MONITOR_PORT"] {
+		return Config{}, errors.New("NATS_PORT and NATS_MONITOR_PORT must be different")
 	}
 	if err = envURL(v, "NATS_URL", "nats", "tls", "ws", "wss"); err != nil {
 		return Config{}, err
@@ -112,7 +122,7 @@ func loadConfig() (Config, error) {
 }
 
 func ensureStream(parent context.Context, js jetstream.JetStream, cfg Config) error {
-	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	ctx, cancel := context.WithTimeout(withBrokerTrace(parent), 10*time.Second)
 	defer cancel()
 
 	streamConfig := jetstream.StreamConfig{
@@ -124,32 +134,30 @@ func ensureStream(parent context.Context, js jetstream.JetStream, cfg Config) er
 		MaxAge:  cfg.StreamMaxAge,
 	}
 
-	stream, err := js.CreateOrUpdateStream(ctx, streamConfig)
+	stream, err := brokerCall(ctx, "stream_create_or_update", func() (jetstream.Stream, error) { return js.CreateOrUpdateStream(ctx, streamConfig) })
 	if err != nil {
 		return fmt.Errorf("create/update stream %q: %w", cfg.StreamName, err)
 	}
 
-	info, err := stream.Info(ctx)
+	info, err := brokerCall(ctx, "stream_info", func() (*jetstream.StreamInfo, error) { return stream.Info(ctx) })
 	if err != nil {
 		return fmt.Errorf("retrieve stream %q info: %w", cfg.StreamName, err)
 	}
 
-	log.Printf(
-		"stream ready: name=%s subjects=%v storage=%s max_age=%s",
-		info.Config.Name,
-		info.Config.Subjects,
-		info.Config.Storage,
-		info.Config.MaxAge,
-	)
+	brokerLog(ctx, slog.LevelInfo, "stream ready", "stream", info.Config.Name, "subjects", info.Config.Subjects, "storage", info.Config.Storage, "max_age", info.Config.MaxAge.String())
 	if cfg.LifecycleStream != "" {
-		if _, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{Name: cfg.LifecycleStream, Subjects: []string{cfg.LifecycleSubject}, Storage: jetstream.FileStorage, MaxAge: cfg.LifecycleMaxAge}); err != nil {
+		if _, err = brokerCall(ctx, "lifecycle_stream_create_or_update", func() (jetstream.Stream, error) {
+			return js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{Name: cfg.LifecycleStream, Subjects: []string{cfg.LifecycleSubject}, Storage: jetstream.FileStorage, MaxAge: cfg.LifecycleMaxAge})
+		}); err != nil {
 			return fmt.Errorf("create lifecycle stream: %w", err)
 		}
 	}
-	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name: cfg.DLQStream, Subjects: []string{cfg.DLQPrefix + ".>"},
-		Storage: jetstream.FileStorage, MaxAge: cfg.DLQMaxAge,
-		Discard: jetstream.DiscardNew, DiscardNewPerSubject: true, MaxMsgsPerSubject: 1,
+	_, err = brokerCall(ctx, "dlq_stream_create_or_update", func() (jetstream.Stream, error) {
+		return js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+			Name: cfg.DLQStream, Subjects: []string{cfg.DLQPrefix + ".>"},
+			Storage: jetstream.FileStorage, MaxAge: cfg.DLQMaxAge,
+			Discard: jetstream.DiscardNew, DiscardNewPerSubject: true, MaxMsgsPerSubject: 1,
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("create/update DLQ stream %q: %w", cfg.DLQStream, err)
@@ -161,10 +169,12 @@ func ensureStream(parent context.Context, js jetstream.JetStream, cfg Config) er
 // checkStream is a read-only health probe. It uses the configured NATS URL
 // and verifies the stream and subject that the initializer is responsible for.
 func checkStream(parent context.Context, cfg Config) error {
-	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	ctx, cancel := context.WithTimeout(withBrokerTrace(parent), 3*time.Second)
 	defer cancel()
 
-	nc, err := nats.Connect(cfg.NATSURL, nats.Name("broker-health"), nats.Timeout(2*time.Second), nats.NoReconnect())
+	nc, err := brokerCall(ctx, "broker_connect", func() (*nats.Conn, error) {
+		return nats.Connect(cfg.NATSURL, nats.Name("broker-health"), nats.Timeout(2*time.Second), nats.NoReconnect())
+	})
 	if err != nil {
 		return fmt.Errorf("connect to NATS: %w", err)
 	}
@@ -174,11 +184,11 @@ func checkStream(parent context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("create JetStream client: %w", err)
 	}
-	stream, err := js.Stream(ctx, cfg.StreamName)
+	stream, err := brokerCall(ctx, "stream_lookup", func() (jetstream.Stream, error) { return js.Stream(ctx, cfg.StreamName) })
 	if err != nil {
 		return fmt.Errorf("find stream %q: %w", cfg.StreamName, err)
 	}
-	info, err := stream.Info(ctx)
+	info, err := brokerCall(ctx, "stream_info", func() (*jetstream.StreamInfo, error) { return stream.Info(ctx) })
 	if err != nil {
 		return fmt.Errorf("inspect stream %q: %w", cfg.StreamName, err)
 	}
@@ -187,11 +197,11 @@ func checkStream(parent context.Context, cfg Config) error {
 		return fmt.Errorf("stream %q has unexpected configuration", cfg.StreamName)
 	}
 	if cfg.LifecycleStream != "" {
-		lifecycle, err := js.Stream(ctx, cfg.LifecycleStream)
+		lifecycle, err := brokerCall(ctx, "lifecycle_stream_lookup", func() (jetstream.Stream, error) { return js.Stream(ctx, cfg.LifecycleStream) })
 		if err != nil {
 			return err
 		}
-		info, err := lifecycle.Info(ctx)
+		info, err := brokerCall(ctx, "lifecycle_stream_info", func() (*jetstream.StreamInfo, error) { return lifecycle.Info(ctx) })
 		if err != nil {
 			return err
 		}
@@ -199,11 +209,11 @@ func checkStream(parent context.Context, cfg Config) error {
 			return fmt.Errorf("unexpected lifecycle stream configuration")
 		}
 	}
-	dlq, err := js.Stream(ctx, cfg.DLQStream)
+	dlq, err := brokerCall(ctx, "dlq_stream_lookup", func() (jetstream.Stream, error) { return js.Stream(ctx, cfg.DLQStream) })
 	if err != nil {
 		return fmt.Errorf("find DLQ stream %q: %w", cfg.DLQStream, err)
 	}
-	dlqInfo, err := dlq.Info(ctx)
+	dlqInfo, err := brokerCall(ctx, "dlq_stream_info", func() (*jetstream.StreamInfo, error) { return dlq.Info(ctx) })
 	if err != nil {
 		return err
 	}
@@ -216,61 +226,52 @@ func checkStream(parent context.Context, cfg Config) error {
 }
 
 func main() {
-	checkOnly := len(os.Args) == 2 && os.Args[1] == "--check"
-	validateOnly := len(os.Args) == 2 && os.Args[1] == "--validate"
-	if len(os.Args) > 1 && !checkOnly && !validateOnly {
-		log.Fatalf("unsupported arguments: %v", os.Args[1:])
-	}
-
-	ctx, stop := signal.NotifyContext(
-		context.Background(),
-		syscall.SIGINT,
-		syscall.SIGTERM,
-	)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	ctx = withBrokerTrace(ctx)
+	if err := run(ctx, os.Args[1:]); err != nil {
+		brokerLog(ctx, slog.LevelError, "broker initializer failed", "error", err)
+		os.Exit(1)
+	}
+}
 
+func run(ctx context.Context, args []string) error {
+	ctx = withBrokerTrace(ctx)
+	checkOnly := len(args) == 1 && args[0] == "--check"
+	validateOnly := len(args) == 1 && args[0] == "--validate"
+	if len(args) > 0 && !checkOnly && !validateOnly {
+		return errors.New("unsupported broker initializer arguments")
+	}
 	cfg, err := loadConfig()
 	if err != nil {
-		log.Fatalf("invalid configuration: %v", err)
+		return fmt.Errorf("invalid configuration: %w", err)
 	}
 	if validateOnly {
-		return
+		return nil
 	}
 	if checkOnly {
-		if err := checkStream(ctx, cfg); err != nil {
-			log.Fatalf("broker unhealthy: %v", err)
-		}
-		return
+		return checkStream(ctx, cfg)
 	}
-
-	log.Printf(
-		"starting broker initializer: url=%s stream=%s subject=%s",
-		cfg.NATSURL,
-		cfg.StreamName,
-		cfg.StreamSubject,
-	)
-
+	brokerLog(ctx, slog.LevelInfo, "starting broker initializer", "stream", cfg.StreamName, "subject", cfg.StreamSubject)
 	nc, err := connectWithRetry(ctx, cfg.NATSURL)
+	if errors.Is(err, context.Canceled) {
+		brokerLog(ctx, slog.LevelInfo, "broker initialization cancelled")
+		return nil
+	}
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			log.Println("broker initialization cancelled")
-			return
-		}
-
-		log.Fatalf("failed to connect to NATS: %v", err)
+		return fmt.Errorf("connect to NATS: %w", err)
 	}
 	defer nc.Close()
-
 	js, err := jetstream.New(nc)
 	if err != nil {
-		log.Fatalf("failed to create JetStream client: %v", err)
+		return fmt.Errorf("create JetStream client: %w", err)
 	}
-
 	if err := ensureStream(ctx, js, cfg); err != nil {
-		log.Fatalf("failed to initialize stream: %v", err)
+		return err
 	}
-
-	log.Println("broker initialization complete")
+	brokerLog(ctx, slog.LevelInfo, "broker initialization complete")
+	return nil
 }
 
 func requireEnv(key string) (string, error) {
@@ -284,19 +285,20 @@ func requireEnv(key string) (string, error) {
 
 func connectWithRetry(ctx context.Context, url string) (*nats.Conn, error) {
 	const retryInterval = 2 * time.Second
+	ctx = withBrokerTrace(ctx)
 
 	for {
-		nc, err := nats.Connect(
-			url,
-			nats.Name("broker-init"),
-			nats.Timeout(3*time.Second),
-		)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		nc, err := brokerCall(ctx, "broker_connect", func() (*nats.Conn, error) {
+			return nats.Connect(url, nats.Name("broker-init"), nats.Timeout(3*time.Second))
+		})
 		if err == nil {
-			log.Printf("connected to NATS: %s", nc.ConnectedUrl())
+			brokerLog(ctx, slog.LevelInfo, "connected to NATS")
 			return nc, nil
 		}
-
-		log.Printf("NATS unavailable: %v; retrying in %s", err, retryInterval)
+		brokerLog(ctx, slog.LevelWarn, "NATS unavailable; retrying", "retry_interval_sec", retryInterval.Seconds())
 
 		if err := sleepCtx(ctx, retryInterval); err != nil {
 			return nil, err
