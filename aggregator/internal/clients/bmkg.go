@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"aggregator/internal/avrowire"
@@ -46,6 +47,7 @@ type BMKGClient struct {
 	HTTP     *http.Client
 	Logger   *slog.Logger
 	Registry *avrowire.Client
+	Readers  map[string]*avrowire.SourceReader
 }
 
 func NewBMKGClient(baseURL, apiKey string, logger *slog.Logger) *BMKGClient {
@@ -98,7 +100,11 @@ func (c *BMKGClient) get(ctx context.Context, correlationID, path string, requir
 		if err != nil {
 			return err
 		}
-		native, err := c.Registry.Decode(avrowire.WithCorrelationID(callCtx, correlationID), body)
+		reader := c.Readers[strings.SplitN(path, "?", 2)[0]]
+		if reader == nil {
+			return fmt.Errorf("explicit reader schema required for %s", path)
+		}
+		native, err := c.Registry.DecodeWithReader(avrowire.WithCorrelationID(callCtx, correlationID), body, reader.Live)
 		if err != nil {
 			return fmt.Errorf("bmkg %s: %w", path, err)
 		}

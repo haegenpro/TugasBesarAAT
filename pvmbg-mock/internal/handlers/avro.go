@@ -11,7 +11,7 @@ import (
 )
 
 const volcanicSubject = "pvmbg.volcanic-reports-value"
-const volcanicV1 = `{"type":"array","items":{"type":"record","name":"VolcanicReport","namespace":"id.go.pvmbg","fields":[{"name":"report_id","type":"string"},{"name":"volcano_id","type":"string"},{"name":"alert_level","type":"string"},{"name":"eruption_count_24h","type":"int"},{"name":"ash_column_height_m","type":"double"},{"name":"reported_at","type":"string"},{"name":"updated_at","type":["null","string"],"default":null}]}}`
+const volcanicV1 = `{"type":"array","items":{"type":"record","name":"VolcanicReport","namespace":"id.go.pvmbg","fields":[{"name":"report_id","type":"string"},{"name":"volcano_id","type":"string"},{"name":"alert_level","type":"string"},{"name":"eruption_count_24h","type":"int"},{"name":"ash_column_height_m","type":"double"},{"name":"reported_at","type":"string"}]}}`
 
 func volcanicV2() string {
 	return strings.TrimSuffix(volcanicV1, `]}}`) + `,{"name":"confidence_level","type":["null","double"],"default":null,"x-validation":{"minimum":0,"maximum":1}}]}}`
@@ -28,7 +28,7 @@ func (h *Handler) encodeVolcanic(ctx context.Context, reports []domain.VolcanicR
 	}
 	native := make([]any, 0, len(reports))
 	for _, r := range reports {
-		item := map[string]any{"report_id": r.ReportID, "volcano_id": r.VolcanoID, "alert_level": string(r.AlertLevel), "eruption_count_24h": int32(r.EruptionCount24h), "ash_column_height_m": r.AshColumnHeightM, "reported_at": r.ReportedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"), "updated_at": goavro.Union("string", r.UpdatedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z"))}
+		item := map[string]any{"report_id": r.ReportID, "volcano_id": r.VolcanoID, "alert_level": string(r.AlertLevel), "eruption_count_24h": int32(r.EruptionCount24h), "ash_column_height_m": r.AshColumnHeightM, "reported_at": r.ReportedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z")}
 		if showConfidence {
 			item["confidence_level"] = goavro.Union("null", nil)
 			if r.ConfidenceLevel != nil {

@@ -47,7 +47,12 @@ func Open(path string) (*Archive, error) {
 }
 
 // Append commits an observation and any dependent records before live exposure.
-func (a *Archive) Append(records ...Record) error {
+func (a *Archive) Append(records ...Record) error { return a.append(false, records...) }
+
+// AppendImmutable commits new IDs atomically and rejects changes to existing IDs.
+func (a *Archive) AppendImmutable(records ...Record) error { return a.append(true, records...) }
+
+func (a *Archive) append(immutable bool, records ...Record) error {
 	tx, err := a.DB.Begin()
 	if err != nil {
 		return err
@@ -62,6 +67,9 @@ func (a *Archive) Append(records ...Record) error {
 		err = tx.QueryRow(`SELECT payload FROM history WHERE entity=? AND record_id=? ORDER BY sequence DESC LIMIT 1`, r.Entity, r.ID).Scan(&previous)
 		if err != nil && err != sql.ErrNoRows {
 			return err
+		}
+		if immutable && err == nil && previous != string(b) {
+			return fmt.Errorf("immutable %s record %s already exists", r.Entity, r.ID)
 		}
 		if previous == string(b) {
 			continue

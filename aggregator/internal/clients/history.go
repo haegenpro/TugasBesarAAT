@@ -25,7 +25,7 @@ type HistoryPage struct {
 	HasMore    bool          `json:"has_more"`
 }
 
-func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, key, source, entity, cid string, after int64, logger *slog.Logger, registry *avrowire.Client) (HistoryPage, error) {
+func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, key, source, entity, cid string, after int64, logger *slog.Logger, registry *avrowire.Client, reader *avrowire.SourceReader) (HistoryPage, error) {
 	p := HistoryPage{}
 	path := "/history?entity=" + url.QueryEscape(entity) + "&after=" + strconv.FormatInt(after, 10) + "&limit=100"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
@@ -59,7 +59,10 @@ func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, ke
 		if len(body) > 4<<20 {
 			return p, fmt.Errorf("history body exceeds 4 MiB")
 		}
-		native, e := registry.Decode(avrowire.WithCorrelationID(ctx, cid), body)
+		if reader == nil {
+			return p, fmt.Errorf("explicit reader schema required for %s history", entity)
+		}
+		native, e := registry.DecodeWithReader(avrowire.WithCorrelationID(ctx, cid), body, reader.History)
 		if e != nil {
 			return p, fmt.Errorf("%s history: %w", source, e)
 		}
@@ -89,10 +92,20 @@ func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, ke
 	return p, nil
 }
 func (c *BMKGClient) FetchHistory(ctx context.Context, cid, entity string, after int64) (HistoryPage, error) {
-	return fetchHistory(ctx, c.HTTP, c.BaseURL, "X-BMKG-Key", c.APIKey, "bmkg", entity, cid, after, c.Logger, c.Registry)
+	return fetchHistory(ctx, c.HTTP, c.BaseURL, "X-BMKG-Key", c.APIKey, "bmkg", entity, cid, after, c.Logger, c.Registry, c.Readers["/"+entity])
 }
 func (c *PVMBGClient) FetchHistory(ctx context.Context, cid, entity string, after int64) (HistoryPage, error) {
-	return fetchHistory(ctx, c.HTTP, c.BaseURL, "Authorization", "Bearer "+c.Token, "pvmbg", entity, cid, after, c.Logger, c.Registry)
+	reader := c.Reader
+	if c.ReaderSwitch != nil {
+		var release func()
+		var err error
+		ctx, reader, release, err = c.ReaderSwitch.Begin(ctx)
+		if err != nil {
+			return HistoryPage{}, err
+		}
+		defer release()
+	}
+	return fetchHistory(ctx, c.HTTP, c.BaseURL, "Authorization", "Bearer "+c.Token, "pvmbg", entity, cid, after, c.Logger, c.Registry, reader)
 }
 func DecodeSeismic(raw json.RawMessage) (SeismicEvent, error) {
 	var e SeismicEvent

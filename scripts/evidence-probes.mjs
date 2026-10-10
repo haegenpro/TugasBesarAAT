@@ -168,6 +168,26 @@ async function mapping() {
   say('Exact 5.0 / 6.5 boundaries: capture go test -v ./internal/mapping in aggregator separately.');
 }
 
+async function activateDiscoveredReader() {
+  return until(async () => {
+    try {
+      // Keep response headers on stderr so a not-yet-discovered candidate can
+      // be distinguished from authentication, drain and transport failures.
+      return JSON.parse(compose(['exec', '-T', 'aggregator', 'sh', '-c',
+        'wget -SO- --post-data="" --header="Authorization: Bearer ${AGGREGATOR_ADMIN_TOKEN:?}" "http://localhost:${AGGREGATOR_PORT:?}/admin/schema-version"']));
+    } catch (error) {
+      const status = /HTTP\/\S+\s+(\d{3})\b/.exec(String(error.stderr || ''))?.[1];
+      if (status === '409') {
+        say('Reader candidate not discovered yet (HTTP 409); waiting for live polling.');
+        return null;
+      }
+      // execFile errors can contain the command and captured output. Do not
+      // expose either in evidence, and never retry a potentially applied toggle.
+      throw new Error(`Aggregator reader activation failed${status ? ` (HTTP ${status})` : ''}`);
+    }
+  }, 'live polling discovers the second reader schema', 120);
+}
+
 async function schema() {
   const before = (await hazards('VOLCANIC')).body;
   check(before.data.length > 0, 'pre-change canonical volcanic records exist');
@@ -178,17 +198,32 @@ async function schema() {
   const toggle = await request(`${pbase}/admin/schema-version`, ah, {});
   check(toggle.code === 200 && toggle.body.schema_version === 'v2', 'live schema toggle returned v2');
   const changed = await request(`${pbase}/volcanic-reports`, ph);
-  const fresh = changed.body.find(r => !ids.has(r.report_id) && r.report_id.startsWith('rep-schema-'));
-  check(Boolean(fresh), 'discover actual new report ID instead of a hardcoded ID');
-  say(`New report: ${fresh.report_id}`);
+  const firstV2 = changed.body.find(r => !ids.has(r.report_id) && r.report_id.startsWith('rep-schema-'));
+  check(Boolean(firstV2), 'discover actual new report ID instead of a hardcoded ID');
+  const dropped = await until(async () => {
+    const result = await hazards('VOLCANIC');
+    return result.body?.data.find(r => r.source_ref_id === firstV2.report_id);
+  }, 'writer v2 ingested with reader v1');
+  check(!('confidence_level' in dropped.attributes), 'reader v1 drops the new writer field while ingestion continues');
+  save('schema-reader-v1.json', { source: firstV2, canonical: dropped });
+  // Aggregator remains internal. Use its container's admin credential without
+  // printing it or exposing an additional host port.
+  const readerToggle = await activateDiscoveredReader();
+  check(readerToggle.reader_version === 'v2', 'explicit Aggregator toggle selected the discovered reader v2');
+  const adoptedAt = Date.now();
+  const fresh = await until(async () => {
+    const result = await request(`${pbase}/volcanic-reports`, ph);
+    return result.body.find(r => !ids.has(r.report_id) && Date.parse(r.reported_at) > adoptedAt && typeof r.confidence_level === 'number');
+  }, 'new source report after reader activation');
+  say(`New report after reader activation: ${fresh.report_id}`);
   const h = await until(async () => {
     const result = await hazards('VOLCANIC');
     return result.body?.data.find(r => r.source_ref_id === fresh.report_id && r.attributes.confidence_level === fresh.confidence_level);
   }, 'new schema mapped');
   save('2.3-new-report.json', h);
   validHazard(h);
-  save('schema-after.json', { source: fresh, canonical: h, containers: snapshot(), columns: catalog() });
-  check(!('confidence_level' in h) && h.attributes.confidence_level === 0.88, 'new field preserved in attributes; canonical shape unchanged');
+  save('schema-after.json', { source: fresh, canonical: h, writer_toggle: toggle.body, reader_toggle: readerToggle, containers: snapshot(), columns: catalog() });
+  check(!('confidence_level' in h) && h.attributes.confidence_level === fresh.confidence_level, 'new field preserved in attributes; canonical shape unchanged');
   check(stable(starts, snapshot()), 'all container IDs, start times and restart counts unchanged');
   check(equivalent(columns, catalog()), 'database column catalog unchanged across live schema toggle');
 }
@@ -200,6 +235,11 @@ async function storage() {
   const old = rows.find(r => r.hazard_id === before.canonical.data[0].hazard_id);
   const fresh = rows.find(r => r.hazard_id === after.canonical.hazard_id);
   check(Boolean(old && fresh && old.hazard_id !== fresh.hazard_id), 'pre-change and post-change volcanic rows coexist and are readable through API');
+  const expectedConfidence = after.source.confidence_level;
+  check(typeof expectedConfidence === 'number' && Number.isFinite(expectedConfidence)
+    && after.canonical.attributes?.confidence_level === expectedConfidence
+    && fresh.attributes?.confidence_level === expectedConfidence,
+  'current post-change record retains confidence_level matching the source and saved canonical record');
   check(equivalent(before.columns, after.columns) && equivalent(after.columns, catalog()), 'no column migration for confidence_level');
   check(catalog().some(c => c.table_name === 'hazard_events' && c.column_name === 'attributes' && c.data_type === 'jsonb'), 'attributes stored in JSONB');
   save(`${name}.json`, { old_before: before.canonical.data[0], old_now: old, new_now: fresh, columns: catalog() });

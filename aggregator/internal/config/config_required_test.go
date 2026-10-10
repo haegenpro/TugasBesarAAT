@@ -7,22 +7,26 @@ import (
 
 func TestConfigurationRequiresExplicitValues(t *testing.T) {
 	values := map[string]string{
-		"AGGREGATOR_PORT":        "8080",
-		"BMKG_BASE_URL":          "http://bmkg-mock:8081",
-		"BMKG_API_KEY":           "changeme-bmkg-key",
-		"PVMBG_BASE_URL":         "http://pvmbg-mock:8082",
-		"PVMBG_TOKEN":            "changeme-pvmbg-token",
-		"POLL_INTERVAL":          "3",
-		"SOURCE_RETRY_MAX_SEC":   "60",
-		"BMKG_FRESHNESS_SEC":     "60",
-		"PVMBG_FRESHNESS_SEC":    "1800",
-		"DATABASE_URL":           "postgres://postgres:changeme-postgres-password@postgres:5432/hazards?sslmode=disable",
-		"NATS_URL":               "nats://broker:4222",
-		"NATS_STREAM":            "HAZARDS",
-		"NATS_SUBJECT":           "hazard.events",
-		"SCHEMA_REGISTRY_URL":    "http://schema-registry:8080/apis/ccompat/v7",
-		"NATS_LIFECYCLE_STREAM":  "REPORT_LIFECYCLE",
-		"NATS_LIFECYCLE_SUBJECT": "report.lifecycle",
+		"AGGREGATOR_ADMIN_TOKEN":     "test-aggregator-admin-token",
+		"BMKG_SEISMIC_READER_SCHEMA": "schemas/seismic.avsc",
+		"BMKG_TSUNAMI_READER_SCHEMA": "schemas/tsunami.avsc",
+		"PVMBG_READER_SCHEMA":        "schemas/volcanic-v1.avsc",
+		"AGGREGATOR_PORT":            "8080",
+		"BMKG_BASE_URL":              "http://bmkg-mock:8081",
+		"BMKG_API_KEY":               "changeme-bmkg-key",
+		"PVMBG_BASE_URL":             "http://pvmbg-mock:8082",
+		"PVMBG_TOKEN":                "changeme-pvmbg-token",
+		"POLL_INTERVAL":              "3",
+		"SOURCE_RETRY_MAX_SEC":       "60",
+		"BMKG_FRESHNESS_SEC":         "60",
+		"PVMBG_FRESHNESS_SEC":        "1800",
+		"DATABASE_URL":               "postgres://postgres:changeme-postgres-password@postgres:5432/hazards?sslmode=disable",
+		"NATS_URL":                   "nats://broker:4222",
+		"NATS_STREAM":                "HAZARDS",
+		"NATS_SUBJECT":               "hazard.events",
+		"SCHEMA_REGISTRY_URL":        "http://schema-registry:8080/apis/ccompat/v7",
+		"NATS_LIFECYCLE_STREAM":      "REPORT_LIFECYCLE",
+		"NATS_LIFECYCLE_SUBJECT":     "report.lifecycle",
 	}
 	for key, value := range values {
 		t.Setenv(key, value)
@@ -41,16 +45,17 @@ func TestConfigurationRequiresExplicitValues(t *testing.T) {
 		}
 	}
 	for key, invalid := range map[string]string{
-		"AGGREGATOR_PORT":      "invalid",
-		"POLL_INTERVAL":        "invalid",
-		"SOURCE_RETRY_MAX_SEC": "invalid",
-		"BMKG_FRESHNESS_SEC":   "invalid",
-		"PVMBG_FRESHNESS_SEC":  "invalid",
-		"BMKG_BASE_URL":        "invalid",
-		"PVMBG_BASE_URL":       "invalid",
-		"DATABASE_URL":         "invalid",
-		"NATS_URL":             "invalid",
-		"SCHEMA_REGISTRY_URL":  "invalid",
+		"AGGREGATOR_ADMIN_TOKEN": "changeme-pvmbg-token",
+		"AGGREGATOR_PORT":        "invalid",
+		"POLL_INTERVAL":          "invalid",
+		"SOURCE_RETRY_MAX_SEC":   "invalid",
+		"BMKG_FRESHNESS_SEC":     "invalid",
+		"PVMBG_FRESHNESS_SEC":    "invalid",
+		"BMKG_BASE_URL":          "invalid",
+		"PVMBG_BASE_URL":         "invalid",
+		"DATABASE_URL":           "invalid",
+		"NATS_URL":               "invalid",
+		"SCHEMA_REGISTRY_URL":    "invalid",
 	} {
 		t.Run(key+"/invalid", func(t *testing.T) {
 			t.Setenv(key, invalid)

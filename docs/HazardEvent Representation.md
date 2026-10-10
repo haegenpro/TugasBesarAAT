@@ -163,7 +163,7 @@ Per-source keys that land in `attributes`. Client API projects Media responses f
 | VolcanicReport | `ash_column_height_m` | float | always |
 | VolcanicReport | `confidence_level` | float (0–1) | when present after the schema toggle |
 
-**Unmapped-field policy:** Preserve source fields without a canonical top-level mapping in `attributes` for both BMKG and PVMBG. This includes `confidence_level` when present after `POST /admin/schema-version`, plus later additive source fields. Avro schema evolution lets the Aggregator read the new source record without a restart.
+**Unmapped-field policy:** Drop writer fields absent from the explicitly selected reader schema. Fields present in both schemas without a canonical mapping go into `attributes`, including `confidence_level` when accepted and non-null. Reader-only defaults are used for validation but excluded from source attributes. Live polling and history apply the same policy. The default PVMBG reader is v1. Live polling caches a compatible second writer schema as a reader candidate; the Aggregator admin toggle explicitly activates it without restart. Live and history ingestion drain through commit before switching.
 
 ## Static volcano reference table
 

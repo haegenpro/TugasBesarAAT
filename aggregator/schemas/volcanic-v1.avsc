@@ -1,0 +1,34 @@
+{
+  "type": "array",
+  "items": {
+    "type": "record",
+    "name": "VolcanicReport",
+    "namespace": "id.go.pvmbg",
+    "fields": [
+      {
+        "name": "report_id",
+        "type": "string"
+      },
+      {
+        "name": "volcano_id",
+        "type": "string"
+      },
+      {
+        "name": "alert_level",
+        "type": "string"
+      },
+      {
+        "name": "eruption_count_24h",
+        "type": "int"
+      },
+      {
+        "name": "ash_column_height_m",
+        "type": "double"
+      },
+      {
+        "name": "reported_at",
+        "type": "string"
+      }
+    ]
+  }
+}

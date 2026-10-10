@@ -154,10 +154,11 @@ func TestPVMBGRenamedRequiredFieldRejectsPoll(t *testing.T) {
 	assert.False(t, status.IsHealthy())
 }
 
-// TestConcurrency_PVMBGSlow_BMKGStaysFast is the acceptance test for the
-// critical concurrency requirement: while PVMBG takes ~3s, BMKG-only
-// processing must complete with p95 well under 300ms because the two
-// pollers run independently and never share a blocking lock.
+// TestConcurrency_PVMBGSlow_BMKGStaysFast is a polling regression test using
+// httptest sources and an in-memory fake store. It checks that BMKG poll-call
+// p95 stays under 300ms while a separate PVMBG poll takes ~3s.
+// P2.1 acceptance uses the live k6 PURPOSE=isolation run through Client API,
+// including authentication, Aggregator reads, PostgreSQL and serialization.
 func TestConcurrency_PVMBGSlow_BMKGStaysFast(t *testing.T) {
 	bmkg := bmkgTestServer(t, 0)
 	defer bmkg.Close()
@@ -177,8 +178,7 @@ func TestConcurrency_PVMBGSlow_BMKGStaysFast(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Start the slow PVMBG poll concurrently, exactly like the real Run()
-	// loop's independent goroutines.
+	// Invoke the poll methods concurrently; this test does not exercise Run().
 	go getPVMBGPoll(p)(ctx)
 	time.Sleep(20 * time.Millisecond) // let the PVMBG call actually start
 
@@ -192,7 +192,7 @@ func TestConcurrency_PVMBGSlow_BMKGStaysFast(t *testing.T) {
 
 	p95 := percentile(durations, 0.95)
 	assert.Less(t, p95.Milliseconds(), int64(300),
-		"BMKG-only path p95 must stay under 300ms while PVMBG is slow, got %v", p95)
+		"BMKG poll-call p95 must stay under 300ms while PVMBG is slow, got %v", p95)
 }
 
 func percentile(d []time.Duration, p float64) time.Duration {

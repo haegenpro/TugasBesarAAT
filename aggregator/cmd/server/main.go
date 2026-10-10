@@ -29,6 +29,27 @@ func main() {
 		os.Exit(1)
 	}
 
+	seismicReader, err := avrowire.LoadSourceReader(cfg.BMKGSeismicReaderSchema, "SeismicHistoryPage")
+	if err != nil {
+		logger.Error("invalid seismic reader schema", "error", err)
+		os.Exit(1)
+	}
+	tsunamiReader, err := avrowire.LoadSourceReader(cfg.BMKGTsunamiReaderSchema, "WarningHistoryPage")
+	if err != nil {
+		logger.Error("invalid tsunami reader schema", "error", err)
+		os.Exit(1)
+	}
+	volcanicReader, err := avrowire.LoadSourceReader(cfg.PVMBGReaderSchema, "VolcanicHistoryPage")
+	if err != nil {
+		logger.Error("invalid volcanic reader schema", "error", err)
+		os.Exit(1)
+	}
+	volcanicReaders, err := avrowire.NewReaderSwitch(volcanicReader, "VolcanicHistoryPage")
+	if err != nil {
+		logger.Error("invalid volcanic reader selection", "error", err)
+		os.Exit(1)
+	}
+
 	ctx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
 
@@ -45,7 +66,10 @@ func main() {
 	registry := avrowire.NewClient(cfg.SchemaRegistryURL)
 	registry.ConfigureLogging(logger, "aggregator")
 	bmkgClient.Registry = registry
+	bmkgClient.Readers = map[string]*avrowire.SourceReader{"/seismic-events": seismicReader, "/tsunami-warnings": tsunamiReader}
 	pvmbgClient.Registry = registry
+	pvmbgClient.Reader = volcanicReader
+	pvmbgClient.ReaderSwitch = volcanicReaders
 	lookup := volcano.NewLookup(st.Pool)
 	status := poller.NewPVMBGStatus()
 
@@ -63,6 +87,7 @@ func main() {
 
 	a := api.New(st, status, deps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
 	router := server.New(logger, a)
+	server.RegisterSchemaAdmin(router, volcanicReaders, cfg.AdminToken)
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: router}
 	go monitorStore(ctx, st, deps, p, logger)
 	go dispatchOutbox(ctx, st, cfg, deps, registry, logger)

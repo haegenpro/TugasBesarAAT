@@ -50,10 +50,22 @@ func (s *pollingSource) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	key := "updated_at"
+	key := "occurred_at"
+	if r.URL.Path == "/volcanic-reports" {
+		key = "reported_at"
+	}
 	out := []map[string]any{}
 	for _, row := range s.rows[r.URL.Path] {
-		if since.IsZero() || row[key].(time.Time).After(since) {
+		at, _ := row[key].(time.Time)
+		if r.URL.Path == "/tsunami-warnings" {
+			for _, ev := range s.rows["/seismic-events"] {
+				if ev["event_id"] == row["related_event_id"] {
+					at = ev["occurred_at"].(time.Time)
+					break
+				}
+			}
+		}
+		if since.IsZero() || !at.Before(since) {
 			out = append(out, row)
 		}
 	}
@@ -70,9 +82,9 @@ func pollingFixture(t *testing.T) (*store.Store, *pollingSource, func() *poller.
 	up := &pollingSource{
 		queries: map[string][]string{}, failed: map[string]bool{},
 		rows: map[string][]map[string]any{
-			"/seismic-events":   {{"event_id": id, "magnitude": 6.8, "depth_km": 20, "epicenter_lat": -6, "epicenter_lon": 106, "region_name": "Polling test", "occurred_at": old, "updated_at": old, "potential_tsunami": true}},
-			"/tsunami-warnings": {{"warning_id": "w-" + id, "related_event_id": id, "threat_level": "Awas", "affected_zones": []string{"Coast"}, "estimated_arrival": old, "updated_at": old}},
-			"/volcanic-reports": {{"report_id": "v-" + id, "volcano_id": "merapi", "alert_level": "Waspada", "eruption_count_24h": 1, "ash_column_height_m": 500, "reported_at": old, "updated_at": old}},
+			"/seismic-events":   {{"event_id": id, "magnitude": 6.8, "depth_km": 20, "epicenter_lat": -6, "epicenter_lon": 106, "region_name": "Polling test", "occurred_at": old, "potential_tsunami": true}},
+			"/tsunami-warnings": {{"warning_id": "w-" + id, "related_event_id": id, "threat_level": "Awas", "affected_zones": []string{"Coast"}, "estimated_arrival": old}},
+			"/volcanic-reports": {{"report_id": "v-" + id, "volcano_id": "merapi", "alert_level": "Waspada", "eruption_count_24h": 1, "ash_column_height_m": 500, "reported_at": old}},
 		},
 	}
 	server := httptest.NewServer(http.HandlerFunc(up.serve))
@@ -102,19 +114,23 @@ func TestPollingLastSuccessPersistsAndAvoidsReprocessingOldRecords(t *testing.T)
 	var oldSeen time.Time
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT last_seen_at FROM source_observations WHERE record_id=$1`, id).Scan(&oldSeen))
 	// Insert records exactly at the stored boundary. The overlap must include
-	// them even though the mock's comparison is strictly greater than since.
+	// them with inclusive event-time filtering and the polling overlap.
 	source.mu.Lock()
 	for path, spec := range map[string]struct{ endpoint, idKey, timeKey string }{
-		"/seismic-events":   {"BMKG", "event_id", "updated_at"},
-		"/tsunami-warnings": {"BMKG_TSUNAMI", "warning_id", "updated_at"},
-		"/volcanic-reports": {"PVMBG", "report_id", "updated_at"},
+		"/seismic-events":   {"BMKG", "event_id", "occurred_at"},
+		"/tsunami-warnings": {"BMKG_TSUNAMI", "warning_id", ""},
+		"/volcanic-reports": {"PVMBG", "report_id", "reported_at"},
 	} {
 		copy := map[string]any{}
 		for k, v := range source.rows[path][0] {
 			copy[k] = v
 		}
 		copy[spec.idKey] = copy[spec.idKey].(string) + "-boundary"
-		copy[spec.timeKey] = *statuses[spec.endpoint].LastSuccess
+		if spec.timeKey != "" {
+			copy[spec.timeKey] = *statuses[spec.endpoint].LastSuccess
+		} else {
+			copy["related_event_id"] = id + "-boundary"
+		}
 		source.rows[path] = append(source.rows[path], copy)
 	}
 	source.mu.Unlock()
@@ -167,7 +183,7 @@ func TestPollingOutageAndDatabaseRollbackKeepSuccessfulBoundary(t *testing.T) {
 		row[k] = v
 	}
 	row["report_id"] = "v-" + id + "-retry"
-	row["updated_at"] = time.Now().UTC()
+	row["reported_at"] = time.Now().UTC()
 	source.rows["/volcanic-reports"] = append(source.rows["/volcanic-reports"], row)
 	source.mu.Unlock()
 	// Fail inside the real data transaction, after the observation insert.
@@ -195,30 +211,29 @@ func TestPollingOutageAndDatabaseRollbackKeepSuccessfulBoundary(t *testing.T) {
 	require.Equal(t, 1, count, "the failed window is ingested on recovery without resetting the cursor")
 }
 
-func TestPollingUpdatedAtCorrectsOldRecordsWithoutFullFetch(t *testing.T) {
+func TestPollingNewReportPreservesHistoricRecord(t *testing.T) {
 	s, source, newPoller, id := pollingFixture(t)
 	ctx := context.Background()
 	pollAll(newPoller())
 	var hazardID string
-	var seen time.Time
-	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT hazard_id::text,last_seen_at FROM hazard_events WHERE source_ref_id=$1`, "v-"+id).Scan(&hazardID, &seen))
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT hazard_id::text FROM hazard_events WHERE source_ref_id=$1`, "v-"+id).Scan(&hazardID))
 	source.mu.Lock()
-	source.rows["/volcanic-reports"][0]["ash_column_height_m"] = 900
+	row := map[string]any{}
+	for k, v := range source.rows["/volcanic-reports"][0] {
+		row[k] = v
+	}
+	row["report_id"] = "v-" + id + "-new"
+	row["reported_at"] = time.Now().UTC()
+	row["ash_column_height_m"] = 900
+	source.rows["/volcanic-reports"] = append(source.rows["/volcanic-reports"], row)
 	source.mu.Unlock()
 	newPoller().PollPVMBGOnce(ctx)
 	h, err := s.GetByID(ctx, hazardID)
 	require.NoError(t, err)
-	require.Equal(t, float64(500), h.Attributes["ash_column_height_m"], "an old timestamp is excluded from an ordinary delta")
-	source.mu.Lock()
-	source.rows["/volcanic-reports"][0]["updated_at"] = time.Now().UTC()
-	source.mu.Unlock()
-	newPoller().PollPVMBGOnce(ctx)
-	h, err = s.GetByID(ctx, hazardID)
-	require.NoError(t, err)
-	require.Equal(t, float64(900), h.Attributes["ash_column_height_m"])
-	var refreshed time.Time
-	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT last_seen_at FROM hazard_events WHERE hazard_id=$1`, hazardID).Scan(&refreshed))
-	require.True(t, refreshed.After(seen), "a changed record refreshes its observation timestamp")
+	require.Equal(t, float64(500), h.Attributes["ash_column_height_m"])
+	var height float64
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT (attributes->>'ash_column_height_m')::float FROM hazard_events WHERE source_ref_id=$1`, row["report_id"]).Scan(&height))
+	require.Equal(t, float64(900), height)
 }
 
 func TestEmptyIncrementalWarningResponseDoesNotResolvePendingAssessment(t *testing.T) {

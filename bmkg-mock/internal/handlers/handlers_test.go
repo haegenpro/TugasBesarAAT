@@ -146,7 +146,7 @@ func TestGeneratedEvents_VisibleAndBounded(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	now := time.Now().UTC()
 
-	cursor := getSeismic(t, r, "")[0]["updated_at"].(string)
+	cursor := now.Add(-time.Second).Format(time.RFC3339Nano)
 	first, warning := seed.NextEvent(1700000000, 1, now, rng)
 	h.AddEvent(first, warning)
 	assert.Len(t, getSeismic(t, r, ""), 21)

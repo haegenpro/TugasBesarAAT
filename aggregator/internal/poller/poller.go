@@ -194,6 +194,14 @@ func (p *Poller) pollWarnings(ctx context.Context, cid string, since time.Time) 
 	return nil
 }
 func (p *Poller) pollVolcanic(ctx context.Context, cid string, since time.Time) error {
+	if p.PVMBG.ReaderSwitch != nil {
+		leaseCtx, _, release, err := p.PVMBG.ReaderSwitch.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		ctx = leaseCtx
+	}
 	reports, err := p.PVMBG.FetchVolcanicReports(ctx, cid, since)
 	if err != nil {
 		if p.Status != nil {
@@ -250,6 +258,14 @@ func (p *Poller) PollPVMBGOnce(ctx context.Context) {
 	}
 }
 func (p *Poller) replay(ctx context.Context, cid, entity string) error {
+	if entity == "volcanic-reports" && p.PVMBG.ReaderSwitch != nil {
+		leaseCtx, _, release, err := p.PVMBG.ReaderSwitch.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		ctx = leaseCtx
+	}
 	st := p.Store.(RecoveryStore)
 	source := "BMKG"
 	if entity == "volcanic-reports" {
@@ -318,6 +334,14 @@ func (p *Poller) logSourceFailure(source, cid string, err error) {
 }
 
 func (p *Poller) retryVolcanicMapping(ctx context.Context, cid string) error {
+	if p.PVMBG != nil && p.PVMBG.ReaderSwitch != nil {
+		leaseCtx, _, release, err := p.PVMBG.ReaderSwitch.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		ctx = leaseCtx
+	}
 	reader := p.Store.(interface {
 		PendingVolcanic(context.Context) ([]clients.VolcanicReport, error)
 	})

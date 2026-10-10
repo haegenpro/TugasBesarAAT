@@ -59,8 +59,7 @@ func (h *Handler) History(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "archive unavailable"})
 		return
 	}
-	// A schema change publishes history revisions and flips visibility under
-	// this same lock; readers must never consume new cursors with the old view.
+	// Keep each history page on one schema view while a toggle is in flight.
 	h.schemaMu.RLock()
 	defer h.schemaMu.RUnlock()
 	page, err := h.Archive.Read(entity, after, limit)

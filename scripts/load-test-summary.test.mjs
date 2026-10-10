@@ -31,7 +31,33 @@ test('milestone workload minimums cannot be bypassed by wrappers or direct k6', 
   assert.throws(() => fixture({ DURATION: '59s' }), /at least 50 VUs/);
   assert.throws(() => fixture({ DURATION: 'invalid' }), /DURATION/);
   assert.equal(fixture({ PURPOSE: 'overload', VUS: '300', DURATION: '30s' }).options.thresholds.controlled_rejections_429[0], 'count>0');
-  assert.equal(fixture().options.thresholds['http_req_duration{kind:seismic}'][0], 'p(95)<300');
+});
+
+test('milestone sustains concurrent users and gates errors while reporting latency without a ceiling', () => {
+  const { options } = fixture();
+  assert.equal(options.scenarios.load.executor, 'constant-vus');
+  assert.equal(options.scenarios.load.vus, 50);
+  assert.equal(options.scenarios.load.duration, '65s');
+  for (const name of ['http_req_duration{kind:seismic}', 'successful_hazard_duration{kind:seismic}']) {
+    assert.equal(options.thresholds[name][0], 'p(95)>=0');
+  }
+  for (const name of ['unexpected_failure_rate', 'hazard_failure_rate', 'login_failure_rate']) {
+    assert.equal(options.thresholds[name][0], 'rate<0.01');
+  }
+});
+
+test('isolation gates seismic p95 below 300ms and requires successful reads of both hazard types', () => {
+  const environment = { PURPOSE: 'isolation', VUS: '2', DURATION: '65s' };
+  const { options } = fixture(environment);
+  for (const name of ['http_req_duration{kind:seismic}', 'successful_hazard_duration{kind:seismic}']) {
+    assert.equal(options.thresholds[name][0], 'p(95)<300');
+  }
+  for (const kind of ['seismic', 'volcanic']) {
+    assert.equal(options.thresholds[`successful_hazard_requests{kind:${kind}}`][0], 'count>0');
+  }
+  for (const invalid of [{ MODE: 'sustained' }, { VUS: '1' }, { DURATION: '59s' }]) {
+    assert.throws(() => fixture({ ...environment, ...invalid }), /Isolation evidence requires/);
+  }
 });
 
 test('429s are counted without diluting separate hazard error denominator', () => {
@@ -45,7 +71,7 @@ test('429s are counted without diluting separate hazard error denominator', () =
 });
 
 test('summary prints milliseconds, p50/p95/p99, successful throughput, zero 429s and failed thresholds', () => {
-  const { handleSummary } = fixture({ SUMMARY_PATH: '/evidence/offline.json' });
+  const { handleSummary } = fixture({ PURPOSE: 'isolation', SUMMARY_PATH: '/evidence/offline.json' });
   const metrics = {
     http_reqs: { values: { count: 2000, rate: 30.5 } },
     successful_hazard_requests: { values: { count: 1900, rate: 29 } },

@@ -85,6 +85,11 @@ func TestWarningBeforeObservationAndCursorRollback(t *testing.T) {
 	id := "first-warning-" + uuid.NewString()
 	w := clients.TsunamiWarning{WarningID: "w-" + id, RelatedEventID: id, ThreatLevel: "Awas", EstimatedArrival: time.Now().UTC()}
 	require.NoError(t, s.CommitWarnings(ctx, []clients.TsunamiWarning{w}, "test", 0, time.Now(), false))
+	var pendingWarnings, syntheticEvents int
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM source_observations WHERE record_id=$1`, w.WarningID).Scan(&pendingWarnings))
+	require.Equal(t, 1, pendingWarnings)
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM hazard_events WHERE source_ref_id=$1`, id).Scan(&syntheticEvents))
+	require.Zero(t, syntheticEvents, "warning-first arrival must not invent a seismic event")
 	e := clients.SeismicEvent{EventID: id, Magnitude: 6.8, RegionName: "Coast", OccurredAt: time.Now().UTC(), PotentialTsunami: true}
 	require.NoError(t, s.CommitSeismic(ctx, []clients.SeismicEvent{e}, "test", 0))
 	var severity string

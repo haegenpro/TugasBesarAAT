@@ -1,0 +1,33 @@
+{
+  "type": "array",
+  "items": {
+    "type": "record",
+    "name": "TsunamiWarning",
+    "namespace": "id.go.bmkg",
+    "fields": [
+      {
+        "name": "warning_id",
+        "type": "string"
+      },
+      {
+        "name": "related_event_id",
+        "type": "string"
+      },
+      {
+        "name": "threat_level",
+        "type": "string"
+      },
+      {
+        "name": "affected_zones",
+        "type": {
+          "type": "array",
+          "items": "string"
+        }
+      },
+      {
+        "name": "estimated_arrival",
+        "type": "string"
+      }
+    ]
+  }
+}
