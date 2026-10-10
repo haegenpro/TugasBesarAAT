@@ -569,6 +569,10 @@ It saves `schema-before.json`, `schema-after.json`, and `2.3-new-report.json`;
 discovers the actual new report ID; verifies the canonical fields and new
 attribute; compares container IDs/start times/restart counts; and compares
 database column catalogs across the toggle. Capture its PASS/FAIL summary.
+History replay may store the first v2 report before live polling discovers the
+reader candidate. The probe retries only HTTP 409 from Aggregator activation for
+up to 120 seconds; authentication, drain, transport and malformed-response failures
+stop the probe. Run the storage command in section 5.3 after this command passes.
 
 ### 2.4 No crash, no restart, no manual code change
 
@@ -1042,7 +1046,8 @@ git log --oneline -- store/init.sql
 **Desired state:**
 - Column list is the fixed set from `store/init.sql` and `attributes` is type `jsonb`. No `confidence_level` column was ever added.
 - Rows **with** and **without** `confidence_level` coexist in one table; seismic rows never have it, and `rep-schema-<boot>-<activation>` rows have it.
-- No migration files; `init.sql` untouched by the schema change.
+- No migration is run for `confidence_level`; `init.sql` is untouched by the
+  schema change. Existing lifecycle migrations are independent of this toggle.
 - Both old and new rows are still readable through the API: `agg '/internal/hazards?hazard_type=VOLCANIC' | jget count` returns every row.
 
 If every pre-existing volcanic row now shows the field, a saved snapshot alone
@@ -1053,6 +1058,10 @@ asserted schema sequence above, run:
 ```text
 node scripts/evidence-probes.mjs storage --name 5.3-storage
 ```
+
+The probe also asserts that the current new record's `confidence_level` matches
+both its source value and the saved post-toggle canonical value; missing or changed
+confidence fails the check.
 
 Capture both IDs, their current attributes, the JSONB check, and unchanged
 column-catalog check. The JSON includes the original old snapshot alongside
@@ -1120,15 +1129,19 @@ was recreated. (Edit the file by hand if you prefer; the mock reads its delay fr
 PVMBG line shows anything other than about 3 s, stop and fix it before running k6.
 
 P2.1, P2.2, and P2.3 are independent acceptance scenarios. The assignment
-requires ≥50 connections for ≥60 seconds only in P2.2. Section 6.1 below uses a
-stricter mixed-load workload. To measure P2.1 separately, after verifying the
+requires ≥50 connections for ≥60 seconds only in P2.2. Section 6.1 below uses
+two constant VUs for isolation. After verifying the
 actual 3-second PVMBG delay in 6.0, run:
 
 ```bash
-python3 scripts/p2-profile.py mixed --purpose isolation --project YOUR_PROJECT --vus 2 --duration 60s --output evidence/p2-isolation
+PURPOSE=isolation BASE_URL=$K6_API EVIDENCE_NAME=p2-isolation bash scripts/load-test.sh mixed 2 65s
 ```
 
-One VU requests SEISMIC and the other VOLCANIC through Client API. The 60-second
+```powershell
+.\scripts\load-test.ps1 -Mode mixed -Purpose isolation -Vus 2 -Duration 65s -BaseUrl $K6_API -EvidenceName p2-isolation
+```
+
+One VU requests SEISMIC and the other VOLCANIC through Client API. The 65-second
 window is chosen to collect percentile samples; it is not a P2.1 requirement.
 Keep the successful SEISMIC p95 <300 ms and nonzero successful counts for both
 types. Do not combine percentiles from Aggregator logs and Client API requests.
@@ -1170,6 +1183,11 @@ is the decoupling the design relies on.)
 SEISMIC and one VOLCANIC. This measures repeated BMKG-only requests while the
 volcanic request stream and the delayed PVMBG poller are active. It is a
 concurrency/isolation check; P2.2's sustained load is measured separately below.
+
+The Go `TestConcurrency_PVMBGSlow_BMKGStaysFast` test provides polling regression
+coverage with simulated sources and a fake store. Use this live k6 run for P2.1
+acceptance: its timings include Client API, authentication, Aggregator reads,
+PostgreSQL and response serialization.
 
 Use the current dataset, including 500+ entries when present. Before 6.1, record
 the total and per-kind counts from the authenticated `/hazards` responses, the
@@ -1240,10 +1258,10 @@ Screenshot the final `MILESTONE 1 LOAD TEST` block and runtime results; preserve
 show health and stable container IDs/start times/restart counts throughout.
 Final health alone cannot prove no crash. TCP counts include idle keep-alive
 sockets and probes: report observed min/max overlapping the load window.
-50 VUs alone does not establish ≥50 parallel connections; verify connection
-evidence against that wording and retain any shortfall. Neither socket counts
-nor VUs prove 50 simultaneous in-flight requests. The workload has 50 ms think
-time, and all sessions share the Field identity's configured concurrency budget.
+The `constant-vus` workload sustains 50 concurrent users for 65 seconds and
+satisfies P2.2's sustained-load configuration. TCP samples provide supporting
+observations. Report the 50 ms think time and the Field identity's configured
+concurrency budget, which all sessions share.
 
 `unexpected_failure_rate` excludes 429 from numerator and denominator;
 `http_req_failed` accepts 429 but retains them in its denominator. Separate

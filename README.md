@@ -975,14 +975,16 @@ polling cycle. Successful hazard list and detail reads use two SELECT queries:
 one reads the hazard fields together with revision and observation metadata,
 and one reads all three source polling statuses. Notice lists also use two
 queries; notice details use three because their history is read separately.
-Together with the two independent pollers, this means a slow
-PVMBG call has no way to slow down a BMKG-only read such as
-`/internal/hazards?hazard_type=SEISMIC`.
+The independent pollers keep source network calls outside the read path, so a
+BMKG-only read such as `/internal/hazards?hazard_type=SEISMIC` does not wait for
+a PVMBG response. Live API latency still includes database and request processing.
 
-There is a test for exactly this.
+Polling independence has a regression test.
 `TestConcurrency_PVMBGSlow_BMKGStaysFast` in `internal/poller` runs a PVMBG
-`httptest` server with a 3 second delay next to 20 BMKG poll cycles, and
-asserts that the BMKG p95 stays under 300 ms.
+`httptest` server with a 3 second delay next to 20 BMKG poll calls using an
+in-memory fake store, and asserts that BMKG poll-call p95 stays under 300 ms.
+P2.1 acceptance uses the live k6 `Purpose=isolation` run in Demo F to measure
+BMKG-only HTTP requests through Client API with the source delay verified at 3 s.
 
 ### NATS publishing
 
@@ -1207,7 +1209,7 @@ your own.
 | --- | --- | --- |
 | P1 | Mapping for both sources on the initial schema | Demo A |
 | P1 | Schema change at runtime, unknown-field policy | Demo B |
-| P2 | BMKG-only p95 under 300 ms with PVMBG at 3 s | Demo D, Demo F (`mixed`) |
+| P2 | BMKG-only p95 under 300 ms with PVMBG at 3 s | Demo D, Demo F (`mixed`, `Purpose=isolation`) |
 | P2 | Sustained load, controlled `429` | Demo F (`sustained`) |
 | P2 | PVMBG outage and recovery | Demo C |
 | P3 | Institution credentials rejected across institutions | Demo E |
@@ -1262,11 +1264,14 @@ The schema command reads connection settings and credentials from the local env
 files, verifies source v1, then toggles PVMBG to writer v2. It confirms that the
 Aggregator ingests the new schema report while reader v1 drops confidence, then
 calls the Aggregator's independent `POST /admin/schema-version` to activate its
-discovered reader v2. It waits for a newly generated report after reader activation
+discovered reader v2. If history replay arrives before live polling discovers v2,
+it retries HTTP 409 for up to 120 seconds. Other failures stop the probe without
+retrying the toggle. It waits for a newly generated report after reader activation
 to appear in the canonical API with `attributes.confidence_level`. It records the
 before/after container identities and column catalog, and checks that neither a restart
 nor a schema migration occurred. The storage command verifies that pre-change and
-post-change records coexist and remain readable. Keep their generated JSON and
+post-change records coexist and remain readable, and that the current new record's
+confidence matches both its source and saved canonical value. Keep their generated JSON and
 text files in `evidence/` for the report.
 
 Start with both writer and reader on v1. The command fails if the writer is
@@ -1325,13 +1330,16 @@ done
 
 That loop runs one request at a time. For the real comparison, with
 BMKG-only and PVMBG requests running at the same moment, use the k6 `mixed`
-mode from Demo F while the delay is still 3 seconds. When you are done, put
+mode with `Purpose=isolation` from Demo F while the delay is still 3 seconds.
+That live run supplies the P2.1 acceptance measurement. When you are done, put
 the original delay values back and recreate the container.
 
-There is also a unit test that measures the same scenario:
+There is also a polling regression test:
 `cd aggregator && go test ./internal/poller/... -run TestConcurrency -v`.
 It runs against `httptest` servers, with BMKG answering instantly and PVMBG
-taking 3 seconds, and asserts that the BMKG-only p95 stays under 300 ms.
+taking 3 seconds, and asserts that BMKG poll-call p95 stays under 300 ms using
+a fake store. Its timing covers polling methods; the live k6 isolation run
+measures the public gateway, authentication, PostgreSQL reads and serialization.
 
 ### Demo E: institution credential isolation
 
@@ -1369,7 +1377,7 @@ BASE_URL="${K6_BASE_URL}" scripts/load-test.sh sustained 60 70s
 BASE_URL="${K6_BASE_URL}" scripts/load-test.sh mixed 50 65s
 ```
 
-In `mixed` mode both wrappers warn when `pvmbg-mock/.env` does not hold a 3000 ms
+In `mixed` mode both wrappers reject the run when `pvmbg-mock/.env` does not hold a 3000 ms
 delay. Set that delay by editing the file, as in Demo D, not through the shell.
 
 `sustained` reports throughput, p50/p95/p99, error rate, and the number of
@@ -1387,18 +1395,25 @@ P2.1, P2.2 and P2.3 are separate tests. Only P2.2 specifies at least
 running Compose project whose PVMBG delay is already 3000 ms, use:
 
 ```bash
-python3 scripts/p2-profile.py mixed --purpose isolation --project YOUR_PROJECT --vus 2 --duration 60s --output evidence/p2-isolation
+PURPOSE=isolation BASE_URL="${K6_BASE_URL}" EVIDENCE_NAME=p2-isolation bash scripts/load-test.sh mixed 2 65s
 ```
 
-This uses one requester per hazard type. The 60 seconds is a sampling choice,
-not a P2.1 minimum in the assignment. The default 50-VU mixed run additionally
-checks isolation under load. P2.2 has no 300 ms threshold; it checks throughput,
-latency percentiles, errors and process stability. P2.3 exercises outage and recovery.
+On PowerShell:
 
-`mixed` splits the VUs between `hazard_type=SEISMIC` and `VOLCANIC`, and
-fails unless the successful SEISMIC p95 is under 300 ms and both kinds have
-successful reads. Fast 429 responses cannot hide slow data responses. Run it with PVMBG's delay at 3
-seconds, as set up in Demo D. Volcanic reads come from the Canonical Store,
+```powershell
+.\scripts\load-test.ps1 -Mode mixed -Purpose isolation -Vus 2 -Duration 65s -BaseUrl "${K6_BASE_URL}" -EvidenceName p2-isolation
+```
+
+This uses one requester per hazard type. The 65 seconds is a sampling choice,
+not a P2.1 minimum in the assignment. The default `Purpose=milestone` run checks
+P2.2: sustained concurrency, throughput, latency percentiles, errors and process
+stability, with no 300 ms threshold. P2.3 exercises outage and recovery.
+
+`mixed` splits the VUs between `hazard_type=SEISMIC` and `VOLCANIC` and requires
+successful reads of both types. With `Purpose=isolation`, both all-attempt and
+successful-only SEISMIC p95 must be under 300 ms, so fast 429 responses cannot
+hide slow data responses. Run it with PVMBG's delay at 3 seconds, as set up in
+Demo D. Volcanic reads come from the Canonical Store,
 so this shows the request path does not depend on the slow PVMBG poller.
 
 Each VU logs in as Field and logs in again at 75% of the access token

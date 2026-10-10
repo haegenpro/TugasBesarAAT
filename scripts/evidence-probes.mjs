@@ -168,6 +168,26 @@ async function mapping() {
   say('Exact 5.0 / 6.5 boundaries: capture go test -v ./internal/mapping in aggregator separately.');
 }
 
+async function activateDiscoveredReader() {
+  return until(async () => {
+    try {
+      // Keep response headers on stderr so a not-yet-discovered candidate can
+      // be distinguished from authentication, drain and transport failures.
+      return JSON.parse(compose(['exec', '-T', 'aggregator', 'sh', '-c',
+        'wget -SO- --post-data="" --header="Authorization: Bearer ${AGGREGATOR_ADMIN_TOKEN:?}" "http://localhost:${AGGREGATOR_PORT:?}/admin/schema-version"']));
+    } catch (error) {
+      const status = /HTTP\/\S+\s+(\d{3})\b/.exec(String(error.stderr || ''))?.[1];
+      if (status === '409') {
+        say('Reader candidate not discovered yet (HTTP 409); waiting for live polling.');
+        return null;
+      }
+      // execFile errors can contain the command and captured output. Do not
+      // expose either in evidence, and never retry a potentially applied toggle.
+      throw new Error(`Aggregator reader activation failed${status ? ` (HTTP ${status})` : ''}`);
+    }
+  }, 'live polling discovers the second reader schema', 120);
+}
+
 async function schema() {
   const before = (await hazards('VOLCANIC')).body;
   check(before.data.length > 0, 'pre-change canonical volcanic records exist');
@@ -188,8 +208,7 @@ async function schema() {
   save('schema-reader-v1.json', { source: firstV2, canonical: dropped });
   // Aggregator remains internal. Use its container's admin credential without
   // printing it or exposing an additional host port.
-  const readerToggle = JSON.parse(compose(['exec', '-T', 'aggregator', 'sh', '-c',
-    'wget -qO- --post-data="" --header="Authorization: Bearer ${AGGREGATOR_ADMIN_TOKEN:?}" "http://localhost:${AGGREGATOR_PORT:?}/admin/schema-version"']));
+  const readerToggle = await activateDiscoveredReader();
   check(readerToggle.reader_version === 'v2', 'explicit Aggregator toggle selected the discovered reader v2');
   const adoptedAt = Date.now();
   const fresh = await until(async () => {
@@ -216,6 +235,11 @@ async function storage() {
   const old = rows.find(r => r.hazard_id === before.canonical.data[0].hazard_id);
   const fresh = rows.find(r => r.hazard_id === after.canonical.hazard_id);
   check(Boolean(old && fresh && old.hazard_id !== fresh.hazard_id), 'pre-change and post-change volcanic rows coexist and are readable through API');
+  const expectedConfidence = after.source.confidence_level;
+  check(typeof expectedConfidence === 'number' && Number.isFinite(expectedConfidence)
+    && after.canonical.attributes?.confidence_level === expectedConfidence
+    && fresh.attributes?.confidence_level === expectedConfidence,
+  'current post-change record retains confidence_level matching the source and saved canonical record');
   check(equivalent(before.columns, after.columns) && equivalent(after.columns, catalog()), 'no column migration for confidence_level');
   check(catalog().some(c => c.table_name === 'hazard_events' && c.column_name === 'attributes' && c.data_type === 'jsonb'), 'attributes stored in JSONB');
   save(`${name}.json`, { old_before: before.canonical.data[0], old_now: old, new_now: fresh, columns: catalog() });
