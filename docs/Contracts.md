@@ -195,3 +195,14 @@ keeps broker delivery attempts from ending before the application policy does.
 - [x] Anggota 3's consumers deserialize `payload` using the same `HazardEvent` model from the wire format spec (no separate ad hoc parsing)
 - [x] Both consumers (dashboard updater, notifier) key on `hazard_id` for dedup and can be shown handling a redelivered/duplicate message without double-applying it
 - [x] Correlation ID from the envelope shows up in both the Aggregator's publish log line and the consumer's processing log line for the same event
+
+
+## Source ingestion validation
+
+Source Avro writer schemas may declare `x-validation.minimum`, `maximum`, and
+scalar `allowedValues`. The Aggregator validates these rules for live polling and
+Avro `/history` pages before canonical writes. JSON source responses remain for
+inspection; registry-enabled ingestion requires Avro. See
+[Schema Validation](Schema%20Validation.md) for supported types, normalization,
+nullable values, and cursor retention on failure. These are application metadata,
+not built-in Avro constraints, and do not change the Client API JSON contract.

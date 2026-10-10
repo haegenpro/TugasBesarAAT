@@ -1102,6 +1102,23 @@ was recreated. (Edit the file by hand if you prefer; the mock reads its delay fr
 **Keep `evidence/6.0.txt`**: it is the only proof that 6.1 ran against a 3 s PVMBG delay. If the
 PVMBG line shows anything other than about 3 s, stop and fix it before running k6.
 
+P2.1, P2.2, and P2.3 are independent acceptance scenarios. The assignment
+requires ≥50 connections for ≥60 seconds only in P2.2. Section 6.1 below uses a
+stricter mixed-load workload. To measure P2.1 separately, after verifying the
+actual 3-second PVMBG delay in 6.0, run:
+
+```bash
+python3 scripts/p2-profile.py mixed --purpose isolation --project YOUR_PROJECT --vus 2 --duration 60s --output evidence/p2-isolation
+```
+
+One VU requests SEISMIC and the other VOLCANIC through Client API. The 60-second
+window is chosen to collect percentile samples; it is not a P2.1 requirement.
+Keep the successful SEISMIC p95 <300 ms and nonzero successful counts for both
+types. Do not combine percentiles from Aggregator logs and Client API requests.
+Run 6.2 separately; its acceptance gates have no latency ceiling. Run outage
+recovery separately using section 6.3. See [Schema validation](Schema%20Validation.md)
+for live/history type and constraint regression checks.
+
 ### 6.1 P2.1: BMKG-only stays fast while PVMBG is slow
 
 Client API uses example capacities of 128 globally and 32 per verified

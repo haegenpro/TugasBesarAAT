@@ -1,7 +1,9 @@
 package clients
 
 import (
+	"aggregator/internal/avrowire"
 	"aggregator/internal/middleware"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -23,7 +25,7 @@ type HistoryPage struct {
 	HasMore    bool          `json:"has_more"`
 }
 
-func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, key, source, entity, cid string, after int64, logger *slog.Logger) (HistoryPage, error) {
+func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, key, source, entity, cid string, after int64, logger *slog.Logger, registry *avrowire.Client) (HistoryPage, error) {
 	p := HistoryPage{}
 	path := "/history?entity=" + url.QueryEscape(entity) + "&after=" + strconv.FormatInt(after, 10) + "&limit=100"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
@@ -31,6 +33,9 @@ func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, ke
 		return p, err
 	}
 	req.Header.Set(header, key)
+	if registry != nil {
+		req.Header.Set("Accept", avrowire.MediaType)
+	}
 	req.Header.Set(middleware.CorrelationIDHeader, cid)
 	started := time.Now()
 	resp, err := httpClient.Do(req)
@@ -43,7 +48,29 @@ func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, ke
 	if resp.StatusCode != 200 {
 		return p, fmt.Errorf("history returned status %d", resp.StatusCode)
 	}
-	if err = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&p); err != nil {
+	if registry != nil {
+		if resp.Header.Get("Content-Type") != avrowire.MediaType {
+			return p, fmt.Errorf("%w: %s history requires Avro", ErrContractViolation, source)
+		}
+		body, e := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
+		if e != nil {
+			return p, e
+		}
+		if len(body) > 4<<20 {
+			return p, fmt.Errorf("history body exceeds 4 MiB")
+		}
+		native, e := registry.Decode(avrowire.WithCorrelationID(ctx, cid), body)
+		if e != nil {
+			return p, fmt.Errorf("%s history: %w", source, e)
+		}
+		body, e = json.Marshal(native)
+		if e != nil {
+			return p, e
+		}
+		if e = json.Unmarshal(body, &p); e != nil {
+			return p, e
+		}
+	} else if err = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&p); err != nil {
 		return p, err
 	}
 	if p.Data == nil {
@@ -62,15 +89,15 @@ func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, ke
 	return p, nil
 }
 func (c *BMKGClient) FetchHistory(ctx context.Context, cid, entity string, after int64) (HistoryPage, error) {
-	return fetchHistory(ctx, c.HTTP, c.BaseURL, "X-BMKG-Key", c.APIKey, "bmkg", entity, cid, after, c.Logger)
+	return fetchHistory(ctx, c.HTTP, c.BaseURL, "X-BMKG-Key", c.APIKey, "bmkg", entity, cid, after, c.Logger, c.Registry)
 }
 func (c *PVMBGClient) FetchHistory(ctx context.Context, cid, entity string, after int64) (HistoryPage, error) {
-	return fetchHistory(ctx, c.HTTP, c.BaseURL, "Authorization", "Bearer "+c.Token, "pvmbg", entity, cid, after, c.Logger)
+	return fetchHistory(ctx, c.HTTP, c.BaseURL, "Authorization", "Bearer "+c.Token, "pvmbg", entity, cid, after, c.Logger, c.Registry)
 }
 func DecodeSeismic(raw json.RawMessage) (SeismicEvent, error) {
 	var e SeismicEvent
 	var fields map[string]any
-	if err := json.Unmarshal(raw, &fields); err != nil {
+	if err := decodeHistoryFields(raw, &fields); err != nil {
 		return e, err
 	}
 	if err := requireFields(fields, "event_id", "magnitude", "depth_km", "epicenter_lat", "epicenter_lon", "region_name", "occurred_at", "potential_tsunami"); err != nil {
@@ -88,7 +115,7 @@ func DecodeSeismic(raw json.RawMessage) (SeismicEvent, error) {
 func DecodeWarning(raw json.RawMessage) (TsunamiWarning, error) {
 	var w TsunamiWarning
 	var fields map[string]any
-	if err := json.Unmarshal(raw, &fields); err != nil {
+	if err := decodeHistoryFields(raw, &fields); err != nil {
 		return w, err
 	}
 	if err := requireFields(fields, "warning_id", "related_event_id", "threat_level", "affected_zones", "estimated_arrival"); err != nil {
@@ -110,8 +137,15 @@ func DecodeWarning(raw json.RawMessage) (TsunamiWarning, error) {
 }
 func DecodeVolcanic(raw json.RawMessage) (VolcanicReport, error) {
 	var fields map[string]any
-	if err := json.Unmarshal(raw, &fields); err != nil {
+	if err := decodeHistoryFields(raw, &fields); err != nil {
 		return VolcanicReport{}, err
 	}
 	return decodeVolcanicReport(fields)
+}
+
+// Preserve writer long values in extension attributes while mapping core fields.
+func decodeHistoryFields(raw []byte, out *map[string]any) error {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	return d.Decode(out)
 }

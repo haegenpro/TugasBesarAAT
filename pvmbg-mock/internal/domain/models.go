@@ -22,6 +22,7 @@ type VolcanicReport struct {
 	EruptionCount24h int           `json:"eruption_count_24h"`
 	AshColumnHeightM float64       `json:"ash_column_height_m"`
 	ReportedAt       timeutil.Time `json:"reported_at"`
+	UpdatedAt        timeutil.Time `json:"updated_at"`
 	ConfidenceLevel  *float64      `json:"confidence_level,omitempty"`
 }
 

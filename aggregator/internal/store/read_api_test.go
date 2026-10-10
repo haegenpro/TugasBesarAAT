@@ -157,7 +157,7 @@ func TestReadAPICombinedQueries(t *testing.T) {
 		require.False(t, m.Historical)
 		m = response.Metadata[older.HazardID]
 		require.Nil(t, m.LastSeenAt)
-		require.Equal(t, "unavailable", m.State)
+		require.Equal(t, "fresh", m.State)
 		require.True(t, m.Historical)
 		response = listResponse{}
 		request(t, "/hazards?area_name="+area+"&hazard_type=SEISMIC&severity=AWAS&since="+now.Add(-time.Minute).Format(time.RFC3339), http.StatusOK, 2, &response)

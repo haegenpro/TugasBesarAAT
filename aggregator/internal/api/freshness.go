@@ -48,9 +48,9 @@ func (a *API) recordMetadata(events []domain.HazardEvent, status map[string]sour
 			}
 		}
 		m.Historical = now.Sub(e.OccurredAt.Time) > ttl
-		if m.LastSeenAt == nil || now.Sub(*m.LastSeenAt) > ttl {
-			m.State = "unavailable"
-		}
+		// Incremental polling intentionally omits unchanged records. Their last
+		// observation time is evidence, not a heartbeat: availability follows the
+		// source's successful checks, including successful empty responses.
 		out[e.HazardID] = m
 	}
 	return out

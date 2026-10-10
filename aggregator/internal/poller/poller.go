@@ -23,8 +23,11 @@ type RecoveryStore interface {
 	CommitVolcanic(context.Context, []clients.VolcanicReport, []domain.HazardEvent, string, int64) error
 	HistoryCursor(context.Context, string, string) (int64, error)
 	PollStatus(context.Context, string) (domain.EndpointStatus, error)
-	RecordAttempt(context.Context, string, string, bool, time.Duration, time.Duration) error
+	RecordAttempt(context.Context, string, string, bool, time.Duration, time.Duration, ...time.Time) error
 }
+
+type pollFunc func(context.Context, string, time.Time) error
+
 type Poller struct {
 	BMKG       *clients.BMKGClient
 	PVMBG      *clients.PVMBGClient
@@ -44,17 +47,19 @@ func (p *Poller) Run(ctx context.Context) {
 	if _, ok := p.Store.(interface {
 		PendingVolcanic(context.Context) ([]clients.VolcanicReport, error)
 	}); ok {
-		go p.loop(ctx, "mapping:volcanic", p.retryVolcanicMapping)
+		go p.loop(ctx, "mapping:volcanic", func(ctx context.Context, cid string, _ time.Time) error {
+			return p.retryVolcanicMapping(ctx, cid)
+		})
 	}
 	if _, ok := p.Store.(RecoveryStore); ok {
 		for _, entity := range []string{"seismic-events", "tsunami-warnings", "volcanic-reports"} {
 			entity := entity
-			go p.loop(ctx, "history:"+entity, func(ctx context.Context, cid string) error { return p.replay(ctx, cid, entity) })
+			go p.loop(ctx, "history:"+entity, func(ctx context.Context, cid string, _ time.Time) error { return p.replay(ctx, cid, entity) })
 		}
 	}
 	<-ctx.Done()
 }
-func (p *Poller) loop(ctx context.Context, endpoint string, fn func(context.Context, string) error) {
+func (p *Poller) loop(ctx context.Context, endpoint string, fn pollFunc) {
 	interval := p.Interval
 	maxBackoff := p.MaxBackoff
 	if interval <= 0 || maxBackoff < interval {
@@ -67,28 +72,27 @@ func (p *Poller) loop(ctx context.Context, endpoint string, fn func(context.Cont
 		if p.Ready == nil || p.Ready() {
 			cid := uuid.NewString()
 			callCtx := middleware.WithCorrelationID(ctx, cid)
+			var status domain.EndpointStatus
+			var err error
 			if st, ok := p.Store.(RecoveryStore); ok {
-				status, err := st.PollStatus(callCtx, endpoint)
-				if err != nil {
-					p.logSourceFailure(endpoint, cid, err)
-				} else if status.NextAttempt != nil && status.NextAttempt.After(time.Now()) {
+				status, err = st.PollStatus(callCtx, endpoint)
+				if err == nil && status.NextAttempt != nil && status.NextAttempt.After(time.Now()) {
 					if !sleep(ctx, time.Until(*status.NextAttempt)) {
 						return
 					}
 					continue
 				}
 			}
-			err := fn(callCtx, cid)
+			// A status read failure is not an empty cursor. Do not accidentally
+			// fetch a full snapshot or advance a cursor when PostgreSQL is down.
+			if err == nil {
+				err = p.attempt(callCtx, endpoint, cid, status, fn)
+			}
 			if err != nil {
 				p.logSourceFailure(endpoint, cid, err)
 				failures++
 			} else {
 				failures = 0
-			}
-			if st, ok := p.Store.(RecoveryStore); ok {
-				if e := st.RecordAttempt(callCtx, endpoint, cid, err == nil, interval, maxBackoff); e != nil {
-					p.logSourceFailure(endpoint, cid, e)
-				}
 			}
 			for i := 1; i < failures && delay < maxBackoff; i++ {
 				delay *= 2
@@ -102,6 +106,43 @@ func (p *Poller) loop(ctx context.Context, endpoint string, fn func(context.Cont
 		}
 	}
 }
+
+// since uses the start of the last successfully committed request, not its
+// completion time: a source snapshot can precede response decoding and DB work.
+// The overlap includes equal timestamps despite the sources' strict > filter.
+func (p *Poller) since(endpoint string, lastSuccess *time.Time, started time.Time) time.Time {
+	if endpoint != "BMKG" && endpoint != "BMKG_TSUNAMI" && endpoint != "PVMBG" {
+		return time.Time{}
+	}
+	if lastSuccess == nil || lastSuccess.IsZero() || lastSuccess.After(started) {
+		return time.Time{}
+	}
+	return lastSuccess.Add(-time.Second)
+}
+
+func (p *Poller) attempt(ctx context.Context, endpoint, cid string, status domain.EndpointStatus, fn pollFunc) error {
+	started := domain.Now()
+	err := fn(ctx, cid, p.since(endpoint, status.LastSuccess, started))
+	if st, ok := p.Store.(RecoveryStore); ok {
+		// Data is committed by fn before last_success may advance. If this write
+		// fails, the previous cursor survives and the next attempt safely repeats.
+		err = errors.Join(err, st.RecordAttempt(ctx, endpoint, cid, err == nil, p.Interval, p.MaxBackoff, started))
+	}
+	return err
+}
+
+func (p *Poller) pollOnce(ctx context.Context, endpoint, cid string, fn pollFunc) error {
+	var status domain.EndpointStatus
+	if st, ok := p.Store.(RecoveryStore); ok {
+		var err error
+		status, err = st.PollStatus(ctx, endpoint)
+		if err != nil {
+			return err
+		}
+	}
+	return p.attempt(ctx, endpoint, cid, status, fn)
+}
+
 func sleep(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -112,8 +153,8 @@ func sleep(ctx context.Context, d time.Duration) bool {
 		return true
 	}
 }
-func (p *Poller) pollSeismic(ctx context.Context, cid string) error {
-	events, err := p.BMKG.FetchSeismicEvents(ctx, cid, time.Time{})
+func (p *Poller) pollSeismic(ctx context.Context, cid string, since time.Time) error {
+	events, err := p.BMKG.FetchSeismicEvents(ctx, cid, since)
 	if err != nil {
 		return err
 	}
@@ -130,26 +171,30 @@ func (p *Poller) pollSeismic(ctx context.Context, cid string) error {
 	}
 	return nil
 }
-func (p *Poller) pollWarnings(ctx context.Context, cid string) error {
+func (p *Poller) pollWarnings(ctx context.Context, cid string, since time.Time) error {
 	started := domain.Now()
-	warnings, err := p.BMKG.FetchTsunamiWarnings(ctx, cid, time.Time{})
+	warnings, err := p.BMKG.FetchTsunamiWarnings(ctx, cid, since)
 	if err != nil {
 		return err
 	}
 	if st, ok := p.Store.(RecoveryStore); ok {
-		// Live absence is authoritative only after the durable warning archive has caught up.
-		cursor, err := st.HistoryCursor(ctx, "BMKG", "tsunami-warnings")
-		if err != nil {
-			return err
+		complete := false
+		if since.IsZero() {
+			// Only a full snapshot plus a caught-up archive can establish absence.
+			// An empty incremental response says nothing about older warnings.
+			cursor, err := st.HistoryCursor(ctx, "BMKG", "tsunami-warnings")
+			if err != nil {
+				return err
+			}
+			page, err := p.BMKG.FetchHistory(ctx, cid, "tsunami-warnings", cursor)
+			complete = err == nil && !page.HasMore && len(page.Data) == 0
 		}
-		page, err := p.BMKG.FetchHistory(ctx, cid, "tsunami-warnings", cursor)
-		complete := err == nil && !page.HasMore && len(page.Data) == 0
 		return st.CommitWarnings(ctx, warnings, cid, 0, started, complete)
 	}
 	return nil
 }
-func (p *Poller) pollVolcanic(ctx context.Context, cid string) error {
-	reports, err := p.PVMBG.FetchVolcanicReports(ctx, cid, time.Time{})
+func (p *Poller) pollVolcanic(ctx context.Context, cid string, since time.Time) error {
+	reports, err := p.PVMBG.FetchVolcanicReports(ctx, cid, since)
 	if err != nil {
 		if p.Status != nil {
 			p.Status.MarkUnhealthy(domain.Now())
@@ -189,8 +234,8 @@ func (p *Poller) PollBMKGOnce(ctx context.Context) {
 	cid := uuid.NewString()
 	ctx = middleware.WithCorrelationID(ctx, cid)
 	done := make(chan error, 2)
-	go func() { done <- p.pollSeismic(ctx, cid) }()
-	go func() { done <- p.pollWarnings(ctx, cid) }()
+	go func() { done <- p.pollOnce(ctx, "BMKG", cid, p.pollSeismic) }()
+	go func() { done <- p.pollOnce(ctx, "BMKG_TSUNAMI", cid, p.pollWarnings) }()
 	for i := 0; i < 2; i++ {
 		if err := <-done; err != nil {
 			p.logSourceFailure("bmkg", cid, err)
@@ -200,7 +245,7 @@ func (p *Poller) PollBMKGOnce(ctx context.Context) {
 func (p *Poller) PollPVMBGOnce(ctx context.Context) {
 	cid := uuid.NewString()
 	ctx = middleware.WithCorrelationID(ctx, cid)
-	if err := p.pollVolcanic(ctx, cid); err != nil {
+	if err := p.pollOnce(ctx, "PVMBG", cid, p.pollVolcanic); err != nil {
 		p.logSourceFailure("pvmbg", cid, err)
 	}
 }

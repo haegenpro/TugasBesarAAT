@@ -2,6 +2,7 @@ package api
 
 import (
 	"aggregator/internal/domain"
+	"aggregator/internal/timeutil"
 	"testing"
 	"time"
 )
@@ -21,6 +22,26 @@ func TestFreshnessUsesSuccessfulCheckAndExpiresWithoutLosingEvidence(t *testing.
 	after := statusAt(p, now.Add(time.Millisecond), time.Minute)
 	if after.State != "unavailable" || after.LastSuccess == nil || after.StaleSince == "" {
 		t.Fatalf("expiry erased evidence or stayed fresh: %#v", after)
+	}
+}
+
+func TestUnchangedRecordsFollowSourceChecksRatherThanLastSeenExpiry(t *testing.T) {
+	now := time.Now().UTC()
+	old := now.Add(-24 * time.Hour)
+	a := &API{BMKGFreshness: time.Minute, PVMBGFreshness: time.Minute}
+	events := []domain.HazardEvent{
+		{HazardID: "unchanged", Source: domain.SourceBMKG, OccurredAt: timeutil.New(old)},
+		{HazardID: "history-only", Source: domain.SourceBMKG, OccurredAt: timeutil.New(old)},
+		{HazardID: "cached", Source: domain.SourcePVMBG, OccurredAt: timeutil.New(old)},
+	}
+	metadata := map[string]domain.RecordMetadata{"unchanged": {LastSeenAt: &old}, "history-only": {}, "cached": {LastSeenAt: &old}}
+	statuses := map[string]sourceStatus{"BMKG": {State: "fresh"}, "PVMBG": {State: "stale"}}
+	out := a.recordMetadata(events, statuses, metadata)
+	if out["unchanged"].State != "fresh" || out["history-only"].State != "fresh" || out["cached"].State != "stale" {
+		t.Fatalf("unchanged record timestamps overrode source availability: %#v", out)
+	}
+	if !out["unchanged"].Historical || out["unchanged"].LastSeenAt != &old || out["history-only"].LastSeenAt != nil {
+		t.Fatalf("historical/observation evidence was lost: %#v", out)
 	}
 }
 func TestStoppedPollingBecomesStaleEvenIfLastStoredStateWasFresh(t *testing.T) {

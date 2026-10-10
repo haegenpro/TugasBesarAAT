@@ -99,6 +99,25 @@ func (a *Archive) Read(entity string, after int64, limit int) (Page, error) {
 	return p, rows.Err()
 }
 
+// Latest returns one durable version per ID, including records evicted from the
+// live window. Schema changes must publish revisions for these records too.
+func (a *Archive) Latest(entity string) ([]json.RawMessage, error) {
+	rows, err := a.DB.Query(`SELECT payload FROM history WHERE sequence IN (SELECT MAX(sequence) FROM history WHERE entity=? GROUP BY record_id) ORDER BY sequence`, entity)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []json.RawMessage{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		out = append(out, json.RawMessage(raw))
+	}
+	return out, rows.Err()
+}
+
 func (a *Archive) Head() (int64, error) {
 	var head int64
 	err := a.DB.QueryRow(`SELECT COALESCE(MAX(sequence),0) FROM history`).Scan(&head)

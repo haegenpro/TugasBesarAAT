@@ -27,8 +27,9 @@ if (PURPOSE === 'isolation' && (MODE !== 'mixed' || VUS < 2 || durationSeconds <
   throw new Error('Isolation evidence requires mixed mode, at least 2 VUs and 60 seconds');
 }
 if (PURPOSE === 'milestone' && (VUS < 50 || durationSeconds < 60)) {
-  throw new Error('Milestone evidence requires at least 50 VUs and 60 seconds; use PURPOSE=overload for the separate rejection test');
+  throw new Error('Milestone load evidence requires at least 50 VUs and 60 seconds; use PURPOSE=isolation for the separate mixed P2.1 probe');
 }
+if (PURPOSE === 'isolation' && (MODE !== 'mixed' || VUS < 2)) throw new Error('Isolation requires mixed mode and at least two VUs');
 required('CLIENT_ID');
 required('CLIENT_SECRET');
 if (!['sustained', 'mixed'].includes(MODE)) throw new Error('MODE must be sustained or mixed');

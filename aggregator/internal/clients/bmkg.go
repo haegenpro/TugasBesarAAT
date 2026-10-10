@@ -100,7 +100,7 @@ func (c *BMKGClient) get(ctx context.Context, correlationID, path string, requir
 		}
 		native, err := c.Registry.Decode(avrowire.WithCorrelationID(callCtx, correlationID), body)
 		if err != nil {
-			return err
+			return fmt.Errorf("bmkg %s: %w", path, err)
 		}
 		records, err = avrowire.Records(native)
 		if err != nil {

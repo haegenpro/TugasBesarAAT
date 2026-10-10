@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"bmkg-mock/internal/avrowire"
+	"bmkg-mock/internal/middleware"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"bmkg-mock/internal/history"
 	"github.com/gin-gonic/gin"
@@ -56,5 +59,32 @@ func (h *Handler) History(c *gin.Context) {
 		return
 	}
 
+	if strings.Contains(c.GetHeader("Accept"), avrowire.MediaType) {
+		if h.Registry == nil {
+			c.JSON(503, gin.H{"error": "schema registry unavailable"})
+			return
+		}
+		live, name := seismicSchema, "SeismicHistoryPage"
+		if entity == "tsunami-warnings" {
+			live, name = warningSchema, "WarningHistoryPage"
+		}
+		text, err := avrowire.HistorySchema(live, name)
+		if err != nil {
+			c.JSON(503, gin.H{"error": "history schema invalid"})
+			return
+		}
+		schema, err := h.Registry.Register(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), "bmkg."+entity+"-history-value", text)
+		if err != nil {
+			c.JSON(503, gin.H{"error": "history schema unavailable"})
+			return
+		}
+		body, err := avrowire.EncodeJSON(schema, page)
+		if err != nil {
+			c.JSON(503, gin.H{"error": "history encoding failed"})
+			return
+		}
+		c.Data(200, avrowire.MediaType, body)
+		return
+	}
 	c.JSON(http.StatusOK, page)
 }

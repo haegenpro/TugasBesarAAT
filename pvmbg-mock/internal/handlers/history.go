@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"github.com/gin-gonic/gin"
 	"net/http"
+	"pvmbg-mock/internal/avrowire"
 	"pvmbg-mock/internal/domain"
 	"pvmbg-mock/internal/history"
+	"pvmbg-mock/internal/middleware"
 	"strconv"
+	"strings"
 )
 
 func (h *Handler) AttachArchive(a *history.Archive) error {
@@ -56,6 +59,10 @@ func (h *Handler) History(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "archive unavailable"})
 		return
 	}
+	// A schema change publishes history revisions and flips visibility under
+	// this same lock; readers must never consume new cursors with the old view.
+	h.schemaMu.RLock()
+	defer h.schemaMu.RUnlock()
 	page, err := h.Archive.Read(entity, after, limit)
 	if err != nil {
 		c.JSON(503, gin.H{"error": "archive unavailable"})
@@ -69,6 +76,29 @@ func (h *Handler) History(c *gin.Context) {
 		}
 		b, _ := json.Marshal(r.WireCopy(h.Toggles.ShowConfidence()))
 		page.Data[i].Payload = b
+	}
+	if strings.Contains(c.GetHeader("Accept"), avrowire.MediaType) {
+		if h.Registry == nil {
+			c.JSON(503, gin.H{"error": "schema registry unavailable"})
+			return
+		}
+		text, err := volcanicHistorySchema(h.Toggles.ShowConfidence())
+		if err != nil {
+			c.JSON(503, gin.H{"error": "history schema invalid"})
+			return
+		}
+		schema, err := h.Registry.Register(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), volcanicHistorySubject, text)
+		if err != nil {
+			c.JSON(503, gin.H{"error": "history schema unavailable"})
+			return
+		}
+		body, err := avrowire.EncodeJSON(schema, page)
+		if err != nil {
+			c.JSON(503, gin.H{"error": "history encoding failed"})
+			return
+		}
+		c.Data(200, avrowire.MediaType, body)
+		return
 	}
 	c.JSON(http.StatusOK, page)
 }

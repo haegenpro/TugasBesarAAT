@@ -108,7 +108,7 @@ func TestSchemaToggle_RequiresAdminAuth(t *testing.T) {
 
 func TestSinceFilter(t *testing.T) {
 	r, _ := newTestServer(0, 0)
-	req := httptest.NewRequest(http.MethodGet, "/volcanic-reports?since=2026-09-01T00:00:00.000Z", nil)
+	req := httptest.NewRequest(http.MethodGet, "/volcanic-reports?since="+time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano), nil)
 	req.Header.Set("Authorization", "Bearer "+testToken)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)

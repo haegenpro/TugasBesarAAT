@@ -123,7 +123,7 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 		}
 		native, err := c.Registry.Decode(avrowire.WithCorrelationID(callCtx, correlationID), body)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("pvmbg %s: %w", path, err)
 		}
 		raws, err = avrowire.Records(native)
 		if err != nil {

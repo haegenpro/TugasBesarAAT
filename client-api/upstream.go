@@ -55,17 +55,27 @@ func (a *api) call(c *gin.Context, service, method, endpoint string, payload any
 		return 0, errUpstream
 	}
 	defer resp.Body.Close()
-	fields := []any{"service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "status_code", resp.StatusCode, "latency_ms", time.Since(start).Milliseconds(), "success", resp.StatusCode < 500}
-	if resp.StatusCode >= 500 {
-		a.log.Warn("outbound request", fields...)
-	} else {
-		a.log.Info("outbound request", fields...)
-	}
+	headersLatency := time.Since(start)
+	var decodeLatency time.Duration
+	var decodeErr error
+	defer func() {
+		fields := []any{"service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "status_code", resp.StatusCode,
+			"latency_ms", time.Since(start).Milliseconds(), "headers_latency_ms", headersLatency.Milliseconds(),
+			"decode_latency_ms", decodeLatency.Milliseconds(), "success", resp.StatusCode < 500 && decodeErr == nil}
+		if resp.StatusCode >= 500 || decodeErr != nil {
+			a.log.Warn("outbound request", fields...)
+		} else {
+			a.log.Info("outbound request", fields...)
+		}
+	}()
 	if output != nil && resp.StatusCode == http.StatusOK {
+		decodeStart := time.Now()
 		decoder := json.NewDecoder(io.LimitReader(resp.Body, 4<<20))
-		if err := decoder.Decode(output); err != nil {
-			a.log.Error("upstream contract violation", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "error", err.Error())
-			return resp.StatusCode, fmt.Errorf("decode %s response: %w", service, err)
+		decodeErr = decoder.Decode(output)
+		decodeLatency = time.Since(decodeStart)
+		if decodeErr != nil {
+			a.log.Error("upstream contract violation", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "error", decodeErr.Error())
+			return resp.StatusCode, fmt.Errorf("decode %s response: %w", service, decodeErr)
 		}
 	}
 	return resp.StatusCode, nil
