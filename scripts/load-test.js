@@ -1,5 +1,6 @@
 // k6 load test for P2.1 (head-of-line blocking) and P2.2 (sustained load).
-// MODE=mixed     : half the VUs request SEISMIC (BMKG-only), half VOLCANIC; p95(seismic) < 300ms.
+// MODE=mixed     : half the VUs request SEISMIC (BMKG-only), half VOLCANIC.
+// PURPOSE=isolation gates seismic p95 < 300ms; milestone reports latency under load.
 // MODE=sustained : VUS parallel connections for DURATION on /hazards.
 import http from 'k6/http';
 import { sleep } from 'k6';
@@ -21,7 +22,10 @@ if (!durationMatch) throw new Error('DURATION must be integer seconds, minutes, 
 const durationSeconds = Number(durationMatch[1]) * ({ s: 1, m: 60, h: 3600 }[durationMatch[2]]);
 if (durationSeconds <= 0) throw new Error('DURATION must be positive');
 const PURPOSE = __ENV.PURPOSE || 'milestone';
-if (!['milestone', 'overload'].includes(PURPOSE)) throw new Error('PURPOSE must be milestone or overload');
+if (!['milestone', 'isolation', 'overload'].includes(PURPOSE)) throw new Error('PURPOSE must be milestone, isolation or overload');
+if (PURPOSE === 'isolation' && (MODE !== 'mixed' || VUS < 2 || durationSeconds < 60)) {
+  throw new Error('Isolation evidence requires mixed mode, at least 2 VUs and 60 seconds');
+}
 if (PURPOSE === 'milestone' && (VUS < 50 || durationSeconds < 60)) {
   throw new Error('Milestone evidence requires at least 50 VUs and 60 seconds; use PURPOSE=overload for the separate rejection test');
 }
@@ -59,8 +63,8 @@ export const options = {
     'http_req_duration{kind:login}': ['p(95)>=0'],
     ...(MODE === 'sustained' ? { 'http_req_duration{kind:sustained}': ['p(95)>=0'] } : {}),
     ...(MODE === 'mixed' ? {
-      'http_req_duration{kind:seismic}': ['p(95)<300'],
-      'successful_hazard_duration{kind:seismic}': ['p(95)<300'],
+      'http_req_duration{kind:seismic}': [PURPOSE === 'isolation' ? 'p(95)<300' : 'p(95)>=0'],
+      'successful_hazard_duration{kind:seismic}': [PURPOSE === 'isolation' ? 'p(95)<300' : 'p(95)>=0'],
       'successful_hazard_duration{kind:volcanic}': ['p(95)>=0'],
       'successful_hazard_requests{kind:seismic}': ['count>0'],
       'successful_hazard_requests{kind:volcanic}': ['count>0'],

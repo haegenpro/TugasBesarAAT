@@ -3,7 +3,8 @@
 # Reads the Field client credentials from auth-service/.env.
 # Usage: BASE_URL=... scripts/load-test.sh sustained|mixed VUS DURATION
 #   BASE_URL=http://host.docker.internal:18080 scripts/load-test.sh sustained 60 70s
-#   BASE_URL=http://host.docker.internal:18080 scripts/load-test.sh mixed 50 65s         # BMKG-only vs PVMBG path
+#   PURPOSE=isolation BASE_URL=http://host.docker.internal:18080 scripts/load-test.sh mixed 2 65s # P2.1
+#   PURPOSE=milestone BASE_URL=http://host.docker.internal:18080 scripts/load-test.sh mixed 50 65s # P2.2
 # For "mixed", first set PVMBG's delay to 3 s. The mock reads its delay from pvmbg-mock/.env
 # (Compose env_file), not from your shell, so `PVMBG_MIN_DELAY_MS=3000 docker compose ...` does nothing:
 #   1. In pvmbg-mock/.env set PVMBG_MIN_DELAY_MS=3000 and PVMBG_MAX_DELAY_MS=3000

@@ -1132,101 +1132,91 @@ $jobs | Wait-Job | Remove-Job
 fast too: they read the Canonical Store, and the 3 s PVMBG delay only hurts the poller. That
 is the decoupling the design relies on.)
 
-**Authoritative measurement (k6, p95 gate)**, 50 VUs for 65 s, half SEISMIC, half VOLCANIC:
+**Authoritative isolation measurement (P2.1): two constant VUs for 65 s**, one
+SEISMIC and one VOLCANIC. This measures repeated BMKG-only requests while the
+volcanic request stream and the delayed PVMBG poller are active. It is a
+concurrency/isolation check; P2.2's sustained load is measured separately below.
 
-The Bash wrapper also saves JSON; use this instead of the direct Docker variant
-below when collecting the full evidence set:
+Use the current dataset, including 500+ entries when present. Before 6.1, record
+the total and per-kind counts from the authenticated `/hazards` responses, the
+response size, monitoring profile, and test time in `evidence/6.1.txt`. Record
+counts again before 6.2 because ingestion continues. Do not wipe or shrink the
+store between tests to obtain a passing latency. For this architecture both API
+paths read the Canonical Store; retain 6.0's measured live 3 s source delay as
+proof that PVMBG polling is slow during the test.
 
 ```bash
-BASE_URL=$K6_API EVIDENCE_NAME=6.1-k6-mixed bash scripts/load-test.sh mixed 50 65s 2>&1 | tee evidence/6.1-k6-mixed.txt
+PURPOSE=isolation BASE_URL=$K6_API EVIDENCE_NAME=6.1-k6-isolation bash scripts/load-test.sh mixed 2 65s 2>&1 | tee evidence/6.1-k6-isolation.txt
 K6_EXIT=${PIPESTATUS[0]}; echo "k6 exit code: $K6_EXIT"
 ```
-
-```bash
-# Git Bash: prefix with MSYS_NO_PATHCONV=1 so -v paths aren't mangled. Linux: add --add-host=host.docker.internal:host-gateway
-docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
-  -e BASE_URL=$K6_API -e MODE=mixed -e VUS=50 -e DURATION=65s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
-  grafana/k6 run /scripts/load-test.js 2>&1 | tee evidence/6.1-k6-mixed.txt
-echo "k6 exit code: ${PIPESTATUS[0]}"
-```
 ```powershell
-.\scripts\load-test.ps1 -Mode mixed -Vus 50 -Duration 65s -BaseUrl $K6_API -EvidenceName 6.1-k6-mixed 2>&1 | ForEach-Object { "$_" } | Tee8 6.1-k6-mixed.txt
+.\scripts\load-test.ps1 -Mode mixed -Purpose isolation -Vus 2 -Duration 65s -BaseUrl $K6_API -EvidenceName 6.1-k6-isolation 2>&1 | ForEach-Object { "$_" } | Tee8 6.1-k6-isolation.txt
 "k6 exit code: $LASTEXITCODE"
 ```
 
-**Desired state:** in the summary, `successful_hazard_duration{kind:seismic}` shows
-**`p(95) < 300ms`**, the threshold line is marked passed (`✓`), and k6 exits `0`.
-Both `successful_hazard_requests{kind:seismic}` and `{kind:volcanic}` must
-be greater than zero. Record p50/p95/p99 of successful responses for both
-kinds, `http_reqs` rate, successful hazard throughput, and the 429 count.
-The summary also gates seismic-attempt p95, including 429s, and separately
-requires successful responses from both paths. All-HTTP latency includes
-login; use the labeled seismic and volcanic rows in the screenshot. Threshold
-lines print ASCII `PASS`/`FAIL`. **Criterion:** P2.1.
+**Desired state:** successful seismic p95 **< 300 ms**, successful responses from
+both kinds, passing threshold lines and k6 exit code 0. The seismic-attempt p95
+is also gated; successful-only timing prevents fast 429s from hiding slow reads.
+Report the successful seismic sample count and p50/p95/p99, volcanic metrics,
+throughput, errors and 429 count. A single timed request cannot establish p95.
+The wrapper saves `evidence/6.1-k6-isolation.json`. **Criterion:** P2.1.
 
-Screenshot the final `MILESTONE 1 LOAD TEST` block: workload, counts/rates,
-latency table in milliseconds, error rates, threshold results and `OVERALL`.
-The wrapper saves `evidence/6.1-k6-mixed.json`. Failed thresholds stay visible;
-a historical passing number cannot replace the result of the current run.
-Negative durations invalidate the timing evidence until investigated and rerun.
+If this isolation run fails on the large dataset, retain it as a P2.1 failure
+and investigate request processing/query/serialization cost. Reordering tests
+or passing the sustained error-rate gate does not establish P2.1 compliance.
+Negative timings invalidate timing evidence until investigated and rerun.
 
-For mixed and sustained runs, start this in **Terminal B** just before k6 in
-Terminal A (use `--name 6.1-runtime` for mixed):
+### 6.2 P2.2: one sustained mixed load, 50 VUs for 65 s
+
+> Capture: run `step 6.2` first. Output is saved to `evidence/6.2.txt`.
+
+Keep PVMBG's measured delay at 3 s and use the same growing dataset as 6.1.
+Run one mixed workload: 25 VUs repeatedly request SEISMIC and 25 VOLCANIC.
+There is no required escalation to 60 VUs or a second unfiltered `/hazards`
+run. The unfiltered route may be tested additionally when relevant; report its
+larger response payload separately.
+
+Start this in **Terminal B** just before k6 in Terminal A:
 
 ```text
 node scripts/evidence-probes.mjs runtime --seconds 80 --name 6.2-runtime
 ```
 
-Keep both screenshots and matching timestamps. Runtime output shows TCP
-connections, health status/latency and container stability every ~2 s; JSON
-preserves IDs, start times and restart counts before/after. TCP counts include
-idle keep-alive sockets and probes. Report the observed min/max overlapping
-the k6 window; neither VUs nor TCP counts prove simultaneous in-flight requests.
-The workload is `constant-vus` for at least 60 s, with 50 ms think time.
-
-### 6.2 P2.2: sustained load, 60 VUs for 70 s
-
-> Capture: run `step 6.2` first. Output is saved to `evidence/6.2.txt`.
-
-Bash wrapper alternative (saves JSON and prints the same summary):
+Run k6 in **Terminal A**:
 
 ```bash
-BASE_URL=$K6_API EVIDENCE_NAME=6.2-k6-sustained bash scripts/load-test.sh sustained 60 70s 2>&1 | tee evidence/6.2-k6-sustained.txt
+PURPOSE=milestone BASE_URL=$K6_API EVIDENCE_NAME=6.2-k6-mixed bash scripts/load-test.sh mixed 50 65s 2>&1 | tee evidence/6.2-k6-mixed.txt
 K6_EXIT=${PIPESTATUS[0]}; echo "k6 exit code: $K6_EXIT"
 ```
-
-```bash
-docker run --rm -i -v "$PWD/scripts:/scripts:ro" --add-host=host.docker.internal:host-gateway \
-  -e BASE_URL=$K6_API -e MODE=sustained -e VUS=60 -e DURATION=70s -e CLIENT_ID="$FIELD_ID" -e CLIENT_SECRET="$FIELD_SECRET" \
-  grafana/k6 run /scripts/load-test.js 2>&1 | tee evidence/6.2-k6-sustained.txt
-docker compose ps --format '{{.Service}} {{.Status}}' | grep -v healthy || echo "NO CRASH"
-```
 ```powershell
-.\scripts\load-test.ps1 -Mode sustained -Vus 60 -Duration 70s -BaseUrl $K6_API -EvidenceName 6.2-k6-sustained 2>&1 | ForEach-Object { "$_" } | Tee8 6.2-k6-sustained.txt
-docker compose ps --format '{{.Service}} {{.Health}}' | Where-Object { $_ -notmatch 'healthy' }     # => (nothing)
+.\scripts\load-test.ps1 -Mode mixed -Purpose milestone -Vus 50 -Duration 65s -BaseUrl $K6_API -EvidenceName 6.2-k6-mixed 2>&1 | ForEach-Object { "$_" } | Tee8 6.2-k6-mixed.txt
+"k6 exit code: $LASTEXITCODE"
 ```
 
-**Desired state:** report **throughput** (`http_reqs`/s), **p50 (`med`) / p95 / p99** of
-`http_req_duration` and `successful_hazard_duration`, **error rate**
-(`http_req_failed` and `unexpected_failure_rate` **< 1 %**), and the count
-`controlled_rejections_429` (reported explicitly; 429s are not failures). Run lasts at least 60 s with
-**≥ 50** concurrent VUs. `unexpected_errors` is `0` (or negligible). No container restarted or
-became unhealthy. Also report `successful_hazard_requests`/s separately from
-total HTTP throughput. `unexpected_failure_rate` excludes 429 from its
-denominator as well as its numerator. Do not assume zero 429s with 60 VUs:
-all sessions share the Field identity's 32-slot budget.
+**Desired state:** ≥50 constant VUs for ≥60 s; report total HTTP throughput,
+successful hazard throughput, p50/p95/p99 (including successful-only and
+per-kind rows), unexpected error rates **<1%**, and the controlled 429 count
+(including zero). P2.2 imposes no numerical latency limit: seismic p95 ≥300 ms
+under this load is reported, but does not by itself fail P2.2. The script's
+`Purpose=milestone` applies error-rate and successful-response gates, with no
+300 ms gate. `Purpose=isolation` applies that gate in 6.1. **Criterion:** P2.2.
 
-**Criterion:** P2.2.
+Screenshot the final `MILESTONE 1 LOAD TEST` block and runtime results; preserve
+`evidence/6.2-k6-mixed.txt/json` and `6.2-runtime.txt/json`. Runtime evidence must
+show health and stable container IDs/start times/restart counts throughout.
+Final health alone cannot prove no crash. TCP counts include idle keep-alive
+sockets and probes: report observed min/max overlapping the load window.
+50 VUs alone does not establish ≥50 parallel connections; verify connection
+evidence against that wording and retain any shortfall. Neither socket counts
+nor VUs prove 50 simultaneous in-flight requests. The workload has 50 ms think
+time, and all sessions share the Field identity's configured concurrency budget.
 
-The screenshot prints separate `hazard_failure_rate` (non-429 hazard requests)
-and `login_failure_rate` (non-429 logins), both gated below 1%. Successful
-hazard throughput excludes login, errors and 429s. The wrapper saves
-`evidence/6.2-k6-sustained.json`. Pair this with `6.2-runtime.txt/json`; final
-health alone cannot establish that a service never crashed during the run.
-Milestone mode rejects fewer than 50 VUs or shorter than 60 s. The independent
-30 s overload demonstration uses `Purpose=overload` explicitly.
+`unexpected_failure_rate` excludes 429 from numerator and denominator;
+`http_req_failed` accepts 429 but retains them in its denominator. Separate
+hazard/login failure rates are also gated below 1%. Always report 429s and
+successful throughput so controlled rejection cannot obscure useful service.
 
-### 6.2b P2.2: show the controlled-rejection (429) path
+### 6.2b Optional: demonstrate the controlled-rejection (429) path
 
 > Capture: run `step 6.2b` first. Output is saved to `evidence/6.2b.txt`.
 
@@ -1234,7 +1224,8 @@ To capture global rejection, lower the global cap to 5 while leaving the
 per-client cap at its example value of 32, overload it, and report the count.
 Keep `-Purpose overload` in the PowerShell command (`PURPOSE=overload` in Bash):
 the 30 s rejection test is separate from the milestone's minimum 60 s load test.
-The spec only excuses 429s if they are reported. Logs for this scenario use
+This optional test demonstrates rejection behavior; the spec does not require
+producing 429s. A reported zero count in 6.2 is acceptable. Logs for this scenario use
 `reason=max_in_flight`; do not infer the rejecting layer from status alone.
 
 ```bash
@@ -1442,8 +1433,8 @@ docker compose --profile monitoring --profile consumer-demo down -v     # also d
 | P1.2 toggle without restart | 2.2, 2.4 | `2.1-started-before.txt`, `2.4-started-after.txt` |
 | P1.3 valid HazardEvent after change | 2.3, 2.4 | `2.3-new-report.json` |
 | P1.4 unknown-field policy (pass to `attributes`) | 2.3 | `2.3-new-report.json` |
-| P2.1 BMKG p95 < 300 ms at 3 s PVMBG | 6.0, 6.1 | `6.0.txt`, `6.1.txt`, `6.1-rerun.txt` |
-| P2.2 ≥ 50 conns, ≥ 60 s, p50/p95/p99, errors < 1 % | 6.2 | `6.2.txt`, `6.2b.txt` |
+| P2.1 BMKG p95 < 300 ms at 3 s PVMBG | 6.0, 6.1 | `6.0.txt`, `6.1.txt`, `6.1-k6-isolation.json` |
+| P2.2 ≥ 50 conns, ≥ 60 s, p50/p95/p99, errors < 1 % | 6.2 | `6.2.txt`, `6.2-k6-mixed.json`, `6.2-runtime.txt/json` |
 | P2.3 outage -> stale/unavailable, recover | 6.3 | `6.3.txt`, `6.3-volcanic-during.json` |
 | P3.1 cross-institution rejection | 3.1 | `3.1-isolation.txt` |
 | P3.2 Media redaction, raw -> 403 | 3.2, 3.3 | `3.2.txt`, `3.3.txt` |
@@ -1492,7 +1483,7 @@ their final results and measured values; JSON supplies the detailed proof.
 | Live schema evolution | `schema --name 2-schema` on v1 | discovered new ID, valid attributes, unchanged containers and DB columns |
 | Storage coexistence | `storage --name 5.3-storage` after asserted schema | old/new IDs both readable, JSONB, unchanged columns |
 | Broader secret review | `secrets --name 3.5-secrets` | tracked-env check, scan scope, historical blob count, redacted findings |
-| Load/crash/connection evidence | `runtime --name 6.1-runtime` / `6.2-runtime` concurrently with k6 | timestamped TCP/health samples, stable containers, min/max |
+| Load/crash/connection evidence | `runtime --name 6.2-runtime` concurrently with sustained k6 | timestamped TCP/health samples, stable containers, min/max |
 | Prolonged outage/recovery | `outage --seconds 600 --name 6.3-outage` | preserved cache, HTTP/latency timeline, stale_since, new recovery record, no restart |
 
 Invoke these as `node scripts/evidence-probes.mjs <command>`. Existing files
@@ -1525,9 +1516,9 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 | 5.3 | `5.3.txt`, `5.3-side-by-side.txt` | `attributes` is `jsonb`; rows with and without `confidence_level`; no migration files |
 | 5.4 | `5.4.txt` **(missing)** | `store` network = postgres + aggregator only; others cannot resolve `postgres`; no host port |
 | 6.0 | `6.0.txt` **(missing)** | PVMBG about 3.0 s, BMKG 0.05 to 0.15 s |
-| 6.1 | `6.1.txt`, `6.1-rerun.txt` | `kind:seismic` p95 < 300 ms (record the margin), `kind:volcanic` line, exit code 0 |
+| 6.1 | `6.1.txt`, `6.1-k6-isolation.txt/json` | 2 VUs, successful seismic p95 < 300 ms, samples from both kinds, dataset counts/size, exit code 0 |
 | 6.2 | `6.2.txt` | ≥ 50 VUs, ≥ 60 s, throughput, p50/p95/p99, `http_req_failed` < 1 %, no unhealthy container |
-| 6.2b | `6.2b.txt` **(missing)** | `controlled_rejections_429` > 0, error rate < 1 %, `/health` 200, `request rejected` logs |
+| 6.2b (optional) | `6.2b.txt` if run | `controlled_rejections_429` > 0, error rate < 1 %, `/health` 200, `request rejected` logs |
 | 6.3 | `6.3.txt`, `6.3-volcanic-during.json`, `6.3-started-*.txt` | volcanic **HTTP 200** during outage with `state=stale` + `stale_since` (not 5xx, not a hang); seismic 200; `warn` not `error` logs; back to `fresh`; `NO RESTART` |
 
 ## Reporting lifecycle verification

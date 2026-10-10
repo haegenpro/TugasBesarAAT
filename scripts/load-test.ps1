@@ -11,7 +11,7 @@ param(
     [int]$Vus,
     [string]$Duration,
     [string]$BaseUrl,
-    [ValidateSet('milestone','overload')][string]$Purpose = 'milestone',
+    [ValidateSet('milestone','isolation','overload')][string]$Purpose = 'milestone',
     [ValidatePattern('^[A-Za-z0-9._-]+$')][string]$EvidenceName = 'load-test'
 )
 $ErrorActionPreference = 'Stop'
