@@ -53,7 +53,7 @@ Keep failed runs as evidence; desired values and examples are not measured resul
 Run everything from the repository root. The 14 per-service `.env` files (including three monitoring files) must
 exist (see README, "Per-service environment files"). The root `.env` must
 contain the complete deployment port plan plus `GRAFANA_BIND_ADDRESS`; see
-[Port configuration](Port%20Configuration.md). Broker ports are internal only; use
+the [README configuration tables](../README.md#configuration-variables) and root template. Broker ports are internal only; use
 `docker compose exec` or the backend-network NATS helper below for operator
 inspection. No additional Compose file is needed. All service settings in `.env.example`
 are required; there are no configuration fallbacks. Startup is independent of
@@ -1540,7 +1540,7 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 
 ## Reporting lifecycle verification
 
-See [Reporting Lifecycle](Reporting%20Lifecycle.md) for the updated contracts.
+See the [README preliminary reporting section](../README.md#preliminary-reporting-and-delayed-recovery) and configuration tables for the current lifecycle setup.
 Run the Go suites in each affected service. Store integration tests need a
 **dedicated** `TEST_DATABASE_URL` with `store/init.sql` initialized; do not point
 these tests at a live demo database because tests advance replay cursors.

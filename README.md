@@ -27,7 +27,7 @@ and runs on `alpine:3.24`. All Go modules require Go 1.27.1.
 
 The assignment text mentions RabbitMQ as an example. We went with
 **NATS JetStream** instead, and the reasoning is in
-`docs/Technical Stack Specifications.md` and `docs/Contracts.md`.
+[Technical stacks](docs/Technical%20Stacks.md) and [Contracts](docs/Contracts.md).
 
 Here is how the broker is set up:
 
@@ -72,8 +72,9 @@ available. The TUI includes these notice views.
 Source-owned SQLite archives survive live eviction/restart. Aggregator persists
 retry schedules and replay cursors; freshness cutoffs change presentation without
 stopping recovery. Both consumers apply versioned corrections through the added
-`REPORT_LIFECYCLE` stream. See [Reporting Lifecycle](docs/Reporting%20Lifecycle.md)
-for the full API, configuration, storage, and delivery contract.
+`REPORT_LIFECYCLE` stream. The configuration tables and durable-consumer
+procedures below describe storage and delivery; the test runbook includes the
+preliminary-report and recovery checks.
 
 ## Repository layout
 
@@ -98,9 +99,44 @@ docs/             # Team contract docs (wire format, stack, deployment)
 
 ## Quick start: Docker Compose
 
-First, create root `.env` with the deployment port plan and Grafana bind address,
+Start from a fresh clone with Docker Engine / Docker Desktop running (Linux
+containers), Docker Compose v2 or newer, Git, and PowerShell 5.1 or newer.
+Internet access is needed for the first image build. Go is built inside Docker;
+install Go 1.27.1 only to run the native unit tests below. Node.js 18+ is needed
+for the evidence probes and JavaScript tests. Bash demos additionally require
+curl and Python 3; examples using `jq` require jq.
+
+Open a terminal in the cloned repository root, then run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-env.ps1
+docker compose --profile monitoring --profile demo --profile tools --profile consumer-demo config --quiet
+docker compose up -d --build --wait --wait-timeout 300
+docker compose ps
+```
+
+The setup script splits `.env.example` into root `.env` and all fourteen required
+service files, including shared credentials, source archive paths, lifecycle
+streams, distinct consumer identities, and monitoring settings. It preserves
+existing files and prints only filenames. Generated credentials are demo values.
+If some files already exist, check the shared values listed below before booting.
+Linux/macOS users can run the script with `pwsh -File scripts/setup-env.ps1`, or
+create the files manually from the template and tables below.
+
+`config --quiet` must exit successfully; it validates configuration without
+printing secrets. `up --wait` must finish successfully with the eleven application
+containers running. Then load the host URLs below and check Client API `/ready`
+(HTTP 200); consumer `/ready` and record checks in the test runbook establish
+that subscriptions are processing. On failure, inspect `docker compose logs
+--tail 100 <service>`, correct the reported configuration/dependency error, and
+repeat startup. Use `docker compose down` to stop the system while keeping data.
+For a fresh test database, `docker compose --profile monitoring --profile
+consumer-demo down -v` deletes this project's persisted data; use only when that
+reset is intended.
+
+Alternatively, create root `.env` with the deployment port plan and Grafana bind address,
 then the fourteen service env files by hand. Shared listener ports and URLs are
-injected by Compose; see [Port configuration](docs/Port%20Configuration.md).
+injected by Compose; the root template lists the complete port plan.
 Use the root `.env.example` together with the tables below, and copy into each file only
 the variables that service needs, including the shared ones the template
 points out. Then, from the repository root, run:
@@ -315,8 +351,8 @@ docker compose up -d --build --force-recreate broker
 Change shared ports only in root `.env`. Compose updates listeners, published
 targets, service URLs, scrape targets, and probes together. Private Loki gRPC
 configuration stays in `monitoring/loki/.env`. See
-[Port configuration](docs/Port%20Configuration.md) for the full ownership table,
-database URL interpolation, migration, and native execution.
+the root deployment section of `.env.example` and the configuration tables
+below for port ownership. Keep database URL ports interpolated as in the template.
 
 To apply an env change, run `docker compose up -d --force-recreate` (include
 `--profile monitoring` before `up` when updating monitoring too) and
@@ -555,6 +591,35 @@ path for the assignment demos.
 
 ## Running tests
 
+Run these from the repository root. Each Go directory is a separate module;
+the loop includes all application, broker, and monitoring launcher tests and
+stops on the first failure:
+
+```powershell
+$root = (Get-Location).Path
+foreach ($module in 'bmkg-mock','pvmbg-mock','aggregator','auth-service','client-api','client-tui','consumer-dashboard','consumer-notifier','broker','monitoring/launcher') {
+  Push-Location (Join-Path $root $module)
+  try { go test ./...; if ($LASTEXITCODE -ne 0) { throw "Tests failed: $module" } }
+  finally { Pop-Location }
+}
+node --test scripts/port-config.test.mjs scripts/evidence-trace.test.mjs scripts/load-test-summary.test.mjs
+```
+
+Bash equivalent:
+
+```bash
+for module in bmkg-mock pvmbg-mock aggregator auth-service client-api client-tui consumer-dashboard consumer-notifier broker monitoring/launcher; do
+  (cd "$module" && go test ./...) || exit 1
+done
+node --test scripts/port-config.test.mjs scripts/evidence-trace.test.mjs scripts/load-test-summary.test.mjs
+```
+
+Expected: all packages pass and the Node test summary has zero failures.
+Aggregator Store integration tests skip unless `TEST_DATABASE_URL` points to a
+dedicated PostgreSQL test database with `store/init.sql` applied; those tests
+modify its contents. Never point them at a database whose data you need to keep.
+For a targeted source/aggregator run:
+
 ```bash
 cd bmkg-mock && go test ./...
 cd pvmbg-mock && go test ./...
@@ -570,6 +635,34 @@ cd aggregator && TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/
 ```
 
 ---
+
+## Acceptance test scenario index
+
+After fresh setup, follow [Test Runbook](docs/Test%20Runbook.md) phases 0 through
+7 in order. Phase 0 defines the Bash/PowerShell helpers and evidence capture;
+the numbered steps contain the exact triggers, expected results, and restoration
+commands. Run load tests last because they change source delay configuration.
+The table maps every M1 scenario to its procedure so no scenario requires
+guessing how to trigger it.
+
+| Scenario | Trigger / runbook steps | Expected result |
+| --- | --- | --- |
+| Clean startup, baseline mapping, health, correlation logging | Phase 1, steps 1.1–1.4; `node scripts/evidence-probes.mjs health`, `mapping`, `trace` | Ready APIs, valid canonical mapping, correlation IDs across service calls |
+| Runtime schema evolution and heterogeneous storage | Phase 2, steps 2.1–2.4; `node scripts/evidence-probes.mjs schema`, then `node scripts/evidence-probes.mjs storage` | Added confidence field is handled without process restart or database migration |
+| Institution credential isolation | Phase 3.1; `scripts/isolation-demo.ps1 -BmkgUrl $BMKG_URL -PvmbgUrl $PVMBG_URL` | Own credentials accepted; cross-institution and unauthorized admin access rejected |
+| Three roles, Media projection, token expiry/rotation, persistent sessions | Phase 3.2–3.4; smoke command in Client API and TUI section, including `-RestartAuth -WaitForExpiry` | Media raw access denied, expired/old access tokens rejected, refresh works, sessions survive restart |
+| Configuration and secret hygiene | Phase 3.5; `node scripts/evidence-probes.mjs secrets`; required-config Go tests in the loop above | Missing configuration rejected; evidence scan reports its findings and scope |
+| Fan-out, independent durable delivery, stopped consumer catch-up, third subscriber | Phase 4; stop/start notifier and start the `consumer-demo` profile as instructed | Same event reaches independent consumers; producer continues and stopped consumer catches up |
+| Invalid messages, DLQ, halt and operator recovery | Durable consumers and DLQ section below, including `publish-invalid`, inspection and resume commands | Invalid message archived with reason; recovery follows the documented policy |
+| Independent service restart, flexible Store schema, database isolation | Phase 5 | Only selected service restarts, old/new records coexist, only Aggregator reaches Store |
+| Slow PVMBG alongside fast BMKG, concurrent clients and overload | Phase 6.0–6.2b; load wrappers in Demo F below; run `node scripts/evidence-probes.mjs runtime` in a second terminal during k6 | Recorded latency/error thresholds pass; overload returns the configured 429 behavior |
+| Ten-minute PVMBG outage and recovery | Phase 6.3; `node scripts/evidence-probes.mjs outage --seconds 600` | Cached data stays readable with stale status, BMKG continues, ingestion recovers without restart |
+| Restore demo state | Phase 7 | Outage disabled and original delay settings restored |
+
+Evidence probes run from the repository root and write measured `PASS`/`FAIL`
+results and snapshots to `evidence/`; a nonzero exit is a failure. Run `mapping`
+before `schema`, and `schema` before `storage`. A successful smoke run is not a
+substitute for the load, fan-out, storage, or full-duration outage scenarios.
 
 ## BMKG mock (`bmkg-mock/`)
 
