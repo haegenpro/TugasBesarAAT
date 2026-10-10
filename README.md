@@ -1,6 +1,6 @@
 # TugasBesarAAT, IF4031 M1
 
-This repository holds everything for Milestone 1: the BMKG and PVMBG mocks,
+This repository holds everything for Milestone 1, which includes the BMKG and PVMBG mocks,
 the BNPB Aggregator and its Canonical Store, the Client API, the Auth Service,
 an interactive downstream client, and two durable broker consumers.
 
@@ -23,10 +23,9 @@ Every Go service has its own `go.mod`, so there is no shared workspace module,
 and its own multi-stage Dockerfile that builds on `golang:1.27.1-alpine3.24`
 and runs on `alpine:3.24`. All Go modules require Go 1.27.1.
 
-## Broker choice: NATS JetStream, not RabbitMQ
+## Broker choice: NATS JetStream
 
-The assignment text mentions RabbitMQ as an example. We went with
-**NATS JetStream** instead, and the reasoning is in
+We went with **NATS JetStream**, and the reasoning is in
 [Technical stacks](docs/Technical%20Stacks.md) and [Contracts](docs/Contracts.md).
 
 Here is how the broker is set up:
@@ -120,6 +119,9 @@ service files, including shared credentials, source archive paths, lifecycle
 streams, distinct consumer identities, and monitoring settings. It preserves
 existing files and prints only filenames. Generated credentials are demo values.
 If some files already exist, check the shared values listed below before booting.
+For an existing `aggregator/.env`, also ensure `AGGREGATOR_ADMIN_TOKEN`,
+`BMKG_SEISMIC_READER_SCHEMA`, `BMKG_TSUNAMI_READER_SCHEMA`, and
+`PVMBG_READER_SCHEMA` are present; the script does not update existing files.
 Linux/macOS users can run the script with `pwsh -File scripts/setup-env.ps1`, or
 create the files manually from the template and tables below.
 
@@ -810,7 +812,8 @@ database transactions, so a slow PVMBG response does not hold up BMKG polling.
 Live polling reads each endpoint's persisted `source_poll_state.last_success`.
 When it is missing or zero, the request omits `since` and fetches the full
 available dataset. Otherwise it sends `since=last_success-1s`; the overlap
-includes equal timestamps despite the mocks' strict `>` filter. Existing
+re-reads a small window before the last successful boundary. The mocks use an
+inclusive `>=` filter, so records exactly at `since` are included. Existing
 deduplication handles repeated records in this small window.
 
 `last_success` stores the **start time of the last successfully committed poll**,
@@ -1234,8 +1237,7 @@ No database editing or container restart is needed. Verify `/ready`, processing
 logs, `/records`, and broker backlog afterward. Resume preserves retry/storm
 history and does not replay or delete previously quarantined messages. Recent
 storms or an unresolved cause can halt processing again. Recover before original
-stream retention expires. See [Consumer recovery](docs/consumer-recovery.md)
-for the operator procedure and failure behavior.
+stream retention expires.
 
 Consumers apply the highest hazard/notice revision across both streams.
 Lifecycle snapshots let corrections and resolutions arrive before original
