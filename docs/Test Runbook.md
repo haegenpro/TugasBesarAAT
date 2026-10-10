@@ -501,6 +501,22 @@ $v = Invoke-RestMethod -Uri "$PvmbgUrl/volcanic-reports" -Headers @{Authorizatio
 $v[0].PSObject.Properties.Name -contains 'confidence_level'                                                  # => True
 ```
 
+**Reader prerequisite:** start with `PVMBG_READER_SCHEMA=/schemas/volcanic-v1.avsc`
+(or `schemas/volcanic-v1.avsc` for native execution), and set the dedicated
+`AGGREGATOR_ADMIN_TOKEN` in `aggregator/.env`. The source toggle does not change the
+reader. Wait for a v2 report to be ingested; it must initially lack confidence in
+`attributes`. Then activate the discovered reader from either shell:
+
+```bash
+docker compose exec -T aggregator sh -c 'wget -qO- --post-data="" --header="Authorization: Bearer ${AGGREGATOR_ADMIN_TOKEN:?}" "http://localhost:${AGGREGATOR_PORT:?}/admin/schema-version"'
+# => {"reader_version":"v2"}; before discovery: HTTP 409, no change
+```
+
+Wait for a newly generated source report after activation. Previously dropped
+fields are not backfilled automatically. Repeat the command to return to reader
+v1 independently of the PVMBG writer. For the complete automated sequence with
+before/after records and no-restart evidence, use `node scripts/evidence-probes.mjs schema`.
+
 **Desired state:** POST answers `{"schema_version":"v2","confidence_level_visible":true}`;
 PVMBG now emits `confidence_level`; its next data response contains a new report
 with ID `rep-schema-<timestamp>-<activation>`. **Criterion:** P1.2.
@@ -512,7 +528,7 @@ with ID `rep-schema-<timestamp>-<activation>`. **Criterion:** P1.2.
 ```bash
 sleep 8
 # Discover the generated ID; it is deliberately different on every activation.
-NEW_REPORT=$(curl -s -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const r=JSON.parse(s).filter(x=>x.report_id.startsWith("rep-schema-")).sort((a,b)=>b.reported_at.localeCompare(a.reported_at));if(!r.length)process.exit(1);console.log(r[0].report_id)})')
+NEW_REPORT=$(curl -s -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const r=JSON.parse(s).filter(x=>typeof x.confidence_level==="number").sort((a,b)=>b.reported_at.localeCompare(a.reported_at));if(!r.length)process.exit(1);console.log(r[0].report_id)})')
 echo "new report: $NEW_REPORT"
 agg '/internal/hazards?hazard_type=VOLCANIC' | jfind data source_ref_id "$NEW_REPORT" | tee evidence/2.3-new-report.json
 test "$(cat evidence/2.3-new-report.json | jlen .)" -gt 0 || { echo 'FAIL: schema report not ingested; retry after polling'; false; }
@@ -521,7 +537,7 @@ agg '/internal/hazards?hazard_type=VOLCANIC' | jget count
 ```powershell
 Start-Sleep 8
 $source = Invoke-RestMethod -Uri "$PvmbgUrl/volcanic-reports" -Headers @{Authorization="Bearer $PvmbgToken"}
-$newReport = $source | Where-Object { $_.report_id -like 'rep-schema-*' } | Sort-Object reported_at -Descending | Select-Object -First 1
+$newReport = $source | Where-Object { $null -ne $_.confidence_level } | Sort-Object reported_at -Descending | Select-Object -First 1
 if (-not $newReport) { throw 'No new schema report was returned' }
 "new report: $($newReport.report_id)"
 $va = Agg '/internal/hazards?hazard_type=VOLCANIC'
@@ -532,14 +548,15 @@ $va.count
 ```
 
 **Desired state:**
-- The discovered schema report exists as a new canonical row with `attributes.confidence_level = 0.88`.
+- The newly generated report after reader activation exists as a canonical row with `attributes.confidence_level` matching its source value.
 - Its top-level keys are the **same canonical set** as in 1.3 (no new top-level column, so the field went to `attributes`).
 - Count is higher than the pre-toggle count. Do not expect exactly one more: the toggle adds a schema report, and the mock keeps generating a report every 10 s.
 - Reports generated after the toggle (`rep-<boot>-<n>`) also carry `attributes.confidence_level`.
-- Earlier rows are unchanged in identity (same `hazard_id`s as `evidence/1.3-volcanic-before.json`); their `attributes` may now include `confidence_level` where the source report has one.
+- Earlier rows keep their identity; schema activation does not proactively rewrite historic records. Records returned again within the polling overlap or replayed under v2 may acquire accepted attributes. New rows with confidence coexist with old rows without it.
 
-**Declared policy (state it in the report):** unknown/new source fields are
-**passed through to `attributes`**. **Criterion:** P1.3, P1.4.
+**Declared policy (state it in the report):** fields absent from the selected
+reader are **dropped**. Source fields accepted by both schemas without a canonical
+destination are **passed through to `attributes`**. Reader-only defaults are omitted. **Criterion:** P1.3, P1.4.
 
 For an asserted sequence, use the following **instead of** manual steps 2.1–2.4,
 while PVMBG is still on v1. Do not toggle manually and then run this command:

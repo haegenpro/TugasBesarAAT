@@ -1,0 +1,42 @@
+{
+  "type": "array",
+  "items": {
+    "type": "record",
+    "name": "SeismicEvent",
+    "namespace": "id.go.bmkg",
+    "fields": [
+      {
+        "name": "event_id",
+        "type": "string"
+      },
+      {
+        "name": "magnitude",
+        "type": "double"
+      },
+      {
+        "name": "depth_km",
+        "type": "double"
+      },
+      {
+        "name": "epicenter_lat",
+        "type": "double"
+      },
+      {
+        "name": "epicenter_lon",
+        "type": "double"
+      },
+      {
+        "name": "region_name",
+        "type": "string"
+      },
+      {
+        "name": "occurred_at",
+        "type": "string"
+      },
+      {
+        "name": "potential_tsunami",
+        "type": "boolean"
+      }
+    ]
+  }
+}

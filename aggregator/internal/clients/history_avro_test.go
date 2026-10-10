@@ -47,6 +47,9 @@ func TestHistoryRequiresAvroAndValidatesWriterRules(t *testing.T) {
 	defer source.Close()
 	c := NewPVMBGClient(source.URL, "token", slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.Registry = avrowire.NewClient(registryServer.URL)
+	reader, e := avrowire.NewReader(text)
+	require.NoError(t, e)
+	c.Reader = &avrowire.SourceReader{History: reader}
 	page, e := c.FetchHistory(context.Background(), "test", "volcanic-reports", 0)
 	require.NoError(t, e)
 	require.Equal(t, int64(9007199254740993), page.NextCursor)

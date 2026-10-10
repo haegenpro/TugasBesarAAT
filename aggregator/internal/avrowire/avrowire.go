@@ -192,23 +192,37 @@ func Encode(schema *Schema, native any) ([]byte, error) {
 	return append(out, data...), nil
 }
 
+// Decode validates and normalizes the complete writer datum. Source ingestion
+// uses DecodeWithReader instead, to apply an explicitly selected reader schema.
 func (c *Client) Decode(ctx context.Context, framed []byte) (any, error) {
+	writer, native, err := c.decodeWriter(ctx, framed)
+	if err != nil {
+		return nil, err
+	}
+	return writer.plan.walk(native, "$", 0, nil)
+}
+
+func (c *Client) decodeWriter(ctx context.Context, framed []byte) (*Schema, any, error) {
+	writer, err := c.SchemaForFrame(ctx, framed)
+	if err != nil {
+		return nil, nil, err
+	}
+	native, rest, err := writer.Codec.NativeFromBinary(framed[5:])
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(rest) != 0 {
+		return nil, nil, errors.New("trailing Avro bytes")
+	}
+	return writer, native, nil
+}
+
+// SchemaForFrame returns the writer schema from the existing Registry cache.
+func (c *Client) SchemaForFrame(ctx context.Context, framed []byte) (*Schema, error) {
 	if len(framed) < 5 || framed[0] != 0 {
 		return nil, errors.New("invalid Avro schema ID frame")
 	}
-	id := int(binary.BigEndian.Uint32(framed[1:5]))
-	schema, err := c.Lookup(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	native, rest, err := schema.Codec.NativeFromBinary(framed[5:])
-	if err != nil {
-		return nil, err
-	}
-	if len(rest) != 0 {
-		return nil, errors.New("trailing Avro bytes")
-	}
-	return schema.plan.walk(native, "$", 0, nil)
+	return c.Lookup(ctx, int(binary.BigEndian.Uint32(framed[1:5])))
 }
 
 func Records(value any) ([]map[string]any, error) {

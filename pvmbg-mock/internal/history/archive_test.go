@@ -83,3 +83,36 @@ func TestDependentObservationArchiveIsAtomic(t *testing.T) {
 		t.Fatal("partially archived dependent observation")
 	}
 }
+
+func TestImmutableArchiveRejectsChangesAndRollsBackDependents(t *testing.T) {
+	a, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.DB.Close()
+	original := Record{Entity: "events", ID: "existing", Payload: map[string]any{"value": 1}}
+	if err = a.AppendImmutable(original); err != nil {
+		t.Fatal(err)
+	}
+	if err = a.AppendImmutable(original); err != nil {
+		t.Fatal(err)
+	}
+	err = a.AppendImmutable(Record{Entity: "events", ID: "new", Payload: map[string]any{"value": 3}}, Record{Entity: "events", ID: "existing", Payload: map[string]any{"value": 2}})
+	if err == nil {
+		t.Fatal("immutable ID was rewritten")
+	}
+	page, err := a.Read("events", 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Data) != 1 {
+		t.Fatalf("partial immutable publication: %#v", page)
+	}
+	var payload map[string]int
+	if err = json.Unmarshal(page.Data[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["value"] != 1 {
+		t.Fatalf("changed immutable value: %#v", payload)
+	}
+}

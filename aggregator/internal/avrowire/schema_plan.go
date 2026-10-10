@@ -14,6 +14,7 @@ import (
 // structural typing; this layer applies explicitly declared application rules.
 type schemaPlan struct {
 	kind, name, logical string
+	aliases             []string
 	scale               int
 	fields              []planField
 	items               *schemaPlan
@@ -22,9 +23,11 @@ type schemaPlan struct {
 	rules               *validationRules
 }
 type planField struct {
-	name  string
-	node  *schemaPlan
-	rules *validationRules
+	name       string
+	node       *schemaPlan
+	rules      *validationRules
+	hasDefault bool
+	aliases    []string
 }
 type validationRules struct {
 	min, max *big.Rat
@@ -105,6 +108,12 @@ func (c *planCompiler) node(raw any, ns string, depth int) (*schemaPlan, error) 
 				name = ns + "." + name
 			}
 			n.name = name
+			for _, a := range stringList(x["aliases"]) {
+				if !strings.Contains(a, ".") && ns != "" {
+					a = ns + "." + a
+				}
+				n.aliases = append(n.aliases, a)
+			}
 			c.names[name] = n
 			if typ == "record" {
 				fields, ok := x["fields"].([]any)
@@ -125,7 +134,8 @@ func (c *planCompiler) node(raw any, ns string, depth int) (*schemaPlan, error) 
 					if e != nil {
 						return nil, fmt.Errorf("field %s: %w", name, e)
 					}
-					n.fields = append(n.fields, planField{name, p, r})
+					_, hasDefault := field["default"]
+					n.fields = append(n.fields, planField{name: name, node: p, rules: r, hasDefault: hasDefault, aliases: stringList(field["aliases"])})
 				}
 			}
 		case "array", "map":
@@ -487,4 +497,16 @@ func logicalBranch(n *schemaPlan) bool {
 		return n.kind == "bytes"
 	}
 	return false
+}
+
+func stringList(v any) []string {
+	var out []string
+	if values, ok := v.([]any); ok {
+		for _, value := range values {
+			if s, ok := value.(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }

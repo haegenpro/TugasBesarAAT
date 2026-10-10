@@ -1,17 +1,16 @@
 package handlers
 
 import (
+	"bmkg-mock/internal/domain"
+	"bmkg-mock/internal/history"
+	"bmkg-mock/internal/timeutil"
 	"encoding/json"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	"bmkg-mock/internal/domain"
-	"bmkg-mock/internal/history"
-	"bmkg-mock/internal/timeutil"
-	"github.com/gin-gonic/gin"
-	"github.com/stretchr/testify/require"
 )
 
 func readDelta(t *testing.T, fn gin.HandlerFunc, since string) []map[string]any {
@@ -25,55 +24,80 @@ func readDelta(t *testing.T, fn gin.HandlerFunc, since string) []map[string]any 
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &records))
 	return records
 }
-
-func TestSinceUsesUpdatesRatherThanOccurrenceOrArrival(t *testing.T) {
-	old := time.Now().Add(-24 * time.Hour)
-	ev := domain.SeismicEvent{EventID: "old-event", OccurredAt: timeutil.New(old), Magnitude: 5}
-	warning := domain.TsunamiWarning{WarningID: "future-warning", RelatedEventID: ev.EventID, ThreatLevel: domain.ThreatWaspada, EstimatedArrival: timeutil.New(time.Now().Add(time.Hour)), AffectedZones: []string{"Coast"}}
-	h := New([]domain.SeismicEvent{ev}, []domain.TsunamiWarning{warning}, 0)
+func TestSinceUsesInclusiveOccurrenceForEventAndWarning(t *testing.T) {
+	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Millisecond)
+	ev := domain.SeismicEvent{EventID: "event", OccurredAt: timeutil.New(at), Magnitude: 5, PotentialTsunami: true}
+	warning := domain.TsunamiWarning{WarningID: "warning", RelatedEventID: ev.EventID, ThreatLevel: domain.ThreatWaspada, EstimatedArrival: timeutil.New(time.Now().Add(time.Hour)), AffectedZones: []string{"Coast"}}
+	h := New(nil, nil, 0)
 	a, err := history.Open(":memory:")
 	require.NoError(t, err)
 	defer a.DB.Close()
 	require.NoError(t, h.AttachArchive(a))
-	cursor := timeutil.FormatISOMilli(h.Events[0].UpdatedAt.Time)
-	require.Empty(t, readDelta(t, h.SeismicEvents, cursor))
-	require.Empty(t, readDelta(t, h.TsunamiWarnings, cursor), "a future arrival must not make an unchanged warning repeat forever")
-	ev.Magnitude = 6
-	warning.ThreatLevel = domain.ThreatAwas
 	h.AddEvent(ev, &warning)
-	seismic := readDelta(t, h.SeismicEvents, cursor)
-	warnings := readDelta(t, h.TsunamiWarnings, cursor)
-	require.Len(t, seismic, 1)
-	require.Len(t, warnings, 1)
-	require.Equal(t, float64(6), seismic[0]["magnitude"])
-	require.Equal(t, "Awas", warnings[0]["threat_level"])
-	require.Equal(t, timeutil.FormatISOMilli(old), seismic[0]["occurred_at"])
-	require.Len(t, h.Events, 1)
-	require.Len(t, h.Warnings, 1)
+	for _, fn := range []gin.HandlerFunc{h.SeismicEvents, h.TsunamiWarnings} {
+		rows := readDelta(t, fn, timeutil.FormatISOMilli(at))
+		require.Len(t, rows, 1)
+		require.NotContains(t, rows[0], "updated_at")
+		require.Empty(t, readDelta(t, fn, timeutil.FormatISOMilli(at.Add(time.Millisecond))))
+	}
 	head, err := a.Head()
 	require.NoError(t, err)
-	h.AddEvent(ev, &warning)
+	changed := ev
+	changed.Magnitude = 7
+	warning.ThreatLevel = domain.ThreatAwas
+	h.AddEvent(changed, &warning)
+	require.Equal(t, ev, h.Events[0])
+	require.Equal(t, domain.ThreatWaspada, h.Warnings[0].ThreatLevel)
 	after, err := a.Head()
 	require.NoError(t, err)
-	require.Equal(t, head, after, "unchanged input must not create an update or history revision")
-	require.Empty(t, readDelta(t, h.SeismicEvents, timeutil.FormatISOMilli(h.Events[0].UpdatedAt.Time)))
-	// A newly received warning may itself describe an old arrival time.
-	warning.WarningID = "late-warning"
-	warning.EstimatedArrival = timeutil.New(old)
-	before := timeutil.FormatISOMilli(h.Warnings[0].UpdatedAt.Time)
-	h.AddEvent(ev, &warning)
-	require.Len(t, readDelta(t, h.TsunamiWarnings, before), 1)
+	require.Equal(t, head, after)
 }
-
-func TestFailedArchiveWriteDoesNotExposeUpdatedTimestamp(t *testing.T) {
-	h := New([]domain.SeismicEvent{{EventID: "event", OccurredAt: timeutil.New(time.Now()), Magnitude: 5}}, nil, 0)
+func TestRejectsOrphanWarningAndFalseToTrueMutation(t *testing.T) {
+	h := New(nil, nil, 0)
+	ev := domain.SeismicEvent{EventID: "event", PotentialTsunami: true}
+	w := domain.TsunamiWarning{WarningID: "warning", RelatedEventID: "another"}
+	h.AddEvent(ev, &w)
+	require.Empty(t, h.Events)
+	require.Empty(t, h.Warnings)
+	ev.PotentialTsunami = false
+	h.AddEvent(ev, nil)
+	ev.PotentialTsunami = true
+	w.RelatedEventID = ev.EventID
+	h.AddEvent(ev, &w)
+	require.False(t, h.Events[0].PotentialTsunami)
+	require.Empty(t, h.Warnings)
+}
+func TestFailedArchiveWriteExposesNeitherEventNorWarning(t *testing.T) {
+	h := New(nil, nil, 0)
 	a, err := history.Open(":memory:")
 	require.NoError(t, err)
 	require.NoError(t, h.AttachArchive(a))
-	before := h.Events[0]
-	require.NoError(t, a.DB.Close())
-	changed := before
-	changed.Magnitude = 7
-	h.AddEvent(changed, nil)
-	require.Equal(t, before, h.Events[0])
+	_, err = a.DB.Exec(`CREATE TRIGGER reject_warning BEFORE INSERT ON history WHEN NEW.entity='tsunami-warnings' BEGIN SELECT RAISE(ABORT,'test failure'); END`)
+	require.NoError(t, err)
+	defer a.DB.Close()
+	ev := domain.SeismicEvent{EventID: "event", PotentialTsunami: true}
+	w := domain.TsunamiWarning{WarningID: "warning", RelatedEventID: ev.EventID}
+	h.AddEvent(ev, &w)
+	require.Empty(t, h.Events)
+	require.Empty(t, h.Warnings)
+	head, err := a.Head()
+	require.NoError(t, err)
+	require.Zero(t, head)
+}
+
+func TestHistoryDoesNotExposeLegacyUpdatedAt(t *testing.T) {
+	h := New(nil, nil, 0)
+	a, err := history.Open(":memory:")
+	require.NoError(t, err)
+	defer a.DB.Close()
+	require.NoError(t, h.AttachArchive(a))
+	legacy := map[string]any{"event_id": "legacy", "magnitude": 5.0, "depth_km": 10.0, "epicenter_lat": -6.0, "epicenter_lon": 106.0, "region_name": "Coast", "occurred_at": "2026-10-10T00:00:00Z", "potential_tsunami": false, "updated_at": "2026-10-10T01:00:00Z"}
+	require.NoError(t, a.Append(history.Record{Entity: "seismic-events", ID: "legacy", Payload: legacy}))
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/history?entity=seismic-events", nil)
+	h.History(c)
+	require.Equal(t, 200, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), "legacy")
+	require.NotContains(t, w.Body.String(), "updated_at")
 }

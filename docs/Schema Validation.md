@@ -2,7 +2,40 @@
 
 The Aggregator reads the writer schema identified by each Avro frame. A cached,
 immutable plan validates application rules and normalizes values after the Avro
-codec decodes their types. There is no `confidence_level` branch in the Aggregator.
+codec decodes their types. It then resolves against an explicitly configured
+reader schema. There is no `confidence_level` branch in the Aggregator.
+
+The frame's writer ID never selects a reader version. `BMKG_SEISMIC_READER_SCHEMA`,
+`BMKG_TSUNAMI_READER_SCHEMA`, and `PVMBG_READER_SCHEMA` select startup reader files.
+The default PVMBG reader is v1. Successful live polling discovers a second distinct,
+bidirectionally compatible writer schema as a cached candidate without activating
+it; no bundled v2 reader is needed. History uses a reader derived from that same
+source record schema and does not discover candidates from page envelope IDs.
+
+The internal Aggregator's `POST /admin/schema-version`, with a dedicated Bearer
+`AGGREGATOR_ADMIN_TOKEN`, independently toggles its reader v1/v2. It returns 409 if
+no second schema has been discovered, 401 for invalid credentials, or 503 if
+in-flight work cannot drain within 10 seconds; errors preserve the active reader.
+The gate spans live/history fetch, mapping and database commit. Both reader
+snapshots stay cached for repeated toggles, regardless of PVMBG's current writer.
+This demo control keeps only two reader snapshots; further distinct schemas do not
+replace them. Restart restores the configured baseline and clears discovery.
+Switching does not reset cursors or backfill dropped fields. Compare newly generated
+PVMBG records before and after reader activation to demonstrate JSONB storage.
+
+**Unknown-field policy:** drop fields absent from the reader. Fields accepted by
+both schemas and without a canonical destination go to `attributes`. Reader-only
+fields require defaults; defaults are applied and validated but excluded from
+source attributes because they were not sent by the writer. Presence tracking is
+recursive through records, arrays, and maps, including history payloads. Non-null
+defaults do not fabricate source fields. The rule is symmetric when a field exists
+in v1 but not v2, and independent of the field's name.
+
+Resolution supports record names/reader aliases, field names/reader aliases,
+arrays, maps, unions and primitive promotions. The reader codec applies defaults
+and enforces its types; its rules validate the resolved datum. Incompatible changes
+fail the batch instead of advancing polling or history progress. All writer rules
+run before projection, even for writer-only fields.
 
 A PVMBG v2 field declares its rule alongside its type:
 
@@ -81,8 +114,8 @@ History uses a registered page record with `data: array<{cursor:long,payload:rec
 source schemas, including custom rules. SQLite archives remain JSON and require
 no migration. PVMBG history reflects the currently visible schema version; the
 page schema ID describes that rendered response, not the archive's original version.
-The schema toggle pre-registers live/history v1/v2 before publishing revisions and
-changing visibility under the schema lock. Registration failure leaves visibility
+The schema toggle pre-registers live/history v1/v2 before changing visibility
+under the schema lock. It emits a new report when enabled and never revises existing IDs. Registration failure leaves visibility
 unchanged. Schema-registry requests on history carry the request correlation ID.
 
 An invalid live batch is rejected before any canonical write or last-success
@@ -106,4 +139,8 @@ performance database. Regression tests cover live/history validation failures
 before commits, bounds, scalar allowlists, nested maps/arrays, named recursive
 unions, logical values, precision, registry caching, and toggle registration failure.
 
-Hasil pengujian aktual tersedia di [Schema Validation Test Results](Schema%20Validation%20Test%20Results.md).
+Reader regression tests cover the four writer/reader combinations in both
+field-addition and field-removal directions, arbitrary field names, non-null
+defaults, recursive presence, alias/promotion resolution, and matching live/history
+`attributes` projections. See `internal/avrowire/reader_test.go` and
+`internal/clients/reader_test.go` in the Aggregator module.

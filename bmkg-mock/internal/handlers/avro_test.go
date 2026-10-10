@@ -22,10 +22,10 @@ func TestAvroSourcesWithRegistry(t *testing.T) {
 		t.Skip("TEST_SCHEMA_REGISTRY_URL is not set")
 	}
 	registry := avrowire.NewClient(registryURL)
-	// Seed the previous contracts to exercise FULL_TRANSITIVE compatibility,
-	// rather than checking registration only against an empty registry.
+	// Seed schemas from previous builds to check that removing extra metadata
+	// remains FULL_TRANSITIVE compatible with an existing registry.
 	for subject, schema := range map[string]string{"bmkg.seismic-events-value": seismicSchema, "bmkg.tsunami-warnings-value": warningSchema} {
-		legacy := strings.Replace(schema, `,{"name":"updated_at","type":["null","string"],"default":null}`, "", 1)
+		legacy := strings.Replace(schema, `]}}`, `,{"name":"updated_at","type":["null","string"],"default":null}]}}`, 1)
 		_, err := registry.Register(context.Background(), subject, legacy)
 		require.NoError(t, err)
 	}
@@ -58,6 +58,6 @@ func TestAvroSourcesWithRegistry(t *testing.T) {
 		records, err := avrowire.Records(native)
 		require.NoError(t, err)
 		require.NotEmpty(t, records)
-		require.NotEmpty(t, records[0]["updated_at"])
+		require.NotContains(t, records[0], "updated_at")
 	}
 }

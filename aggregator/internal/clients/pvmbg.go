@@ -62,11 +62,13 @@ func decodeVolcanicReport(raw map[string]interface{}) (VolcanicReport, error) {
 }
 
 type PVMBGClient struct {
-	BaseURL  string
-	Token    string
-	HTTP     *http.Client
-	Logger   *slog.Logger
-	Registry *avrowire.Client
+	BaseURL      string
+	Token        string
+	HTTP         *http.Client
+	Logger       *slog.Logger
+	Registry     *avrowire.Client
+	Reader       *avrowire.SourceReader
+	ReaderSwitch *avrowire.ReaderSwitch
 }
 
 func NewPVMBGClient(baseURL, token string, logger *slog.Logger) *PVMBGClient {
@@ -79,6 +81,16 @@ func NewPVMBGClient(baseURL, token string, logger *slog.Logger) *PVMBGClient {
 }
 
 func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID string, since time.Time) ([]VolcanicReport, error) {
+	reader := c.Reader
+	if c.ReaderSwitch != nil {
+		var release func()
+		var err error
+		ctx, reader, release, err = c.ReaderSwitch.Begin(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
 	path := "/volcanic-reports"
 	if !since.IsZero() {
 		path += "?since=" + since.UTC().Format(time.RFC3339Nano)
@@ -113,6 +125,7 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 	}
 
 	var raws []map[string]interface{}
+	var writer *avrowire.Schema
 	if c.Registry != nil {
 		if resp.Header.Get("Content-Type") != avrowire.MediaType {
 			return nil, fmt.Errorf("%w: pvmbg %s did not return Avro", ErrContractViolation, path)
@@ -121,13 +134,20 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 		if err != nil {
 			return nil, err
 		}
-		native, err := c.Registry.Decode(avrowire.WithCorrelationID(callCtx, correlationID), body)
+		if reader == nil {
+			return nil, fmt.Errorf("explicit reader schema required for volcanic-reports")
+		}
+		native, err := c.Registry.DecodeWithReader(avrowire.WithCorrelationID(callCtx, correlationID), body, reader.Live)
 		if err != nil {
 			return nil, fmt.Errorf("pvmbg %s: %w", path, err)
 		}
 		raws, err = avrowire.Records(native)
 		if err != nil {
 			return nil, fmt.Errorf("%w: pvmbg %s: %v", ErrContractViolation, path, err)
+		}
+		writer, err = c.Registry.SchemaForFrame(callCtx, body)
+		if err != nil {
+			return nil, err
 		}
 	} else if err := json.NewDecoder(resp.Body).Decode(&raws); err != nil {
 		return nil, fmt.Errorf("%w: pvmbg %s JSON: %v", ErrContractViolation, path, err)
@@ -151,6 +171,12 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 		}
 		r.SourceSequence = sequence
 		reports = append(reports, r)
+	}
+	// History envelope IDs are deliberately not used for reader discovery.
+	if c.ReaderSwitch != nil && writer != nil {
+		if err := c.ReaderSwitch.Observe(writer); err != nil && c.Logger != nil {
+			c.Logger.Warn("writer schema cannot be selected as a reader", "schema_id", writer.ID, "error", err)
+		}
 	}
 	return reports, nil
 }

@@ -56,6 +56,9 @@ func TestValidationFailureCannotCommitOrAdvancePollingProgress(t *testing.T) {
 			st.status["PVMBG"] = domain.EndpointStatus{LastSuccess: &last}
 			c := clients.NewPVMBGClient(source.URL, "token", slog.New(slog.NewTextHandler(io.Discard, nil)))
 			c.Registry = avrowire.NewClient(regServer.URL)
+			reader, readerErr := avrowire.NewReader(text)
+			require.NoError(t, readerErr)
+			c.Reader = &avrowire.SourceReader{Live: reader, History: reader}
 			p := &Poller{Store: st, PVMBG: c}
 			if mode == "live" {
 				e = p.pollOnce(context.Background(), "PVMBG", "test", p.pollVolcanic)

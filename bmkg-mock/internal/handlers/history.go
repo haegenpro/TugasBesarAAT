@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"bmkg-mock/internal/avrowire"
+	"bmkg-mock/internal/domain"
 	"bmkg-mock/internal/middleware"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -57,6 +59,27 @@ func (h *Handler) History(c *gin.Context) {
 	if err != nil {
 		c.JSON(503, gin.H{"error": "archive unavailable"})
 		return
+	}
+
+	// Render archived payloads through the fixed source contract, including
+	// archives written by older builds that exposed extra metadata.
+	for i := range page.Data {
+		var value any
+		if entity == "seismic-events" {
+			value = &domain.SeismicEvent{}
+		} else {
+			value = &domain.TsunamiWarning{}
+		}
+		if err := json.Unmarshal(page.Data[i].Payload, value); err != nil {
+			c.JSON(503, gin.H{"error": "archive invalid"})
+			return
+		}
+		b, err := json.Marshal(value)
+		if err != nil {
+			c.JSON(503, gin.H{"error": "archive invalid"})
+			return
+		}
+		page.Data[i].Payload = b
 	}
 
 	if strings.Contains(c.GetHeader("Accept"), avrowire.MediaType) {

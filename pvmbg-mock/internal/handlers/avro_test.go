@@ -26,7 +26,7 @@ func TestAvroSchemaEvolutionWithRegistry(t *testing.T) {
 	}
 	registry := avrowire.NewClient(registryURL)
 	for _, schema := range []string{volcanicV1, volcanicV2()} {
-		legacy := strings.Replace(schema, `,{"name":"updated_at","type":["null","string"],"default":null}`, "", 1)
+		legacy := strings.Replace(schema, `]}}`, `,{"name":"updated_at","type":["null","string"],"default":null}]}}`, 1)
 		_, err := registry.Register(context.Background(), volcanicSubject, legacy)
 		require.NoError(t, err)
 	}
@@ -71,7 +71,7 @@ func TestAvroSchemaEvolutionWithRegistry(t *testing.T) {
 	}
 	readHistory(false)
 	before := read()
-	require.NotEmpty(t, before[0]["updated_at"])
+	require.NotContains(t, before[0], "updated_at")
 	require.NotContains(t, before[0], "confidence_level")
 
 	// A cold registry outage must reject an uncached schema without changing
