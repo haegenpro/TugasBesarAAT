@@ -16,11 +16,14 @@ type hazardSummary struct {
 }
 
 type hazardList struct {
-	Data         []hazardSummary `json:"data"`
-	Count        int             `json:"count"`
-	AsOf         string          `json:"as_of"`
-	SourceStatus json.RawMessage `json:"source_status"`
-	Metadata     json.RawMessage `json:"metadata"`
+	NextCursor       *string         `json:"next_cursor"`
+	Partial          bool            `json:"partial"`
+	UnavailableUnits []string        `json:"unavailable_units"`
+	Data             []hazardSummary `json:"data"`
+	Count            int             `json:"count"`
+	AsOf             string          `json:"as_of"`
+	SourceStatus     json.RawMessage `json:"source_status"`
+	Metadata         json.RawMessage `json:"metadata"`
 }
 
 func requireResponseFields(data []byte, fields ...string) error {

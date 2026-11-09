@@ -5,6 +5,12 @@ Ordered, copy-paste test sequence for every M1 acceptance criterion
 phases depend on state left by earlier ones, and the load tests come last
 because they change PVMBG's configured delay.
 
+This runbook targets the current PostgreSQL-backed Auth/consumers and fresh
+bootstrap schemas. It preserves the detailed M1 manual procedures; additional
+preparation/concurrency/tracing checks are in Appendix D. The
+[verification report](Preparation%20Verification.md) records completed checks,
+separately from the acceptance criteria below.
+
 Every step has:
 
 - **Command**: a Bash variant (Linux / macOS / Git Bash) and a PowerShell variant (Windows).
@@ -13,7 +19,7 @@ Every step has:
 
 | Phase | Covers | Mutates state? |
 | --- | --- | --- |
-| 0. Setup | helpers, credentials | no |
+| 0. Setup | generated configuration, helpers, credentials | creates local config on a fresh checkout |
 | 1. Boot & baseline | Ketentuan 3, 7; P1.1 | wipes volumes (optional) |
 | 2. Schema evolution | P1.2 to P1.4 | PVMBG schema toggle -> v2 |
 | 3. Trust & auth | P3.1 to P3.4 | creates sessions |
@@ -45,20 +51,43 @@ Keep failed runs as evidence; desired values and examples are not measured resul
 | Tool | Needed for | Linux/macOS | Windows |
 | --- | --- | --- | --- |
 | Docker + Compose v2 | everything | yes | Docker Desktop |
+| Python 3 | environment generator and preparation checks | required (`python3`) | required (`python3` on PATH) |
+| Node.js 18+ | evidence probes, operator commands, JavaScript tests | required | required |
 | `curl` | HTTP probes (Bash variant) | preinstalled | `curl.exe` ships with Win 10/11 (Git Bash also has it) |
 | `jq` **or** `python3` | JSON parsing (Bash variant only) | `apt install jq` / `brew install jq`; python3 usually present | **not needed in PowerShell** (uses `ConvertFrom-Json`). In Git Bash: `winget install jqlang.jq`, or fall back to Python |
 | k6 | load test | **not installed**: runs as `grafana/k6` container | same |
 | nats CLI | broker inspection | **not installed**: runs as `natsio/nats-box` container | same |
 
-Run everything from the repository root. The 14 per-service `.env` files (including three monitoring files) must
-exist (see README, "Per-service environment files"). The root `.env` must
-contain the complete deployment port plan plus `GRAFANA_BIND_ADDRESS`; see
-the [README configuration tables](../README.md#configuration-variables) and root template. Broker ports are internal only; use
-`docker compose exec` or the backend-network NATS helper below for operator
-inspection. No additional Compose file is needed. All service settings in `.env.example`
-are required; there are no configuration fallbacks. Startup is independent of
-external service availability. Consumer container health is liveness only;
-processing proofs use `/ready` and record/backlog checks.
+Run everything from the repository root. Generate the **20 configuration files**
+before loading helpers (same Python command in Bash and PowerShell):
+
+```text
+python3 scripts/setup-env.py
+docker compose --profile monitoring --profile demo --profile tools --profile consumer-demo config --quiet
+```
+
+The generator creates random matching credentials without printing them. It
+preserves a complete existing set and rejects partial sets. For a checkout with
+old configuration whose persisted data will be reset, run
+`python3 scripts/setup-env.py --fresh`: old files move into the gitignored
+`.local-config-backup/<timestamp>/` directory. Generate first, then paste helpers
+so they read the active credentials. [README configuration tables](../README.md#configuration-variables)
+describe manual setup and ownership. Do not regenerate database passwords for
+volumes you need to retain; no old-data conversion is supplied.
+
+Root `.env` contains deployment ports, Grafana bind address and operational
+budgets. Required credentials and business settings have no fallback; optional
+operational budgets have native defaults, while Compose supplies them explicitly.
+Broker, Registry, database and Tempo ports stay internal. Inspect them with
+`docker compose exec` or the project-specific NATS helper below.
+Startup is independent of upstream availability. Docker health is liveness for
+consumers; processing proofs also require `/ready` and records/backlog checks.
+
+If using a named project, set `COMPOSE_PROJECT_NAME` in every terminal before
+running Docker commands (`export COMPOSE_PROJECT_NAME=your-project` in Bash,
+`$env:COMPOSE_PROJECT_NAME='your-project'` in PowerShell). Pass the same name as
+`--project` to Node/Python evidence commands; changing the name does not change
+host ports. Leave other projects on distinct host ports.
 
 ### 0.2 Helpers (paste once per terminal)
 
@@ -115,10 +144,35 @@ hz(){ curl -s -H "Authorization: Bearer $1" "$API$2"; }                      # h
 agg(){ docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}$1"' sh "$1"; }   # internal API (not published)
 rec(){ docker compose exec -T "$1" sh -c 'wget -qO- "http://localhost:${CONSUMER_PORT:?}/records"'; } # rec <service>
 sql(){ echo "$1" | docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; }
-nats(){ local NET BROKER_URL; NET=$(docker network ls --format '{{.Name}}' | grep '_backend$' | head -1); [ -n "$NET" ] || { echo "no *_backend network: is the stack up? (Phase 1.1)" >&2; return 1; }
+nats(){ local NET BROKER_URL BROKER_ID; BROKER_ID=$(docker compose ps -q broker); [ -n "$BROKER_ID" ] || { echo "broker not running (Phase 1.1)" >&2; return 1; }
+      NET=$(docker inspect -f '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}' "$BROKER_ID") || return
+      [ -n "$NET" ] || { echo "broker has no network" >&2; return 1; }
       BROKER_URL=$(docker compose exec -T broker printenv NATS_URL) || return
       docker run --rm --network "$NET" natsio/nats-box nats -s "$BROKER_URL" "$@"; }
 started(){ docker inspect -f '{{.Name}} {{.State.StartedAt}}' $(docker compose ps -q); }  # container start times
+
+# ---- complete hazard traversal (agg itself returns ONE bounded page) ----
+agg_pages(){
+  local path="$1" page cursor sep='?'
+  [[ "$path" == *'?'* ]] && sep='&'
+  while :; do
+    page=$(agg "$path") || return
+    printf '%s\n' "$page"
+    cursor=$(printf '%s' "$page" | jget next_cursor) || return
+    [ -n "$cursor" ] && [ "$cursor" != null ] || break
+    # Cursors are URL-safe; keep the original filters on every page.
+    path="$1${sep}cursor=$cursor"
+  done
+}
+agg_all(){ agg_pages "$1" | python3 -c 'import json,sys
+pages=[json.loads(line) for line in sys.stdin if line.strip()]
+if not pages or pages[-1].get("next_cursor") is not None or any(p.get("partial") for p in pages):
+    sys.exit("incomplete hazard traversal")
+out=pages[0]; out["data"]=[row for p in pages for row in p["data"]]
+out["metadata"]={k:v for p in pages for k,v in p.get("metadata",{}).items()}
+out["count"]=len(out["data"]); out["next_cursor"]=None
+print(json.dumps(out))'; }
+
 # Both mocks emit a new event every 10 s on their own, so tests follow one specific event instead of counting.
 latest(){ agg '/internal/hazards' | jget data.0.hazard_id; }                  # newest hazard in the Aggregator
 wait_has(){ for i in $(seq 1 30); do rec "$1" | grep -q "$2" && { echo "$1 has $2"; return 0; }; sleep 2; done; echo "$1 MISSING $2"; return 1; }   # wait_has <service> <hazard_id>
@@ -157,12 +211,32 @@ function Hz($tok,$path,$cid=$null){ $h=@{Authorization="Bearer $tok"}; if($cid){
 function Agg($path){ docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}$1"' sh $path | Out-String | ConvertFrom-Json }
 function Rec($svc){ docker compose exec -T $svc sh -c 'wget -qO- "http://localhost:${CONSUMER_PORT:?}/records"' | Out-String | ConvertFrom-Json }
 function Sql($q){ $q | docker compose exec -T postgres sh -c 'psql -U $POSTGRES_USER -d $POSTGRES_DB' }
-function Nats { $net = docker network ls --format '{{.Name}}' | Where-Object { $_ -like '*_backend' } | Select-Object -First 1   # looked up per call: the network only exists once the stack is up
-  if (-not $net) { Write-Error 'no *_backend network: is the stack up? (Phase 1.1)'; return }
+function Nats { $brokerId = docker compose ps -q broker
+  if (-not $brokerId) { throw 'broker not running (Phase 1.1)' }
+  $net = (docker inspect -f '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}' $brokerId | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $net) { throw 'cannot inspect broker network' }
   $brokerUrl = (docker compose exec -T broker printenv NATS_URL | Out-String).Trim()
   if ($LASTEXITCODE -ne 0) { Write-Error 'cannot read broker NATS_URL'; return }
   docker run --rm --network $net natsio/nats-box nats -s $brokerUrl @args }
 function Started { docker inspect -f '{{.Name}} {{.State.StartedAt}}' (docker compose ps -q) }
+
+# Agg returns ONE bounded page; Agg-All traverses all pages with the same filters.
+function Agg-All($path) {
+  $url=$path; $sep='?'; if ($path.Contains('?')) { $sep='&' }
+  $rows=@(); $metadata=@{}; $first=$null
+  do {
+    $page=Agg $url
+    if ($LASTEXITCODE -ne 0 -or -not $page -or $page.partial) { throw 'incomplete hazard traversal' }
+    if (-not $first) { $first=$page }
+    $rows+=@($page.data)
+    foreach ($property in $page.metadata.PSObject.Properties) { $metadata[$property.Name]=$property.Value }
+    $cursor=$page.next_cursor
+    if ($cursor) { $url=$path+$sep+'cursor='+[uri]::EscapeDataString($cursor) }
+  } while ($cursor)
+  $first.data=@($rows); $first.count=$rows.Count; $first.metadata=$metadata; $first.next_cursor=$null
+  return $first
+}
+
 # Both mocks emit a new event every 10 s on their own, so tests follow one specific event instead of counting.
 function Latest { (Agg '/internal/hazards').data[0].hazard_id }             # newest hazard in the Aggregator
 function Wait-Has($svc,$id){ for($i=0;$i -lt 30;$i++){                # Wait-Has <service> <hazard_id>
@@ -242,7 +316,7 @@ reports. Saved command outputs remain the acceptance evidence; dashboard capture
 add context. All Bash commands support Linux, macOS, and Git Bash; PowerShell
 commands support Windows PowerShell 5.1 and PowerShell 7.
 
-After Phase 1.1, enable the five monitoring services if you want dashboard
+After Phase 1.1, enable the six monitoring services if you want dashboard
 observation during testing. This command works in Bash and PowerShell:
 
 ```bash
@@ -252,7 +326,7 @@ docker compose --profile monitoring up -d --build
 Without this profile, use the API, SQL, Docker logs, and k6 assertions directly.
 Record whether monitoring is enabled when comparing load-test results.
 To stop only monitoring, run
-`docker compose --profile monitoring stop grafana prometheus loki alloy nats-exporter`.
+`docker compose --profile monitoring stop grafana prometheus loki alloy nats-exporter tempo`.
 Omitting the profile from a later `up` does not stop containers already running.
 
 Once monitoring is running, open Grafana using your root `.env` settings:
@@ -311,8 +385,13 @@ business request latency and cannot replace k6 thresholds.
 
 Schema mapping, role redaction, token expiry/refresh, JSONB storage, network
 isolation, and lifecycle revision/order assertions remain API/SQL/Go tests.
-Monitoring does not inspect those contracts or instrument application throughput,
-outbox state, database health, or distributed traces.
+The **AAT Application Performance** dashboard additionally shows instrumented
+throughput/errors/latency, pool connections/waits, outbox depth and known replay
+offset backlog. Offset gaps are not exact observation counts. Grafana Explore →
+Tempo displays HTTP/database and ingestion/outbox/NATS spans; find request traces
+using the `X-Trace-ID` HTTP header. Correlation IDs remain available in logs.
+These metrics/traces add diagnostic evidence; they do not replace the assertions
+above. Appendix D verifies stored traces and operational guarantees.
 
 For supplemental screenshots, save `evidence/1.2-health.png`,
 `1.4-correlation.png`, `4.3-backlog-during.png`, `4.4-backlog-after.png`,
@@ -334,26 +413,27 @@ prove successful recovery.
 > Capture: run `step 1.1` first. Output is saved to `evidence/1.1.txt`.
 
 > Only run `down -v` if you want a pristine database (it **deletes all volumes**:
-> canonical store, auth sessions, consumer SQLite, registry). Skip it to keep data.
+> canonical PostgreSQL, Auth/consumer PostgreSQL, source SQLite archives, Registry,
+> broker and monitoring data). Use an intentional reset for the first run after
+> the storage refactor; later runs can retain volumes created by this setup.
 
 ```bash
 docker compose --profile monitoring --profile consumer-demo down -v --remove-orphans
-docker compose up -d --build 2>&1 | tee evidence/1.1-up.txt
-until ! docker compose ps --format '{{.Health}}' | grep -qv '^healthy$'; do sleep 3; done
+docker compose up -d --build --wait --wait-timeout 300 2>&1 | tee evidence/1.1-up.txt
 docker compose ps --format 'table {{.Service}}\t{{.Status}}' | tee evidence/1.1-ps.txt
 ```
 ```powershell
 docker compose --profile monitoring --profile consumer-demo down -v --remove-orphans
-docker compose up -d --build 2>&1 | ForEach-Object { "$_" } | Tee8 1.1-up.txt
-do { Start-Sleep 3; $bad = docker compose ps --format '{{.Health}}' | Where-Object { $_ -ne 'healthy' } } while ($bad)
+docker compose up -d --build --wait --wait-timeout 300 2>&1 | ForEach-Object { "$_" } | Tee8 1.1-up.txt
 docker compose ps --format 'table {{.Service}}\t{{.Status}}' | Tee8 1.1-ps.txt
 ```
 
-**Desired state:** exactly 11 default-profile containers, all `healthy`: `broker, postgres,
+**Desired state:** exactly 14 default-profile containers, all `healthy`: `broker, postgres,
 registry-db, schema-registry, bmkg-mock, pvmbg-mock, aggregator, auth-service,
-client-api, consumer-dashboard, consumer-notifier`. Enabling the optional
-`monitoring` profile adds `grafana, prometheus, loki, alloy, nats-exporter`, for
-16 containers. Other optional profile containers are not included in these counts. The one command is
+client-api, consumer-dashboard, consumer-notifier, auth-db, dashboard-db, notifier-db`.
+Enabling `monitoring` adds `grafana, prometheus, loki, alloy, nats-exporter, tempo`,
+for 20 containers. The `consumer-demo` profile adds its own database and consumer,
+for 22 when monitoring is also enabled. Other optional profile containers are not included in these counts. The one command is
 `docker compose up -d --build`. **Criterion:** Ketentuan 3.
 
 ### 1.2 Health endpoints
@@ -381,26 +461,26 @@ Phase 5 compare against it.
 sleep 8                                                    # a few poll cycles
 S1=$(curl -s -H "X-BMKG-Key: $BMKG_KEY" $BMKG/seismic-events | jlen .)
 V1=$(curl -s -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports | jlen .)
-A1=$(agg '/internal/hazards' | jget count); echo "seismic=$S1 volcanic=$V1 aggregator=$A1"   # >= 20, >= 20, >= 40
+A1=$(agg_all '/internal/hazards' | jget count); echo "seismic=$S1 volcanic=$V1 aggregator=$A1"   # >= 20, >= 20, >= 40
 curl -s -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports | jget 0         # no confidence_level
-agg '/internal/hazards?hazard_type=VOLCANIC' | tee evidence/1.3-volcanic-before.json | jget data.0
-agg '/internal/hazards?hazard_type=SEISMIC'  | jget data.0
+agg_all '/internal/hazards?hazard_type=VOLCANIC' | tee evidence/1.3-volcanic-before.json | jget data.0
+agg_all '/internal/hazards?hazard_type=SEISMIC'  | jget data.0
 sleep 25                                                   # each mock adds one record every 10 s
 S2=$(curl -s -H "X-BMKG-Key: $BMKG_KEY" $BMKG/seismic-events | jlen .)
 V2=$(curl -s -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports | jlen .)
-A2=$(agg '/internal/hazards' | jget count); echo "seismic=$S2 volcanic=$V2 aggregator=$A2"   # each higher than before
+A2=$(agg_all '/internal/hazards' | jget count); echo "seismic=$S2 volcanic=$V2 aggregator=$A2"   # each higher than before
 ```
 ```powershell
 Start-Sleep 8
 function Counts { $s = (Invoke-RestMethod -Uri "$BmkgUrl/seismic-events" -Headers @{'X-BMKG-Key'=$BmkgKey}).Count
   $p = (Invoke-RestMethod -Uri "$PvmbgUrl/volcanic-reports" -Headers @{Authorization="Bearer $PvmbgToken"}).Count
-  "seismic=$s volcanic=$p aggregator=$((Agg '/internal/hazards').count)" }
+  "seismic=$s volcanic=$p aggregator=$((Agg-All '/internal/hazards').count)" }
 Counts                                                                                                      # >= 20, >= 20, >= 40
 $v = Invoke-RestMethod -Uri "$PvmbgUrl/volcanic-reports" -Headers @{Authorization="Bearer $PvmbgToken"}
 $v[0] | ConvertTo-Json                                                                                      # no confidence_level
-$vb = Agg '/internal/hazards?hazard_type=VOLCANIC'; $vb | ConvertTo-Json -Depth 8 | Set-Content evidence/1.3-volcanic-before.json -Encoding utf8
+$vb = Agg-All '/internal/hazards?hazard_type=VOLCANIC'; $vb | ConvertTo-Json -Depth 8 | Set-Content evidence/1.3-volcanic-before.json -Encoding utf8
 $vb.data[0] | ConvertTo-Json -Depth 5
-(Agg '/internal/hazards?hazard_type=SEISMIC').data[0] | ConvertTo-Json -Depth 5
+(Agg-All '/internal/hazards?hazard_type=SEISMIC').data[0] | ConvertTo-Json -Depth 5
 Start-Sleep 25                                                                                              # each mock adds one record every 10 s
 Counts                                                                                                      # each higher than before
 ```
@@ -471,8 +551,25 @@ trace above too: polling and client reads are separate request flows.
 
 ## Phase 2: PVMBG schema evolution (P1.2 to P1.4)
 
-Starting state: PVMBG on the old schema (nothing toggled yet). If you re-run this
-phase, first run Phase 1 again (the toggle is in-memory).
+Starting state: PVMBG writer and Aggregator reader both on v1, with no previous
+schema toggle in this run. Prefer the asserted cross-platform sequence from this
+baseline:
+
+```text
+node scripts/evidence-probes.mjs schema --name 2-schema
+```
+
+It captures source/canonical records, both controls, container identities and
+column catalogs, and leaves writer/reader on v2 for later phases. It also writes
+the `schema-before.json`, `schema-after.json` and `2.3-new-report.json` snapshots
+needed by the automated storage check in 5.3. Keep its transcript as the schema
+phase evidence; manual steps 2.1–2.4 below explain the equivalent controls and
+assertions. **Choose the automated path or the manual path for one activation.**
+Do not run the schema probe after manually switching to v2: it requires v1 at
+entry. For a repeat, restore both controls to v1 and capture a new baseline, or
+use an intentionally clean project. If only following manual steps, inspect
+the saved old/new IDs directly in 5.3; its automated `storage` command requires
+the automated schema snapshots.
 
 ### 2.1 Record process start times (to prove "no restart")
 
@@ -530,9 +627,9 @@ sleep 8
 # Discover the generated ID; it is deliberately different on every activation.
 NEW_REPORT=$(curl -s -H "Authorization: Bearer $PVMBG_TOKEN" $PVMBG/volcanic-reports | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const r=JSON.parse(s).filter(x=>typeof x.confidence_level==="number").sort((a,b)=>b.reported_at.localeCompare(a.reported_at));if(!r.length)process.exit(1);console.log(r[0].report_id)})')
 echo "new report: $NEW_REPORT"
-agg '/internal/hazards?hazard_type=VOLCANIC' | jfind data source_ref_id "$NEW_REPORT" | tee evidence/2.3-new-report.json
+agg_all '/internal/hazards?hazard_type=VOLCANIC' | jfind data source_ref_id "$NEW_REPORT" | tee evidence/2.3-new-report.json
 test "$(cat evidence/2.3-new-report.json | jlen .)" -gt 0 || { echo 'FAIL: schema report not ingested; retry after polling'; false; }
-agg '/internal/hazards?hazard_type=VOLCANIC' | jget count
+agg_all '/internal/hazards?hazard_type=VOLCANIC' | jget count
 ```
 ```powershell
 Start-Sleep 8
@@ -540,7 +637,7 @@ $source = Invoke-RestMethod -Uri "$PvmbgUrl/volcanic-reports" -Headers @{Authori
 $newReport = $source | Where-Object { $null -ne $_.confidence_level } | Sort-Object reported_at -Descending | Select-Object -First 1
 if (-not $newReport) { throw 'No new schema report was returned' }
 "new report: $($newReport.report_id)"
-$va = Agg '/internal/hazards?hazard_type=VOLCANIC'
+$va = Agg-All '/internal/hazards?hazard_type=VOLCANIC'
 $mapped = $va.data | Where-Object source_ref_id -eq $newReport.report_id
 if (-not $mapped) { throw 'Schema report not yet ingested; retry after the configured polling interval' }
 $mapped | ConvertTo-Json -Depth 6 | Tee8 2.3-new-report.json
@@ -898,68 +995,72 @@ Consreport | Tee8 4.4-consumers-after.txt
 **Desired state:** notifier **catches up**: it now has the `hazard_id` that was
 published while it was down, and its `Unprocessed` drops back to 0 (a 1 can appear
 for a moment when a new event has just arrived). Events were **not lost** because JetStream retains messages
-for `NATS_STREAM_MAX_AGE` (24 h) and the durable cursor resumes where it stopped.
+within `NATS_STREAM_MAX_AGE` (24 h), subject to `NATS_MAX_BYTES`, and the durable
+cursor resumes where it stopped. This check assumes the missed messages have
+not been evicted by either limit.
 Semantics to state in the report: **at-least-once**, so consumers dedupe by
-`hazard_id` / stream sequence (the SQLite `records.hazard_id` primary key does this).
+`hazard_id` and `(stream, sequence, payload digest)` in one PostgreSQL transaction.
+Uniqueness and revision locks protect conflicting workers; ACK follows commit.
 **Criterion:** P5.3 (second half), P5.5.
 
 ### 4.5 Add a third consumer without touching the producer (P5.4)
 
 > Capture: run `step 4.5` first. Output is saved to `evidence/4.5.txt`.
 
+Run the cross-platform asserted operator command from either shell:
+
+```text
+node scripts/m1-demo.mjs third-consumer --project <project>
+```
+
+Replace `<project>` with the active Compose project name. The command requires
+the third consumer and `dashboard-demo-v1` durable to be absent before addition.
+It builds the image, starts **both** `dashboard-demo-db` and
+`consumer-dashboard-demo`, waits for processing readiness, follows one new hazard
+into all three stores, and checks every pre-existing container's identity/start
+time. Timestamped results go to `evidence/m1-third-consumer-*.json`; keep the
+terminal transcript as `evidence/4.5.txt`.
+
+For manual startup, the database is a separate service and must be included:
+
 ```bash
 started > evidence/4.5-started-before.txt
-# Pre-flight: remove any demo container/volume left over from an earlier run (see the warning below)
-docker compose --profile consumer-demo rm -sf consumer-dashboard-demo
-docker volume rm $(docker volume ls -q -f name=dashboard-demo-data) 2>/dev/null || true
-docker compose --profile consumer-demo up -d --force-recreate consumer-dashboard-demo
-for i in $(seq 1 30); do                                    # bounded wait, max ~60 s
-  st=not_ready
-  if docker compose exec -T consumer-dashboard-demo sh -c 'wget -q --spider "http://localhost:${CONSUMER_PORT:?}/ready"'; then st=ready; break; fi
-  sleep 2
-done
-[ "$st" = ready ] || { echo "demo consumer NOT ready ($st):"; docker compose --profile consumer-demo logs --tail 5 consumer-dashboard-demo; }
-sleep 12; H=$(latest); echo "event published after the third consumer joined: $H"
-for s in consumer-dashboard consumer-notifier consumer-dashboard-demo; do wait_has $s "$H"; done   # all three have it
-echo "demo consumer records: $(rec consumer-dashboard-demo | jget count)"                                          # history replayed
-started | grep -E 'aggregator' ; grep aggregator evidence/4.5-started-before.txt                                      # same StartedAt
+docker compose --profile consumer-demo up -d --build dashboard-demo-db consumer-dashboard-demo
+sleep 12; H=$(latest)
+for s in consumer-dashboard consumer-notifier consumer-dashboard-demo; do wait_has "$s" "$H"; done
+started | grep aggregator
+grep aggregator evidence/4.5-started-before.txt
 consreport
 ```
+
 ```powershell
 Started | Set-Content evidence/4.5-started-before.txt -Encoding utf8
-# Pre-flight: remove any demo container/volume left over from an earlier run (see the warning below)
-docker compose --profile consumer-demo rm -sf consumer-dashboard-demo
-docker volume ls -q -f name=dashboard-demo-data | ForEach-Object { docker volume rm $_ }
-docker compose --profile consumer-demo up -d --force-recreate consumer-dashboard-demo
-for ($i = 0; $i -lt 30; $i++) {                              # bounded wait, max ~60 s
-  $st = 'not_ready'; docker compose exec -T consumer-dashboard-demo sh -c 'wget -q --spider "http://localhost:${CONSUMER_PORT:?}/ready"'
-  if ($LASTEXITCODE -eq 0) { $st = 'ready'; break }; Start-Sleep 2 }
-if ($st -ne 'ready') { "demo consumer NOT ready ($st):"; docker compose --profile consumer-demo logs --tail 5 consumer-dashboard-demo }
-Start-Sleep 12; $h = Latest; "event published after the third consumer joined: $h"
-foreach ($s in 'consumer-dashboard','consumer-notifier','consumer-dashboard-demo') { Wait-Has $s $h }   # all three have it
-"demo consumer records: $((Rec consumer-dashboard-demo).count)"                                              # history replayed
-Started | Select-String aggregator; Select-String aggregator evidence/4.5-started-before.txt                    # same StartedAt
+docker compose --profile consumer-demo up -d --build dashboard-demo-db consumer-dashboard-demo
+Start-Sleep 12; $h=Latest
+foreach ($s in 'consumer-dashboard','consumer-notifier','consumer-dashboard-demo') { Wait-Has $s $h }
+Started | Select-String aggregator
+Select-String aggregator evidence/4.5-started-before.txt
 Consreport
 ```
 
-> **Warning: leftover demo container / volume.** `consumer-dashboard-demo` belongs to the
-> `consumer-demo` Compose profile, so a plain `docker compose down` / `down -v` does **not** remove it
-> or its volume `dashboard-demo-data`. A leftover volume holds the SQLite file from the previous
-> broker, so the new durable replays stream sequence 1 with different bytes and the consumer **halts**
-> (`consumer_incompatible ... HAZARDS/1 was reused with different bytes`, `/ready` = 503, container
-> still alive). A leftover container from a deleted network fails instead with `network ... not found`
-> (`Exited (128)`). The pre-flight above removes both. Tear down with
-> `docker compose --profile consumer-demo down -v --remove-orphans`.
+Use a fresh disposable project for a repeat of the **addition** assertion. To
+reset that project's entire dataset intentionally, use
+`docker compose --profile monitoring --profile consumer-demo down -v --remove-orphans`
+and repeat Phase 1; include the profile so both demo services are removed.
+Keep the broker and consumer database histories consistent. Replacing the broker
+history while retaining a projection can reuse stream sequence numbers with
+different bytes and halt a consumer. Do not remove volumes by an unscoped name
+filter: it can match another project's databases.
 
 **Desired state:** a third durable (`dashboard-demo-v1`) appears; all three consumers
 print `... has <hazard_id>` for the **same** event published after it joined; the
 Aggregator's `StartedAt` is unchanged and no code/config of the producer was edited.
 The new consumer starts from the beginning of the stream, so it first replays the
-retained history and its record count is far above 1. `wait_has` allows for that:
+retained history and its `/records` page normally contains more than one entry (up to its inspection limit of 100). `wait_has` allows for that:
 the new ID shows up once the replay has caught up, so do not compare the newest
 row across consumers at one instant. **Criterion:** P5.4.
 
-Optional cleanup of the demo consumer: `docker compose --profile consumer-demo stop consumer-dashboard-demo`.
+Optional stop of both demo services: `docker compose --profile consumer-demo stop consumer-dashboard-demo dashboard-demo-db`. This preserves its database and broker durable; it does not reset the addition test.
 
 ---
 
@@ -1032,23 +1133,25 @@ Stop Terminal A with Ctrl+C. **Criterion:** P4.1.
 sql "SELECT column_name, data_type FROM information_schema.columns WHERE table_name='hazard_events' ORDER BY ordinal_position;"
 sql "SELECT source_ref_id, (attributes ? 'confidence_level') AS has_confidence, attributes->>'confidence_level' AS confidence FROM hazard_events WHERE hazard_type='VOLCANIC' ORDER BY ingested_at;" | tee evidence/5.3-side-by-side.txt
 sql "SELECT hazard_type, (attributes ? 'confidence_level') AS has_confidence, count(*) FROM hazard_events GROUP BY 1,2 ORDER BY 1,2;"
-git ls-files | grep -iE 'migrat' || echo "no migration files"
-git log --oneline -- store/init.sql                                      # no commit/edit tied to the schema toggle
 ```
 ```powershell
 Sql "SELECT column_name, data_type FROM information_schema.columns WHERE table_name='hazard_events' ORDER BY ordinal_position;"
 Sql "SELECT source_ref_id, (attributes ? 'confidence_level') AS has_confidence, attributes->>'confidence_level' AS confidence FROM hazard_events WHERE hazard_type='VOLCANIC' ORDER BY ingested_at;" | Tee8 5.3-side-by-side.txt
 Sql "SELECT hazard_type, (attributes ? 'confidence_level') AS has_confidence, count(*) FROM hazard_events GROUP BY 1,2 ORDER BY 1,2;"
-git ls-files | Select-String -Pattern 'migrat'; 'checked migrations'
-git log --oneline -- store/init.sql
 ```
 
 **Desired state:**
 - Column list is the fixed set from `store/init.sql` and `attributes` is type `jsonb`. No `confidence_level` column was ever added.
 - Rows **with** and **without** `confidence_level` coexist in one table; seismic rows never have it, and `rep-schema-<boot>-<activation>` rows have it.
 - No migration is run for `confidence_level`; `init.sql` is untouched by the
-  schema change. Existing lifecycle migrations are independent of this toggle.
-- Both old and new rows are still readable through the API: `agg '/internal/hazards?hazard_type=VOLCANIC' | jget count` returns every row.
+  schema change. Runtime application accounts cannot issue schema DDL; canonical
+  and lifecycle tables were initialized together when the fresh volume was created.
+- Both old and new rows are still readable through the API: `agg_all '/internal/hazards?hazard_type=VOLCANIC' | jget count` totals all pages.
+  A raw `agg`/HTTP call returns one page (default 100, maximum 1000).
+
+Use the schema probe's before/after column catalogs to prove that the live toggle
+required no DDL. A list of repository migration filenames or commits alone does
+not establish this runtime property.
 
 If every pre-existing volcanic row now shows the field, a saved snapshot alone
 does not prove coexistence. Read an old hazard by its pre-toggle `hazard_id`
@@ -1074,14 +1177,16 @@ and readability must still be preserved.
 > Capture: run `step 5.4` first. Output is saved to `evidence/5.4.txt`.
 
 ```bash
-docker network ls -q -f name=_store | xargs docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}'    # aggregator + postgres ONLY
+STORE_NETWORK=$(docker inspect -f '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}' "$(docker compose ps -q postgres)")
+docker network inspect "$STORE_NETWORK" -f '{{range .Containers}}{{.Name}} {{end}}'    # aggregator + postgres ONLY
 docker compose ps --format '{{.Service}}: {{.Ports}}' | grep postgres                                            # no host port
 for s in client-api auth-service consumer-dashboard; do echo "== $s"; docker compose exec -T $s nslookup postgres 2>&1 | tail -2; done   # cannot resolve
 echo "== aggregator"; docker compose exec -T aggregator nslookup postgres 2>&1 | tail -2                           # resolves
 echo "client-api has no store route: $(code -H "Authorization: Bearer $FIELD_AT" $API/hazards)"                    # 200 via Aggregator API
 ```
 ```powershell
-docker network ls -q -f name=_store | ForEach-Object { docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' $_ }    # aggregator + postgres ONLY
+$storeNetwork = (docker inspect -f '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}' (docker compose ps -q postgres) | Out-String).Trim()
+docker network inspect $storeNetwork -f '{{range .Containers}}{{.Name}} {{end}}'    # aggregator + postgres ONLY
 docker compose ps --format '{{.Service}}: {{.Ports}}' | Select-String postgres                                                    # no host port
 foreach ($s in 'client-api','auth-service','consumer-dashboard') { "== $s"; docker compose exec -T $s nslookup postgres 2>&1 | Select-Object -Last 2 }   # cannot resolve
 '== aggregator'; docker compose exec -T aggregator nslookup postgres 2>&1 | Select-Object -Last 2                                   # resolves
@@ -1190,8 +1295,9 @@ acceptance: its timings include Client API, authentication, Aggregator reads,
 PostgreSQL and response serialization.
 
 Use the current dataset, including 500+ entries when present. Before 6.1, record
-the total and per-kind counts from the authenticated `/hazards` responses, the
-response size, monitoring profile, and test time in `evidence/6.1.txt`. Record
+the total and per-kind dataset counts (`agg_all`/`Agg-All` traverses all pages),
+the bounded page size returned by the authenticated `/hazards` request, response
+bytes, monitoring profile and test time in `evidence/6.1.txt`. Record
 counts again before 6.2 because ingestion continues. Do not wipe or shrink the
 store between tests to obtain a passing latency. For this architecture both API
 paths read the Canonical Store; retain 6.0's measured live 3 s source delay as
@@ -1226,7 +1332,9 @@ Keep PVMBG's measured delay at 3 s and use the same growing dataset as 6.1.
 Run one mixed workload: 25 VUs repeatedly request SEISMIC and 25 VOLCANIC.
 There is no required escalation to 60 VUs or a second unfiltered `/hazards`
 run. The unfiltered route may be tested additionally when relevant; report its
-larger response payload separately.
+response size separately. The default page size is 100 (maximum 1000); k6
+deliberately requests one bounded page per iteration, rather than traversing the
+entire store. Report dataset size and returned page size separately.
 
 Start this in **Terminal B** just before k6 in Terminal A:
 
@@ -1458,12 +1566,12 @@ Restore PVMBG's original delay (and clear in-memory toggles):
 ```bash
 sed -i.bak -e "s/^PVMBG_MIN_DELAY_MS=.*/PVMBG_MIN_DELAY_MS=$ORIG_MIN/" -e "s/^PVMBG_MAX_DELAY_MS=.*/PVMBG_MAX_DELAY_MS=$ORIG_MAX/" pvmbg-mock/.env && rm -f pvmbg-mock/.env.bak
 docker compose up -d --force-recreate --no-deps pvmbg-mock
-docker compose --profile consumer-demo stop consumer-dashboard-demo
+docker compose --profile consumer-demo stop consumer-dashboard-demo dashboard-demo-db
 ```
 ```powershell
 (Get-Content pvmbg-mock/.env) -replace '^PVMBG_MIN_DELAY_MS=.*',"PVMBG_MIN_DELAY_MS=$OrigMin" -replace '^PVMBG_MAX_DELAY_MS=.*',"PVMBG_MAX_DELAY_MS=$OrigMax" | Set-Content pvmbg-mock/.env
 docker compose up -d --force-recreate --no-deps pvmbg-mock
-docker compose --profile consumer-demo stop consumer-dashboard-demo
+docker compose --profile consumer-demo stop consumer-dashboard-demo dashboard-demo-db
 ```
 
 Stop the system (keeps data) or wipe everything:
@@ -1520,7 +1628,10 @@ docker compose --profile monitoring --profile consumer-demo down -v     # also d
 | k6 `min=-...ns` for `http_req_duration` | Docker VM clock drift (WSL2) | cosmetic; see 6.1 notes. `wsl --shutdown` + restart Docker, then rerun |
 | `controlled_rejections_429` missing from the k6 summary | old script version (counter only shown once incremented) | use the current `scripts/load-test.js`; it now declares a threshold so the line always prints |
 | 4.x output is full of `Γöé`, `ΓöÇ`, `Γò¡` (garbled box characters) | `nats consumer report` prints UTF-8 box-drawing characters; the Windows console decodes them with the OEM code page, and `Tee8`/`Step` then saves the already-garbled text | use `consreport` / `Consreport` (plain ASCII, built from `--json`); in PowerShell run the UTF-8 line from 0.3 (`[Console]::OutputEncoding = ...`) once per terminal |
-| 4.5 fails to become ready; `/ready` returns 503 although the container is alive | leftover `dashboard-demo-data` volume from an earlier run: the new durable replays stream sequence 1 with different bytes, the consumer halts (`consumer_incompatible`, `/ready` 503) and never becomes ready | `docker compose --profile consumer-demo rm -sf consumer-dashboard-demo`, `docker volume rm $(docker volume ls -q -f name=dashboard-demo-data)`, then `up -d --force-recreate`. The 4.5 pre-flight does this and its wait is now bounded (60 s) and prints the logs. Tear down with `--profile consumer-demo down -v --remove-orphans`. |
+| 4.5 fails readiness or the addition assertion | Missing demo database, a previously added durable, or retained projection inconsistent with replaced broker history | Start both demo services. Use a fresh project for the addition test; include `consumer-demo` on an intentional full teardown. Never delete volumes using a cross-project name filter. |
+| PostgreSQL login fails after changing env | Existing database users/passwords differ from newly generated credentials | Restore matching credentials or deliberately reset that project's data. Recreating the database container does not rerun bootstrap scripts on a populated volume. |
+| `/hazards` count stops at 100 | `count` measures one page | Follow `next_cursor` with identical filters, use `agg_all`/`Agg-All`, or use evidence probes for complete snapshots. |
+| k6 reports summary JSON permission denied | k6 container user cannot write the host evidence mount | Preserve the text output and thresholds; fix mount ownership/user for the host and rerun to obtain the JSON artifact. Exit code 0 alone does not prove the file was written. |
 
 ## Appendix C: evidence checklist (a complete run produces all of these)
 
@@ -1540,16 +1651,17 @@ their final results and measured values; JSON supplies the detailed proof.
 
 Invoke these as `node scripts/evidence-probes.mjs <command>`. Existing files
 marked missing below are a checklist from a prior run, not a claim about the
-results of the next run. The k6 wrappers save named JSON summaries; direct
-`docker run` variants below still print the same screenshot-ready summary,
-but use the wrappers if you also need the JSON file.
+results of the next run. The k6 wrappers request named JSON summaries. Check that each file exists and
+contains the current run; a non-writable evidence mount can prevent the summary
+write even when thresholds pass. Direct `docker run` variants still print the
+same screenshot-ready summary. Preserve text output in every case.
 
 Tick each file off before the demo. "Must show" is what a reviewer will look for. Rows marked
 **(missing on the first run)** are the gaps found when the first evidence set was reviewed.
 
 | Step | File(s) | Must show |
 | --- | --- | --- |
-| 1.1 | `1.1.txt` | 11 default-profile containers `healthy`; 16 with optional monitoring |
+| 1.1 | `1.1.txt` | 14 default-profile containers `healthy`; 20 with monitoring; 22 after adding the demo database/subscriber |
 | 1.3 | `1.3.txt`, `1.3-volcanic-before.json` | counts at least 20/20/40 and higher on the second reading 25 s later; no `confidence_level` before the toggle; **seismic sample row too** |
 | 1.4 | `1.4.txt` | one `correlation_id` in client-api, auth-service **and** aggregator, with `latency_ms` |
 | 2.x | `2.1-started-before.txt`, `2.3-new-report.json`, `2.4-started-after.txt`, `2.2.txt`, `2.3.txt`, `2.4.txt` | toggle returns `v2`; new row has the field in `attributes`; `NO RESTART`; 0 contract violations |
@@ -1565,7 +1677,7 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 | 4.5 | `4.5.txt`, `4.5-started-before.txt` **(per-consumer id comparison was missing)** | all three consumers print `has <hazard_id>` for the same new event; aggregator `StartedAt` unchanged |
 | 5.1 | `5.1.txt` | one image per component; only 18080/18081/18082 and host-only Grafana 13000 published; broker and Registry ports internal with the template settings |
 | 5.2 | `5.2.txt`, `5.2-started-before.txt`, `5.2-started-after.txt`, Terminal-A probe log (`5.2-probe.txt`) **(all missing)** | image ID of the notifier changes; only its `StartedAt` differs; probe prints `200 / 200` throughout. Capture Terminal A with `... \| tee evidence/5.2-probe.txt` / `\| Tee8 5.2-probe.txt`. |
-| 5.3 | `5.3.txt`, `5.3-side-by-side.txt` | `attributes` is `jsonb`; rows with and without `confidence_level`; no migration files |
+| 5.3 | `5.3.txt`, `5.3-side-by-side.txt` | `attributes` is `jsonb`; rows with and without `confidence_level`; no DDL or column change during the toggle |
 | 5.4 | `5.4.txt` **(missing)** | `store` network = postgres + aggregator only; others cannot resolve `postgres`; no host port |
 | 6.0 | `6.0.txt` **(missing)** | PVMBG about 3.0 s, BMKG 0.05 to 0.15 s |
 | 6.1 | `6.1.txt`, `6.1-k6-isolation.txt/json` | 2 VUs, successful seismic p95 < 300 ms, samples from both kinds, dataset counts/size, exit code 0 |
@@ -1601,3 +1713,88 @@ restart it within stream retention and verify higher revisions remain applied.
 Run the existing mixed k6 test with PVMBG delay fixed at 3 seconds and at least
 50 connections for 60 seconds. Keep verification credentials in gitignored env
 files; never save tokens in evidence logs.
+
+
+## Appendix D: preparation, concurrency and operational regression checks
+
+Run this after the numbered M1 scenarios, or on a separate disposable stack.
+It complements the manual acceptance evidence rather than replacing P1–P5.
+
+```bash
+node --test scripts/*.test.mjs
+python3 scripts/test-services.py
+python3 scripts/test-services.py --race
+python3 scripts/test-services.py --vet
+```
+
+The runner covers all ten independent Go modules. Set `TEST_POSTGRES_URL` to a
+dedicated PostgreSQL test server with CREATE SCHEMA permission for isolated Auth
+and consumer schemas. Set `TEST_DATABASE_URL` to a separate canonical test database
+initialized with `store/init.sql`; tests modify it. Optional `TEST_NATS_URL` and
+`TEST_SCHEMA_REGISTRY_URL` enable gated infrastructure tests. Do not use demo or
+production data. Missing variables produce explicit skips. Race detection needs
+a supported C compiler; avoid competing Docker image compilation during these
+timing-sensitive integration tests.
+
+| Check | Required assertion |
+| --- | --- |
+| Concurrent refresh with independent connection pools | Exactly one rotation succeeds; the old access/refresh pair is invalid |
+| Duplicate message delivery | One logical effect and one inbox identity |
+| Concurrent/out-of-order revisions | Highest revision persists; an older event cannot overwrite it |
+| Transaction failure | No effect/progress commits and no original-message ACK |
+| Stale operator resume versus a new identical halt | New halt is preserved; stale recovery cannot clear it |
+| Deterministic pagination | Unique descending `(occurred_at, hazard_id)` order across ties; invalid/filter-changed cursors rejected |
+| Invalid/oversized source input | Original bytes or explicitly truncated prefix retained with classification; progress does not advance |
+| Database roles | Runtime users lack DDL/role/database creation rights and cannot connect to maintenance databases |
+
+For a live stack with monitoring enabled, run from either shell:
+
+```text
+python3 scripts/verify-preparation.py --project <project>
+```
+
+This intentionally restarts Auth and both consumers, verifies existing sessions
+and consumer readiness, walks pagination, checks errors and database permissions,
+scrapes metrics, and queries stored HTTP/message traces in Tempo. Allow source
+ingestion and asynchronous export before running it. The `--read-only` option
+skips restarts; requests and login still occur. It does not erase volumes.
+
+Additional asserted M1 commands (use the same project name):
+
+```text
+node scripts/m1-demo.mjs preflight --project <project>
+node scripts/m1-demo.mjs ownership --project <project>
+node scripts/m1-demo.mjs fanout --project <project>
+node scripts/m1-demo.mjs fanout --rebuild --project <project>
+```
+
+Auth uses `auth-db`, Dashboard uses `dashboard-db`, and Notifier uses `notifier-db`.
+Their separate databases retain session/projection/inbox/schema/retry/control
+state; only source-owned archives remain SQLite. Consumer recovery uses the
+private `CONSUMER_ADMIN_SOCKET`, not a database file path. See
+[consumer recovery](consumer-recovery.md) for the local operator procedure.
+
+Observe **AAT Application Performance** for request counts, error rates, latency
+histograms, pool use/waits, outbox depth and known replay offset gaps. Offset
+gaps are not exact event counts. In Grafana Explore → Tempo, HTTP spans connect
+Client API/Auth/Aggregator/database calls, and ingestion spans continue through
+persisted outbox trace context and both NATS consumers. HTTP `X-Trace-ID` is a
+trace identifier; `X-Correlation-ID` remains the log correlation identifier.
+Metrics/traces omit credentials and SQL parameters.
+
+Worker flags permit additional Aggregator HTTP processes with polling, replay
+and publication disabled. They do not supply distributed ownership/fencing.
+`CONSUMER_WORKERS`, pool/transport budgets and broker pending-ACK limits control
+per-process resource consumption. Graceful shutdown stops admission, cancels
+work, drains HTTP and joins workers before closing storage/connections.
+
+The canonical store, supporting databases and R1 broker are unreplicated.
+Single-store failure yields 503 rather than a successful partial read. Failed
+ingestion byte capture is preparation for later inspection/ordered replay, not
+the full M2 workflow. A halt that cannot be persisted during storage failure
+remains sticky in memory, but cannot be guaranteed across process loss until
+persistence succeeds; the original unacknowledged message remains redeliverable.
+
+See [Preparation Verification](Preparation%20Verification.md) for the completed
+local checks. Its ten-second outage regression and 50-VU workload are not a
+claim of the full M1 prolonged outage or M2 scaling/node-loss compliance.

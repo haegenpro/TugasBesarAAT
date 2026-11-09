@@ -8,9 +8,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"strconv"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"authservice/internal/platform"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 var errInvalidToken = errors.New("invalid token")
@@ -39,30 +42,15 @@ type sessionStore struct {
 }
 
 func openStore(path string, accessTTL, refreshTTL time.Duration) (*sessionStore, error) {
-	db, err := sql.Open("sqlite", path)
+	cfg, err := pgx.ParseConfig(path)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("invalid PostgreSQL configuration")
 	}
-	db.SetMaxOpenConns(1)
-	for _, statement := range []string{
-		`PRAGMA journal_mode=WAL`,
-		`PRAGMA busy_timeout=5000`,
-		`CREATE TABLE IF NOT EXISTS sessions (
-			session_id TEXT PRIMARY KEY,
-			client_id TEXT NOT NULL,
-			role TEXT NOT NULL,
-			access_hash TEXT NOT NULL UNIQUE,
-			access_expires_at INTEGER NOT NULL,
-			refresh_hash TEXT NOT NULL UNIQUE,
-			refresh_expires_at INTEGER NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS sessions_refresh_expiry ON sessions(refresh_expires_at)`,
-	} {
-		if _, err := db.Exec(statement); err != nil {
-			db.Close()
-			return nil, err
-		}
-	}
+	cfg.Tracer = platform.SQLTracer{}
+	cfg.RuntimeParams["statement_timeout"] = strconv.FormatInt(platform.Duration("DB_STATEMENT_TIMEOUT", 5*time.Second).Milliseconds(), 10)
+	cfg.RuntimeParams["lock_timeout"] = strconv.FormatInt(platform.Duration("DB_LOCK_TIMEOUT", 2*time.Second).Milliseconds(), 10)
+	db := stdlib.OpenDB(*cfg)
+	configurePool(db)
 	return &sessionStore{db: db, accessTTL: accessTTL, refreshTTL: refreshTTL}, nil
 }
 
@@ -95,7 +83,7 @@ func (s *sessionStore) issue(ctx context.Context, identity identity) (tokenPair,
 	now := time.Now().UTC()
 	_, err = s.db.ExecContext(ctx, `INSERT INTO sessions
 		(session_id, client_id, role, access_hash, access_expires_at, refresh_hash, refresh_expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, sessionID, identity.ID, identity.Role,
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`, sessionID, identity.ID, identity.Role,
 		tokenHash(access), now.Add(s.accessTTL).Unix(), tokenHash(refresh), now.Add(s.refreshTTL).Unix())
 	if err != nil {
 		return tokenPair{}, err
@@ -119,7 +107,7 @@ func (s *sessionStore) verify(ctx context.Context, access string) (principal, er
 		return principal{}, errInvalidToken
 	}
 	var p principal
-	err := s.db.QueryRowContext(ctx, `SELECT client_id, role FROM sessions WHERE access_hash = ? AND access_expires_at > ?`, tokenHash(access), time.Now().Unix()).Scan(&p.ClientID, &p.Role)
+	err := s.db.QueryRowContext(ctx, `SELECT client_id, role FROM sessions WHERE access_hash = $1 AND access_expires_at > $2`, tokenHash(access), time.Now().Unix()).Scan(&p.ClientID, &p.Role)
 	if errors.Is(err, sql.ErrNoRows) {
 		return principal{}, errInvalidToken
 	}
@@ -134,7 +122,7 @@ func (s *sessionStore) rotate(ctx context.Context, oldRefresh string) (tokenPair
 	var p principal
 	oldHash := tokenHash(oldRefresh)
 	now := time.Now().UTC()
-	err := s.db.QueryRowContext(ctx, `SELECT client_id, role FROM sessions WHERE refresh_hash = ? AND refresh_expires_at > ?`, oldHash, now.Unix()).Scan(&p.ClientID, &p.Role)
+	err := s.db.QueryRowContext(ctx, `SELECT client_id, role FROM sessions WHERE refresh_hash = $1 AND refresh_expires_at > $2`, oldHash, now.Unix()).Scan(&p.ClientID, &p.Role)
 	if errors.Is(err, sql.ErrNoRows) {
 		return tokenPair{}, errInvalidToken
 	}
@@ -149,7 +137,7 @@ func (s *sessionStore) rotate(ctx context.Context, oldRefresh string) (tokenPair
 	if err != nil {
 		return tokenPair{}, err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET access_hash = ?, access_expires_at = ?, refresh_hash = ?, refresh_expires_at = ? WHERE refresh_hash = ? AND refresh_expires_at > ?`,
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET access_hash = $1, access_expires_at = $2, refresh_hash = $3, refresh_expires_at = $4 WHERE refresh_hash = $5 AND refresh_expires_at > $6`,
 		tokenHash(access), now.Add(s.accessTTL).Unix(), tokenHash(refresh), now.Add(s.refreshTTL).Unix(), oldHash, now.Unix())
 	if err != nil {
 		return tokenPair{}, err
@@ -168,7 +156,7 @@ func (s *sessionStore) logout(ctx context.Context, refresh string) error {
 	if refresh == "" {
 		return errInvalidToken
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE refresh_hash = ?`, tokenHash(refresh))
+	result, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE refresh_hash = $1`, tokenHash(refresh))
 	if err != nil {
 		return err
 	}

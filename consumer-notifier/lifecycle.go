@@ -1,6 +1,7 @@
 package main
 
 import (
+	"consumernotifier/internal/platform"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"github.com/nats-io/nats.go/jetstream"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -71,19 +73,13 @@ func decodeLifecycle(outer map[string]any, cid string) (envelope, error) {
 		if h.HazardID == "" || h.SourceRefID == "" || h.Attributes == nil || h.AreaName == "" || h.OccurredAt == "" || h.IngestedAt == "" || e.HazardRevision < 1 {
 			return envelope{}, fmt.Errorf("%w: incomplete hazard snapshot", errCorruptPayload)
 		}
-		switch h.Source {
-		case "BMKG", "PVMBG":
-		default:
+		if !validSource(h.Source) {
 			return envelope{}, fmt.Errorf("%w: hazard source", errCorruptPayload)
 		}
-		switch h.HazardType {
-		case "SEISMIC", "VOLCANIC":
-		default:
+		if !validHazardType(h.HazardType) {
 			return envelope{}, fmt.Errorf("%w: hazard type", errCorruptPayload)
 		}
-		switch h.Severity {
-		case "NORMAL", "WASPADA", "SIAGA", "AWAS":
-		default:
+		if !validSeverity(h.Severity) {
 			return envelope{}, fmt.Errorf("%w: hazard severity", errCorruptPayload)
 		}
 	}
@@ -92,26 +88,39 @@ func decodeLifecycle(outer map[string]any, cid string) (envelope, error) {
 }
 func currentVersion(ctx context.Context, tx *sql.Tx, id string) (int64, error) {
 	var v int64
-	err := tx.QueryRowContext(ctx, `SELECT revision FROM record_versions WHERE record_id=?`, id).Scan(&v)
+	err := tx.QueryRowContext(ctx, `SELECT revision FROM record_versions WHERE record_id=$1`, id).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
 	return v, err
 }
 func setVersion(ctx context.Context, tx *sql.Tx, id string, v int64) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO record_versions(record_id,revision) VALUES(?,?) ON CONFLICT(record_id) DO UPDATE SET revision=excluded.revision`, id, v)
+	_, err := tx.ExecContext(ctx, `INSERT INTO record_versions(record_id,revision) VALUES($1,$2) ON CONFLICT(record_id) DO UPDATE SET revision=excluded.revision`, id, v)
 	return err
 }
-func (a *app) saveLifecycle(ctx context.Context, meta *jetstream.MsgMetadata, raw []byte, e lifecycleEvent) error {
+func (a *projectionStore) saveLifecycle(ctx context.Context, meta *jetstream.MsgMetadata, raw []byte, e lifecycleEvent) error {
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	keys := []string{"message:" + meta.Stream + ":" + strconv.FormatUint(meta.Sequence.Stream, 10), "event:" + e.EventID}
+	if e.Hazard != nil {
+		keys = append(keys, "hazard:"+e.Hazard.HazardID)
+	}
+	if e.Notice != nil {
+		keys = append(keys, "notice:"+e.Notice.NoticeID)
+	}
+	if e.Status != nil {
+		keys = append(keys, "source:"+e.RecordID)
+	}
+	if err = lockApplication(ctx, tx, keys...); err != nil {
+		return err
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	// Detect sequence reuse even across duplicate event IDs.
 	var old string
-	err = tx.QueryRowContext(ctx, `SELECT digest FROM processed_messages WHERE stream=? AND sequence=?`, meta.Stream, meta.Sequence.Stream).Scan(&old)
+	err = tx.QueryRowContext(ctx, `SELECT digest FROM processed_messages WHERE stream=$1 AND sequence=$2`, meta.Stream, meta.Sequence.Stream).Scan(&old)
 	if err == nil {
 		if old != messageDigest(raw) {
 			return fmt.Errorf("%w: reused lifecycle sequence", errConsumerIncompatible)
@@ -121,7 +130,7 @@ func (a *app) saveLifecycle(ctx context.Context, meta *jetstream.MsgMetadata, ra
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO processed_messages(stream,sequence,digest,processed_at) VALUES(?,?,?,?)`, meta.Stream, meta.Sequence.Stream, messageDigest(raw), now); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO processed_messages(stream,sequence,digest,processed_at) VALUES($1,$2,$3,$4)`, meta.Stream, meta.Sequence.Stream, messageDigest(raw), now); err != nil {
 		return err
 	}
 	encoded := string(e.Raw)
@@ -129,7 +138,7 @@ func (a *app) saveLifecycle(ctx context.Context, meta *jetstream.MsgMetadata, ra
 		b, _ := json.Marshal(e)
 		encoded = string(b)
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO lifecycle_events(event_id,record_id,revision,payload,processed_at) VALUES(?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING`, e.EventID, e.RecordID, e.Revision, encoded, now)
+	result, err := tx.ExecContext(ctx, `INSERT INTO lifecycle_events(event_id,record_id,revision,payload,processed_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(event_id) DO NOTHING`, e.EventID, e.RecordID, e.Revision, encoded, now)
 	if err != nil {
 		return err
 	}
@@ -139,7 +148,7 @@ func (a *app) saveLifecycle(ctx context.Context, meta *jetstream.MsgMetadata, ra
 	}
 	if count == 0 {
 		var previous string
-		if err = tx.QueryRowContext(ctx, `SELECT payload FROM lifecycle_events WHERE event_id=?`, e.EventID).Scan(&previous); err != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT payload FROM lifecycle_events WHERE event_id=$1`, e.EventID).Scan(&previous); err != nil {
 			return err
 		}
 		if previous != encoded {
@@ -156,7 +165,7 @@ func (a *app) saveLifecycle(ctx context.Context, meta *jetstream.MsgMetadata, ra
 		}
 		if e.HazardRevision > v {
 			var output any = e.Hazard
-			if a.cfg.Role == "notifier" {
+			if a.role == "notifier" {
 				h := e.Hazard
 				output = map[string]any{"hazard_id": h.HazardID, "source": h.Source, "severity": h.Severity, "area_name": h.AreaName, "occurred_at": h.OccurredAt}
 			}
@@ -164,7 +173,7 @@ func (a *app) saveLifecycle(ctx context.Context, meta *jetstream.MsgMetadata, ra
 			if err != nil {
 				return err
 			}
-			if _, err = tx.ExecContext(ctx, `INSERT INTO records(hazard_id,payload,correlation_id,processed_at) VALUES(?,?,?,?) ON CONFLICT(hazard_id) DO UPDATE SET payload=excluded.payload,correlation_id=excluded.correlation_id,processed_at=excluded.processed_at`, e.Hazard.HazardID, string(b), e.CorrelationID, now); err != nil {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO records(hazard_id,payload,correlation_id,processed_at) VALUES($1,$2,$3,$4) ON CONFLICT(hazard_id) DO UPDATE SET payload=excluded.payload,correlation_id=excluded.correlation_id,processed_at=excluded.processed_at`, e.Hazard.HazardID, string(b), e.CorrelationID, now); err != nil {
 				return err
 			}
 			if err = setVersion(ctx, tx, key, e.HazardRevision); err != nil {
@@ -189,7 +198,7 @@ func (a *app) saveLifecycle(ctx context.Context, meta *jetstream.MsgMetadata, ra
 			if len(snapshot.Notice) == 0 {
 				snapshot.Notice, _ = json.Marshal(e.Notice)
 			}
-			if _, err = tx.ExecContext(ctx, `INSERT INTO notice_records(notice_id,revision,payload,processed_at) VALUES(?,?,?,?) ON CONFLICT(notice_id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload,processed_at=excluded.processed_at`, e.Notice.NoticeID, e.Revision, string(snapshot.Notice), now); err != nil {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO notice_records(notice_id,revision,payload,processed_at) VALUES($1,$2,$3,$4) ON CONFLICT(notice_id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload,processed_at=excluded.processed_at`, e.Notice.NoticeID, e.Revision, string(snapshot.Notice), now); err != nil {
 				return err
 			}
 			if err = setVersion(ctx, tx, key, e.Revision); err != nil {
@@ -206,7 +215,7 @@ func (a *app) saveLifecycle(ctx context.Context, meta *jetstream.MsgMetadata, ra
 		}
 		if e.Revision > v {
 			b, _ := json.Marshal(e.Status)
-			if _, err = tx.ExecContext(ctx, `INSERT INTO source_status_records(endpoint,revision,payload) VALUES(?,?,?) ON CONFLICT(endpoint) DO UPDATE SET revision=excluded.revision,payload=excluded.payload`, e.RecordID, e.Revision, string(b)); err != nil {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO source_status_records(endpoint,revision,payload) VALUES($1,$2,$3) ON CONFLICT(endpoint) DO UPDATE SET revision=excluded.revision,payload=excluded.payload`, e.RecordID, e.Revision, string(b)); err != nil {
 				return err
 			}
 			if err = setVersion(ctx, tx, key, e.Revision); err != nil {
@@ -214,43 +223,21 @@ func (a *app) saveLifecycle(ctx context.Context, meta *jetstream.MsgMetadata, ra
 			}
 		}
 	}
-	if material && a.cfg.Role == "notifier" {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO notifications(event_id,kind,payload,processed_at) VALUES(?,?,?,?) ON CONFLICT(event_id) DO NOTHING`, e.EventID, e.EventType, encoded, now); err != nil {
+	if material && a.role == "notifier" {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO notifications(event_id,kind,payload,processed_at) VALUES($1,$2,$3,$4) ON CONFLICT(event_id) DO NOTHING`, e.EventID, e.EventType, encoded, now); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 func (a *app) lifecycleRecords(w http.ResponseWriter, r *http.Request, view string) {
-	query := ""
-	switch view {
-	case "notices":
-		query = `SELECT notice_id,payload,processed_at FROM notice_records ORDER BY processed_at DESC LIMIT 100`
-	case "history":
-		query = `SELECT event_id,payload,processed_at FROM lifecycle_events ORDER BY processed_at DESC LIMIT 100`
-	case "notifications":
-		query = `SELECT event_id,payload,processed_at FROM notifications ORDER BY processed_at DESC LIMIT 100`
-	default:
-		http.Error(w, "invalid view", 400)
+	items, err := a.repository().readRecords(r.Context(), view)
+	if errors.Is(err, errInvalidView) {
+		platform.WriteError(w, 400, "invalid view")
 		return
 	}
-	rows, err := a.db.QueryContext(r.Context(), query)
 	if err != nil {
-		http.Error(w, "store unavailable", 503)
-		return
-	}
-	defer rows.Close()
-	items := []map[string]any{}
-	for rows.Next() {
-		var id, payload, at string
-		if err = rows.Scan(&id, &payload, &at); err != nil {
-			http.Error(w, "store unavailable", 503)
-			return
-		}
-		items = append(items, map[string]any{"id": id, "payload": json.RawMessage(payload), "processed_at": at})
-	}
-	if rows.Err() != nil {
-		http.Error(w, "store unavailable", 503)
+		platform.WriteError(w, 503, "store unavailable")
 		return
 	}
 	writeJSON(w, map[string]any{"data": items, "count": len(items)})

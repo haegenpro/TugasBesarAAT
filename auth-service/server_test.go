@@ -7,13 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestLoginUsesDistinctServerSideIdentities(t *testing.T) {
-	store, err := openStore(filepath.Join(t.TempDir(), "auth.db"), time.Minute, time.Hour)
+	store, err := openStore(testDSN(t), time.Minute, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

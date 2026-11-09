@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bmkg-mock/internal/platform"
 	"context"
 	"net/http"
 	"os"
@@ -18,6 +19,13 @@ import (
 )
 
 func main() {
+	flushTelemetry := platform.Init("bmkg-mock")
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = flushTelemetry(c)
+	}()
+
 	logger := middleware.NewLogger()
 	cfg, err := config.Load()
 	if err != nil {
@@ -43,11 +51,17 @@ func main() {
 
 	genCtx, stopGenerator := context.WithCancel(context.Background())
 	defer stopGenerator()
-	go h.RunGenerator(genCtx, time.Duration(cfg.EventIntervalMs)*time.Millisecond, logger)
+	generatorDone := make(chan struct{})
+	go func() {
+		defer close(generatorDone)
+		h.RunGenerator(genCtx, time.Duration(cfg.EventIntervalMs)*time.Millisecond, logger)
+	}()
+	defer func() { stopGenerator(); <-generatorDone }()
 
 	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: router,
+		Addr:              ":" + cfg.Port,
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: time.Minute,
+		Handler: platform.Handler("bmkg-mock", router),
 	}
 
 	go func() {
@@ -62,7 +76,7 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), platform.Duration("SHUTDOWN_TIMEOUT", 30*time.Second))
 	defer cancel()
 	logger.Info("shutting down bmkg-mock", "service", "bmkg-mock")
 	if err := srv.Shutdown(ctx); err != nil {

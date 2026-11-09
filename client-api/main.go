@@ -1,9 +1,13 @@
 package main
 
 import (
+	"clientapi/internal/platform"
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -41,26 +45,34 @@ func loadConfig() (config, error) {
 }
 
 func main() {
+	flushTelemetry := platform.Init("client-api")
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = flushTelemetry(c)
+	}()
+
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Error("invalid configuration", "service", "client-api", "error", err)
 		os.Exit(1)
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConnsPerHost = 64 // default of 2 forces connection churn to Auth/Aggregator under load
-	a := &api{cfg: cfg, log: log, client: &http.Client{Timeout: 5 * time.Second, Transport: transport}}
+
+	a := &api{cfg: cfg, log: log, client: platform.Client(5 * time.Second)}
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           a.router(),
+		Handler:           platform.Handler("client-api", a.router()),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second, // above the 5s upstream timeout (two sequential upstream calls)
 		IdleTimeout:       60 * time.Second,
 	}
 	log.Info("client API listening", "service", "client-api", "port", cfg.Port)
-	if err := server.ListenAndServe(); err != nil {
-		log.Error("client API stopped", "service", "client-api", "error", err)
-		os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := platform.Serve(ctx, server); err != nil {
+		log.Error("http server failed", "error", err)
 	}
+
 }

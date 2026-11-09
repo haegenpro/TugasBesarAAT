@@ -41,11 +41,14 @@ type sourceStatusWire struct {
 }
 
 type aggregatorListWire struct {
-	Data         []hazardWire                `json:"data,case:strict"`
-	Count        *int                        `json:"count,case:strict"`
-	AsOf         *string                     `json:"as_of,case:strict"`
-	SourceStatus map[string]sourceStatusWire `json:"source_status,case:strict"`
-	Metadata     map[string]recordMetadata   `json:"metadata,omitempty"`
+	NextCursor       *string                     `json:"next_cursor"`
+	Partial          bool                        `json:"partial"`
+	UnavailableUnits []string                    `json:"unavailable_units"`
+	Data             []hazardWire                `json:"data,case:strict"`
+	Count            *int                        `json:"count,case:strict"`
+	AsOf             *string                     `json:"as_of,case:strict"`
+	SourceStatus     map[string]sourceStatusWire `json:"source_status,case:strict"`
+	Metadata         map[string]recordMetadata   `json:"metadata,omitempty"`
 }
 
 type requiredField struct {
@@ -80,6 +83,9 @@ func (w hazardWire) validate() (hazard, error) {
 	if h.HazardID == "" || h.Source == "" || h.SourceRefID == "" || h.HazardType == "" || h.Severity == "" || h.OccurredAt == "" || h.IngestedAt == "" {
 		return hazard{}, fmt.Errorf("invalid aggregator hazard: required string is empty")
 	}
+	if !validSource(h.Source) || !validHazardType(h.HazardType) || !validSeverity(h.Severity) {
+		return hazard{}, fmt.Errorf("invalid aggregator hazard: unsupported source, type or severity")
+	}
 	return h, nil
 }
 
@@ -105,7 +111,7 @@ func (w aggregatorListWire) validate() (aggregatorList, error) {
 	if *w.AsOf == "" {
 		return aggregatorList{}, fmt.Errorf("invalid aggregator list: as_of is empty")
 	}
-	list := aggregatorList{Data: make([]hazard, len(w.Data)), Count: *w.Count, AsOf: *w.AsOf,
+	list := aggregatorList{NextCursor: w.NextCursor, Partial: w.Partial, UnavailableUnits: w.UnavailableUnits, Data: make([]hazard, len(w.Data)), Count: *w.Count, AsOf: *w.AsOf,
 		SourceStatus: make(map[string]sourceStatus, len(w.SourceStatus)), Metadata: w.Metadata}
 	for i, wire := range w.Data {
 		var err error

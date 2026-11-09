@@ -4,6 +4,7 @@ package auth
 
 import (
 	"net/http"
+	"pvmbg-mock/internal/platform"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -25,11 +26,11 @@ func RequireBearer(expected string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token, ok := bearerToken(c)
 		if !ok || token == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": platform.ProblemStatus(http.StatusUnauthorized, "missing bearer token")})
 			return
 		}
 		if token != expected {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "invalid credential"})
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": platform.ProblemStatus(http.StatusForbidden, "invalid credential")})
 			return
 		}
 		c.Next()

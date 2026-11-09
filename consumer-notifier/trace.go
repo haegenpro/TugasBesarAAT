@@ -1,6 +1,7 @@
 package main
 
 import (
+	"consumernotifier/internal/platform"
 	"context"
 	"log/slog"
 	"net/http"
@@ -27,6 +28,7 @@ func withServiceTrace(ctx context.Context, role string) context.Context {
 }
 
 func withMessageTrace(ctx context.Context, role string, msg jetstream.Msg, meta *jetstream.MsgMetadata) context.Context {
+	ctx = platform.Extract(ctx, http.Header(msg.Headers()))
 	return context.WithValue(ctx, traceKey{}, messageTrace{
 		Service: "consumer-" + role, CorrelationID: strings.TrimSpace(msg.Headers().Get(correlationHeader)),
 		Stream: meta.Stream, Sequence: meta.Sequence.Stream,
@@ -46,7 +48,7 @@ func correlationFromContext(ctx context.Context) string {
 
 func traceFields(ctx context.Context) []any {
 	trace, _ := ctx.Value(traceKey{}).(messageTrace)
-	fields := []any{}
+	fields := []any{"trace_id", platform.TraceID(ctx)}
 	if trace.Service != "" {
 		fields = append(fields, "service", trace.Service)
 	}

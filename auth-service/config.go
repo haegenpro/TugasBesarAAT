@@ -15,7 +15,7 @@ type identity struct {
 
 type config struct {
 	Port        string
-	DBPath      string
+	DatabaseURL string
 	InternalKey string
 	AccessTTL   time.Duration
 	RefreshTTL  time.Duration
@@ -23,7 +23,7 @@ type config struct {
 }
 
 func loadConfig() (config, error) {
-	v, err := requiredEnv("AUTH_PORT", "AUTH_DB_PATH", "AUTH_INTERNAL_KEY", "ACCESS_TOKEN_TTL_SEC", "REFRESH_TOKEN_TTL_SEC", "MEDIA_CLIENT_ID", "MEDIA_CLIENT_SECRET", "FIELD_CLIENT_ID", "FIELD_CLIENT_SECRET", "INTERNAL_CLIENT_ID", "INTERNAL_CLIENT_SECRET")
+	v, err := requiredEnv("AUTH_PORT", "DATABASE_URL", "AUTH_INTERNAL_KEY", "ACCESS_TOKEN_TTL_SEC", "REFRESH_TOKEN_TTL_SEC", "MEDIA_CLIENT_ID", "MEDIA_CLIENT_SECRET", "FIELD_CLIENT_ID", "FIELD_CLIENT_SECRET", "INTERNAL_CLIENT_ID", "INTERNAL_CLIENT_SECRET")
 	if err != nil {
 		return config{}, err
 	}
@@ -63,8 +63,11 @@ func loadConfig() (config, error) {
 		identities[id] = identity{ID: id, Secret: secret, Role: item.role}
 		secrets[secret] = true
 	}
-	port, path := v["AUTH_PORT"], v["AUTH_DB_PATH"]
-	return config{Port: port, DBPath: path, InternalKey: internalKey, AccessTTL: accessTTL, RefreshTTL: refreshTTL, Identities: identities}, nil
+	if err = envURL(v, "DATABASE_URL", "postgres", "postgresql"); err != nil {
+		return config{}, err
+	}
+	port, path := v["AUTH_PORT"], v["DATABASE_URL"]
+	return config{Port: port, DatabaseURL: path, InternalKey: internalKey, AccessTTL: accessTTL, RefreshTTL: refreshTTL, Identities: identities}, nil
 }
 
 func durationSeconds(values map[string]string, name string) (time.Duration, error) {

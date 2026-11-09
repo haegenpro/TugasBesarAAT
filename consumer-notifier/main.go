@@ -1,6 +1,7 @@
 package main
 
 import (
+	"consumernotifier/internal/platform"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,12 +30,12 @@ var errUnknownSchema = errors.New("schema ID not found")
 var errRegistryUnavailable = errors.New("schema registry unavailable")
 
 type config struct {
-	Role, Port, DBPath, NATSURL, Stream, Subject, Durable, RegistryURL, DLQStream, DLQSubject string
-	LifecycleStream, LifecycleSubject                                                         string
+	Role, Port, DatabaseURL, AdminSocket, NATSURL, Stream, Subject, Durable, RegistryURL, DLQStream, DLQSubject string
+	LifecycleStream, LifecycleSubject                                                                           string
 }
 
 func loadConfig() (config, error) {
-	values, err := requiredEnv("CONSUMER_ROLE", "CONSUMER_PORT", "CONSUMER_DB_PATH", "NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_DURABLE", "SCHEMA_REGISTRY_URL", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT", "NATS_LIFECYCLE_STREAM", "NATS_LIFECYCLE_SUBJECT")
+	values, err := requiredEnv("CONSUMER_ROLE", "CONSUMER_PORT", "DATABASE_URL", "CONSUMER_ADMIN_SOCKET", "NATS_URL", "NATS_STREAM", "NATS_SUBJECT", "NATS_DURABLE", "SCHEMA_REGISTRY_URL", "NATS_DLQ_STREAM", "NATS_DLQ_SUBJECT", "NATS_LIFECYCLE_STREAM", "NATS_LIFECYCLE_SUBJECT")
 	if err != nil {
 		return config{}, err
 	}
@@ -50,19 +52,25 @@ func loadConfig() (config, error) {
 		return config{}, errors.New("CONSUMER_ROLE must be dashboard or notifier")
 	}
 	lifecycleStream, lifecycleSubject := values["NATS_LIFECYCLE_STREAM"], values["NATS_LIFECYCLE_SUBJECT"]
-	return config{LifecycleStream: lifecycleStream, LifecycleSubject: lifecycleSubject, Role: values["CONSUMER_ROLE"], Port: values["CONSUMER_PORT"], DBPath: values["CONSUMER_DB_PATH"], NATSURL: values["NATS_URL"], Stream: values["NATS_STREAM"], Subject: values["NATS_SUBJECT"], Durable: values["NATS_DURABLE"], RegistryURL: strings.TrimRight(values["SCHEMA_REGISTRY_URL"], "/"), DLQStream: values["NATS_DLQ_STREAM"], DLQSubject: values["NATS_DLQ_SUBJECT"]}, nil
+	if err = envURL(values, "DATABASE_URL", "postgres", "postgresql"); err != nil {
+		return config{}, err
+	}
+	if !filepath.IsAbs(values["CONSUMER_ADMIN_SOCKET"]) {
+		return config{}, fmt.Errorf("CONSUMER_ADMIN_SOCKET must be absolute")
+	}
+	return config{LifecycleStream: lifecycleStream, LifecycleSubject: lifecycleSubject, Role: values["CONSUMER_ROLE"], Port: values["CONSUMER_PORT"], DatabaseURL: values["DATABASE_URL"], AdminSocket: values["CONSUMER_ADMIN_SOCKET"], NATSURL: values["NATS_URL"], Stream: values["NATS_STREAM"], Subject: values["NATS_SUBJECT"], Durable: values["NATS_DURABLE"], RegistryURL: strings.TrimRight(values["SCHEMA_REGISTRY_URL"], "/"), DLQStream: values["NATS_DLQ_STREAM"], DLQSubject: values["NATS_DLQ_SUBJECT"]}, nil
 }
 
 type schemaClient struct {
 	base   string
-	db     *sql.DB
+	cache  SchemaCache
 	http   *http.Client
 	mu     sync.RWMutex
 	codecs map[int]*goavro.Codec
 }
 
 func newSchemaClient(base string, db *sql.DB) *schemaClient {
-	return &schemaClient{base: base, db: db, http: &http.Client{Timeout: 2 * time.Second}, codecs: map[int]*goavro.Codec{}}
+	return &schemaClient{base: base, cache: postgresSchemaCache{db}, http: platform.Client(2 * time.Second), codecs: map[int]*goavro.Codec{}}
 }
 
 func (s *schemaClient) codec(ctx context.Context, id int) (*goavro.Codec, error) {
@@ -72,8 +80,7 @@ func (s *schemaClient) codec(ctx context.Context, id int) (*goavro.Codec, error)
 	if cached != nil {
 		return cached, nil
 	}
-	var schema string
-	err := s.db.QueryRowContext(ctx, `SELECT schema FROM schema_cache WHERE registry=? AND id=?`, s.base, id).Scan(&schema)
+	schema, err := s.cache.Get(ctx, s.base, id)
 	if err == nil {
 		codec, codecErr := goavro.NewCodec(schema)
 		if codecErr != nil {
@@ -122,13 +129,11 @@ func (s *schemaClient) codec(ctx context.Context, id int) (*goavro.Codec, error)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid registered schema %d: %v", errConsumerIncompatible, id, err)
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO schema_cache(registry,id,schema) VALUES (?,?,?) ON CONFLICT(registry,id) DO NOTHING`, s.base, id, result.Schema); err != nil {
-		return nil, fmt.Errorf("%w: persist schema %d: %w", errLocalStore, id, err)
+	stored, err := s.cache.Remember(ctx, s.base, id, result.Schema)
+	if err != nil {
+		return nil, fmt.Errorf("%w: persist schema: %w", errLocalStore, err)
 	}
-	var stored string
-	if err := s.db.QueryRowContext(ctx, `SELECT schema FROM schema_cache WHERE registry=? AND id=?`, s.base, id).Scan(&stored); err != nil {
-		return nil, fmt.Errorf("%w: verify schema %d: %w", errLocalStore, id, err)
-	}
+
 	if stored != result.Schema {
 		return nil, fmt.Errorf("%w: schema ID %d changed in registry %s", errConsumerIncompatible, id, s.base)
 	}
@@ -234,12 +239,17 @@ func (s *schemaClient) decode(ctx context.Context, data []byte) (envelope, error
 	}
 	var hazard hazardEvent
 	if err := json.Unmarshal(encoded, &hazard); err != nil {
+		if !validSource(hazard.Source) || !validHazardType(hazard.HazardType) || !validSeverity(hazard.Severity) {
+			return envelope{}, fmt.Errorf("%w: unsupported hazard enumeration", errCorruptPayload)
+		}
 		return envelope{}, fmt.Errorf("%w: decode consumer model: %v", errConsumerIncompatible, err)
 	}
 	return envelope{CorrelationID: cid, HazardID: idValue, Payload: hazard}, nil
 }
 
 type app struct {
+	control Controls
+	events  Events
 	*haltController
 	lifecycle  *app
 	cfg        config
@@ -364,9 +374,9 @@ func (a *app) handleStoreFailure(ctx context.Context, js jetstream.JetStream, ms
 		if state.Attempts < constraintLimit {
 			return a.delayedRetry(ctx, msg, retryDelay(state.Attempts, meta.Sequence.Stream), err)
 		}
-		return a.quarantineOrRetry(ctx, js, msg, meta, "sqlite_constraint", err)
+		return a.quarantineOrRetry(ctx, js, msg, meta, "postgres_constraint", err)
 	default:
-		a.haltFor(ctx, "sqlite_environmental_failure", meta, err)
+		a.haltFor(ctx, "postgres_environmental_failure", meta, err)
 		return false
 	}
 }
@@ -380,11 +390,14 @@ func (a *app) process(parent context.Context, js jetstream.JetStream, msg jetstr
 		return a.delayedRetry(ctx, msg, 5*time.Second, err)
 	}
 	ctx = withMessageTrace(ctx, a.cfg.Role, msg, meta)
+	ctx, span := platform.Start(ctx, "consume "+a.cfg.Subject)
+	defer span.End()
 	processed, err := a.alreadyProcessed(ctx, meta, msg.Data())
 	if err != nil {
 		return a.handleStoreFailure(ctx, js, msg, meta, err, false)
 	}
 	if processed {
+		platform.Add("processed_messages_total", 1)
 		return a.confirmedAck(ctx, msg, meta)
 	}
 	e, err := a.schemas.decode(ctx, msg.Data())
@@ -432,6 +445,7 @@ func (a *app) process(parent context.Context, js jetstream.JetStream, msg jetstr
 	if !a.confirmedAck(ctx, msg, meta) {
 		return false
 	}
+	platform.Add("processed_messages_total", 1)
 	logEvent(ctx, slog.LevelInfo, "event processed", "hazard_id", e.HazardID)
 	return true
 }
@@ -476,7 +490,7 @@ func (a *app) run(ctx context.Context) {
 		var consumer jetstream.Consumer
 		if err == nil {
 			started = time.Now()
-			consumer, err = stream.CreateOrUpdateConsumer(setupCtx, jetstream.ConsumerConfig{Durable: a.cfg.Durable, FilterSubject: a.cfg.Subject, DeliverPolicy: jetstream.DeliverAllPolicy, AckPolicy: jetstream.AckExplicitPolicy, AckWait: 60 * time.Second, MaxDeliver: -1, MaxAckPending: 64})
+			consumer, err = stream.CreateOrUpdateConsumer(setupCtx, jetstream.ConsumerConfig{Durable: a.cfg.Durable, FilterSubject: a.cfg.Subject, DeliverPolicy: jetstream.DeliverAllPolicy, AckPolicy: jetstream.AckExplicitPolicy, AckWait: platform.Duration("NATS_ACK_WAIT", 60*time.Second), MaxDeliver: -1, MaxAckPending: platform.Int("NATS_MAX_ACK_PENDING", 64)})
 			logOutbound(ctx, "consumer_setup", "nats", 0, started, err)
 		}
 		cancel()
@@ -538,6 +552,7 @@ func sleep(ctx context.Context, d time.Duration) {
 
 func (a *app) router() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { platform.WriteError(w, 404, "not found") })
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"status": "ok", "service": "consumer-" + a.cfg.Role})
 	})
@@ -564,39 +579,19 @@ func (a *app) router() http.Handler {
 			a.lifecycleRecords(w, r, view)
 			return
 		}
-		rows, err := a.db.QueryContext(r.Context(), `SELECT hazard_id,payload,correlation_id,processed_at FROM records ORDER BY processed_at DESC LIMIT 100`)
+		items, err := a.repository().readRecords(r.Context(), "")
 		if err != nil {
-			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+			platform.WriteError(w, 503, "store unavailable")
 			return
 		}
-		defer rows.Close()
-		items := []map[string]any{}
-		for rows.Next() {
-			var id, payload, cid, at string
-			if err := rows.Scan(&id, &payload, &cid, &at); err != nil {
-				http.Error(w, "store unavailable", http.StatusServiceUnavailable)
-				return
-			}
-			items = append(items, map[string]any{"hazard_id": id, "payload": json.RawMessage(payload), "correlation_id": cid, "processed_at": at})
-		}
-		if err := rows.Err(); err != nil {
-			http.Error(w, "store unavailable", http.StatusServiceUnavailable)
-			return
-		}
+
 		writeJSON(w, map[string]any{"data": items, "count": len(items)})
 	})
-	return a.httpRequestLog(mux)
+	return platform.Handler("consumer-"+a.cfg.Role, a.httpRequestLog(mux))
 }
 
 func (a *app) serve(ctx context.Context) error {
-	srv := &http.Server{Addr: ":" + a.cfg.Port, Handler: a.router()}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
-	return srv.ListenAndServe()
+	return platform.Serve(ctx, &http.Server{Addr: ":" + a.cfg.Port, Handler: a.router()})
 }
 
 func writeJSON(w http.ResponseWriter, body any) {
@@ -605,6 +600,13 @@ func writeJSON(w http.ResponseWriter, body any) {
 }
 
 func main() {
+	flushTelemetry := platform.Init("consumer-notifier")
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = flushTelemetry(c)
+	}()
+
 	if len(os.Args) > 1 {
 		if err := runAdminCommand(context.Background(), os.Args[1:], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -618,7 +620,7 @@ func main() {
 		slog.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
-	db, err := openDB(cfg.DBPath)
+	db, err := openDB(cfg.DatabaseURL)
 	if err != nil {
 		slog.Error("store unavailable", "error", err)
 		os.Exit(1)
@@ -639,10 +641,21 @@ func main() {
 		os.Exit(1)
 	}
 	defer closeAdmin()
-	go a.lifecycle.run(ctx)
-	go a.run(ctx)
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go func() { defer workers.Done(); a.collectMetrics(ctx) }()
+	count := platform.Int("CONSUMER_WORKERS", 1)
+	if count < 1 {
+		panic("CONSUMER_WORKERS must be positive")
+	}
+	for range count {
+		workers.Add(2)
+		go func() { defer workers.Done(); a.lifecycle.run(ctx) }()
+		go func() { defer workers.Done(); a.run(ctx) }()
+	}
+	defer func() { stop(); workers.Wait() }()
 	if err := a.serve(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("http server failed", "error", err)
-		os.Exit(1)
+		stop()
 	}
 }

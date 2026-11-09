@@ -3,10 +3,12 @@ package store
 import (
 	"aggregator/internal/domain"
 	"aggregator/internal/middleware"
+	"aggregator/internal/platform"
 	"context"
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5"
+	"net/http"
 	"time"
 )
 
@@ -234,9 +236,9 @@ func (s *Store) DeliverLifecycle(ctx context.Context, publish func(context.Conte
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	var id string
+	var id, traceparent, tracestate string
 	var b []byte
-	err = tx.QueryRow(ctx, `SELECT o.event_id::text,e.event_payload FROM report_lifecycle_outbox o JOIN report_lifecycle_events e USING(event_id) ORDER BY o.queued_at,o.event_id LIMIT 1 FOR UPDATE OF o SKIP LOCKED`).Scan(&id, &b)
+	err = tx.QueryRow(ctx, `SELECT o.event_id::text,e.event_payload,o.traceparent,o.tracestate FROM report_lifecycle_outbox o JOIN report_lifecycle_events e USING(event_id) ORDER BY o.queued_at,o.event_id LIMIT 1 FOR UPDATE OF o SKIP LOCKED`).Scan(&id, &b, &traceparent, &tracestate)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -247,7 +249,7 @@ func (s *Store) DeliverLifecycle(ctx context.Context, publish func(context.Conte
 	if err = json.Unmarshal(b, &e); err != nil {
 		return true, err
 	}
-	ctx = middleware.WithCorrelationID(ctx, e.CorrelationID)
+	ctx = middleware.WithCorrelationID(platform.Extract(ctx, http.Header{"Traceparent": []string{traceparent}, "Tracestate": []string{tracestate}}), e.CorrelationID)
 	if err = publish(ctx, e); err != nil {
 		return true, err
 	}

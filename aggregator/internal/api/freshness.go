@@ -2,6 +2,7 @@ package api
 
 import (
 	"aggregator/internal/domain"
+	"aggregator/internal/platform"
 	"aggregator/internal/store"
 	"aggregator/internal/timeutil"
 	"context"
@@ -57,50 +58,50 @@ func (a *API) recordMetadata(events []domain.HazardEvent, status map[string]sour
 }
 func (a *API) ListNotices(c *gin.Context) {
 	if !a.Deps.StoreReady() {
-		c.JSON(503, gin.H{"error": "store unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "store unavailable")})
 		return
 	}
 	state := c.Query("state")
 	switch state {
 	case "", "open", "all", "pending", "assessment_unavailable", "resolved":
 	default:
-		c.JSON(400, gin.H{"error": "invalid notice state"})
+		c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid notice state")})
 		return
 	}
 	notices, err := a.Store.Notices(c.Request.Context(), state)
 	if err != nil {
-		c.JSON(503, gin.H{"error": "store unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "store unavailable")})
 		return
 	}
 	status, err := a.statuses(c.Request.Context())
 	if err != nil {
-		c.JSON(503, gin.H{"error": "store unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "store unavailable")})
 		return
 	}
 	c.JSON(200, gin.H{"data": notices, "count": len(notices), "as_of": timeutil.New(domain.Now()), "source_status": status})
 }
 func (a *API) GetNotice(c *gin.Context) {
 	if !a.Deps.StoreReady() {
-		c.JSON(503, gin.H{"error": "store unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "store unavailable")})
 		return
 	}
 	id := c.Param("id")
 	if _, err := uuid.Parse(id); err != nil {
-		c.JSON(400, gin.H{"error": "invalid notice ID"})
+		c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid notice ID")})
 		return
 	}
 	notice, history, err := a.Store.Notice(c.Request.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
-		c.JSON(404, gin.H{"error": "notice not found"})
+		c.JSON(404, gin.H{"error": platform.ProblemStatus(404, "notice not found")})
 		return
 	}
 	if err != nil {
-		c.JSON(503, gin.H{"error": "store unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "store unavailable")})
 		return
 	}
 	status, err := a.statuses(c.Request.Context())
 	if err != nil {
-		c.JSON(503, gin.H{"error": "store unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "store unavailable")})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": notice, "history": history, "as_of": timeutil.New(domain.Now()), "source_status": status})

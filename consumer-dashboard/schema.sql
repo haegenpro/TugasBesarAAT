@@ -1,0 +1,15 @@
+CREATE TABLE IF NOT EXISTS records (hazard_id TEXT PRIMARY KEY, payload TEXT NOT NULL, correlation_id TEXT NOT NULL, processed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS processed_messages (stream TEXT NOT NULL, sequence BIGINT NOT NULL, digest TEXT NOT NULL, processed_at TEXT NOT NULL, PRIMARY KEY(stream, sequence));
+CREATE TABLE IF NOT EXISTS schema_cache (registry TEXT NOT NULL, id BIGINT NOT NULL, schema TEXT NOT NULL, PRIMARY KEY(registry, id));
+CREATE TABLE IF NOT EXISTS schema_retry (stream TEXT NOT NULL, sequence BIGINT NOT NULL, schema_id BIGINT NOT NULL, first_seen_ms BIGINT NOT NULL, last_seen_ms BIGINT NOT NULL, attempts BIGINT NOT NULL, PRIMARY KEY(stream, sequence));
+CREATE INDEX IF NOT EXISTS schema_retry_recent ON schema_retry(first_seen_ms);
+CREATE TABLE IF NOT EXISTS constraint_retry (stream TEXT NOT NULL, sequence BIGINT NOT NULL, first_seen_ms BIGINT NOT NULL, attempts BIGINT NOT NULL, PRIMARY KEY(stream, sequence));
+CREATE INDEX IF NOT EXISTS constraint_retry_recent ON constraint_retry(first_seen_ms);
+CREATE TABLE IF NOT EXISTS corrupt_messages (stream TEXT NOT NULL, sequence BIGINT NOT NULL, first_seen_ms BIGINT NOT NULL, PRIMARY KEY(stream, sequence));
+CREATE INDEX IF NOT EXISTS corrupt_messages_recent ON corrupt_messages(first_seen_ms);
+CREATE TABLE IF NOT EXISTS record_versions (record_id TEXT PRIMARY KEY, revision BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS lifecycle_events (event_id TEXT PRIMARY KEY, record_id TEXT NOT NULL, revision BIGINT NOT NULL, payload TEXT NOT NULL, processed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS notice_records (notice_id TEXT PRIMARY KEY, revision BIGINT NOT NULL, payload TEXT NOT NULL, processed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS source_status_records (endpoint TEXT PRIMARY KEY, revision BIGINT NOT NULL, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS notifications (event_id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, processed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS consumer_control (key TEXT PRIMARY KEY, value TEXT NOT NULL);

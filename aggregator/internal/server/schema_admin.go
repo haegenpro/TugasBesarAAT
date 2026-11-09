@@ -1,6 +1,7 @@
 package server
 
 import (
+	"aggregator/internal/platform"
 	"context"
 	"crypto/subtle"
 	"errors"
@@ -16,7 +17,7 @@ import (
 func RegisterSchemaAdmin(r *gin.Engine, readers *avrowire.ReaderSwitch, token string) {
 	r.POST("/admin/schema-version", func(c *gin.Context) {
 		if token == "" || subtle.ConstantTimeCompare([]byte(c.GetHeader("Authorization")), []byte("Bearer "+token)) != 1 {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid admin credentials"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": platform.ProblemStatus(http.StatusUnauthorized, "invalid admin credentials")})
 			return
 		}
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
@@ -27,7 +28,7 @@ func RegisterSchemaAdmin(r *gin.Engine, readers *avrowire.ReaderSwitch, token st
 			if errors.Is(err, avrowire.ErrReaderCandidateUnavailable) {
 				status = http.StatusConflict
 			}
-			c.JSON(status, gin.H{"error": err.Error()})
+			c.JSON(status, gin.H{"error": platform.ProblemStatus(status, err.Error())})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"reader_version": version})

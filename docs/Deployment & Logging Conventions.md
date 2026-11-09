@@ -14,16 +14,16 @@ The table shows template values; all internal ports remain configurable.
 | PVMBG mock | 8082 | Source SQLite archive; separately authenticated data/admin API published |
 | Aggregator | 8080 | Exclusive owner of canonical PostgreSQL; internal API |
 | Canonical PostgreSQL | 5432 | Storage network shared only with Aggregator; no host port |
-| Auth Service | 8083 | Session SQLite; internal token API |
+| Auth Service | 8083 | Session PostgreSQL; internal token API |
 | Client API | 8080 | Public downstream HTTP entry point; reads through Aggregator |
 | Broker | 4222 / 8222 | NATS JetStream file storage and monitoring API; internal |
-| Dashboard / Notifier | 8091 / 8092 | Independent SQLite projections; internal HTTP inspection |
+| Dashboard / Notifier | 8091 / 8092 | Independent PostgreSQL projections; internal HTTP inspection |
 | Schema Registry | 8080 / 9000 | Schema API and management readiness; internal |
 | Registry PostgreSQL | 5432 | Separate database and network owned by Registry |
 | Client TUI | none | Interactive client on the client network |
 | Monitoring | configurable | Alloy, NATS Exporter, Prometheus, Loki and Grafana; Grafana has an explicit host bind address |
 
-Each SQLite owner and storage server has its own volume. PostgreSQL and Registry
+Each source SQLite archive and PostgreSQL instance has its own volume. Consumer admin sockets are ephemeral and private. PostgreSQL and Registry
 PostgreSQL share neither volume nor network. The client network contains Client
 API and the TUI; application services use backend addresses. Broker and Registry
 trust membership of the backend network. Host/Docker administrators can access
@@ -123,3 +123,7 @@ and [Test Runbook](Test%20Runbook.md) for retention, permissions and evidence.
 
 The runbook covers independent restart, live schema evolution, authentication,
 redaction, outage recovery, sustained load and fan-out/backlog scenarios.
+
+## Current preparation deployment
+
+Auth, Dashboard and Notifier own separate PostgreSQL instances and isolated storage networks. Canonical, Auth and consumer runtime PostgreSQL roles lack schema/role/database creation privileges. Bootstrap credentials stay in database containers. No replication, leader election or sharding is enabled. Applications expose `/metrics`; HTTP responses carry `X-Trace-ID`. Outbox rows carry W3C trace context separately from business payloads. See the root README for configurable transport, pool, payload, worker and shutdown budgets.

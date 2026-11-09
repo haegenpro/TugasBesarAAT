@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"pvmbg-mock/internal/platform"
 	"slices"
 	"strconv"
 	"sync"
@@ -134,7 +135,7 @@ func (h *Handler) VolcanicReports(c *gin.Context) {
 	if h.Toggles.Outage() {
 		// Fail fast and deterministically instead of hanging or sleeping
 		// through the full random delay window.
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "pvmbg outage in progress"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "pvmbg outage in progress")})
 		return
 	}
 
@@ -142,7 +143,7 @@ func (h *Handler) VolcanicReports(c *gin.Context) {
 
 	// Re-check: outage may have been enabled while we were delaying.
 	if h.Toggles.Outage() {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "pvmbg outage in progress"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "pvmbg outage in progress")})
 		return
 	}
 
@@ -151,7 +152,7 @@ func (h *Handler) VolcanicReports(c *gin.Context) {
 	if h.Archive != nil {
 		head, err := h.Archive.Head()
 		if err != nil {
-			c.JSON(503, gin.H{"error": "archive unavailable"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive unavailable")})
 			return
 		}
 		c.Header("X-Source-Sequence", strconv.FormatInt(head, 10))
@@ -166,12 +167,12 @@ func (h *Handler) VolcanicReports(c *gin.Context) {
 	}
 	if c.GetHeader("Accept") == avrowire.MediaType {
 		if h.Registry == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registry unavailable")})
 			return
 		}
 		data, err := h.encodeVolcanic(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), out, showConfidence)
 		if err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registry unavailable")})
 			return
 		}
 		c.Data(http.StatusOK, avrowire.MediaType, data)
@@ -197,11 +198,11 @@ func (h *Handler) AdminSchemaVersion(c *gin.Context) {
 		// registration leaves the source's visible schema unchanged.
 		registryCtx := avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c))
 		if _, err := h.Registry.Register(registryCtx, volcanicSubject, volcanicV1); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registry unavailable")})
 			return
 		}
 		if _, err := h.Registry.Register(registryCtx, volcanicSubject, volcanicV2()); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registration failed"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registration failed")})
 			return
 		}
 		for _, visible := range []bool{false, true} {
@@ -210,7 +211,7 @@ func (h *Handler) AdminSchemaVersion(c *gin.Context) {
 				_, err = h.Registry.Register(registryCtx, volcanicHistorySubject, text)
 			}
 			if err != nil {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "history schema registration failed"})
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "history schema registration failed")})
 				return
 			}
 		}
@@ -233,7 +234,7 @@ func (h *Handler) AdminSchemaVersion(c *gin.Context) {
 	}
 	if added != nil && h.Archive != nil {
 		if err := h.Archive.AppendImmutable(history.Record{Entity: "volcanic-reports", ID: added.ReportID, Payload: *added}); err != nil {
-			c.JSON(503, gin.H{"error": "archive unavailable"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive unavailable")})
 			return
 		}
 	}

@@ -3,10 +3,13 @@
 package publisher
 
 import (
+	"aggregator/internal/platform"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -26,6 +29,7 @@ type Envelope struct {
 }
 
 type Publisher struct {
+	mu       sync.Mutex
 	nc       *nats.Conn
 	js       jetstream.JetStream
 	subject  string
@@ -91,6 +95,10 @@ func (p *Publisher) Connected() bool {
 // Publish sends the envelope and blocks until JetStream acknowledges the
 // durable write. The outbox retries when acknowledgement is missing.
 func (p *Publisher) Publish(ctx context.Context, event domain.HazardEvent, correlationID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ctx, span := platform.Start(ctx, "publish "+p.subject)
+	defer span.End()
 	if p.schema == nil {
 		schema, err := p.registry.Register(avrowire.WithCorrelationID(ctx, correlationID), p.subject+"-value", envelopeSchema)
 		if err != nil {
@@ -125,6 +133,7 @@ func (p *Publisher) Publish(ctx context.Context, event domain.HazardEvent, corre
 	start := time.Now()
 	msg := nats.NewMsg(p.subject)
 	msg.Header.Set("X-Correlation-ID", correlationID)
+	platform.Inject(ctx, http.Header(msg.Header))
 	msg.Data = data
 	_, err = p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(event.HazardID))
 	latency := time.Since(start).Milliseconds()

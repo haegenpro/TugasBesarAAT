@@ -15,7 +15,6 @@ import (
 	"aggregator/internal/clients"
 	"aggregator/internal/poller"
 	"aggregator/internal/store"
-	"aggregator/internal/volcano"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -91,7 +90,7 @@ func pollingFixture(t *testing.T) (*store.Store, *pollingSource, func() *poller.
 	t.Cleanup(server.Close)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	newPoller := func() *poller.Poller {
-		return &poller.Poller{Store: s, BMKG: clients.NewBMKGClient(server.URL, "key", logger), PVMBG: clients.NewPVMBGClient(server.URL, "token", logger), Lookup: volcano.NewLookup(s.Pool), Interval: time.Second, MaxBackoff: time.Minute, Logger: logger}
+		return &poller.Poller{Store: s, BMKG: clients.NewBMKGClient(server.URL, "key", logger), PVMBG: clients.NewPVMBGClient(server.URL, "token", logger), Lookup: s, Interval: time.Second, MaxBackoff: time.Minute, Logger: logger}
 	}
 	return s, up, newPoller, id
 }

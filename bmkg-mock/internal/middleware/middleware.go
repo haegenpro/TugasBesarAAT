@@ -4,6 +4,7 @@
 package middleware
 
 import (
+	"bmkg-mock/internal/platform"
 	"log/slog"
 	"os"
 	"strings"
@@ -53,6 +54,7 @@ func JSONLogger(logger *slog.Logger, service string) gin.HandlerFunc {
 		logger.LogAttrs(c.Request.Context(), level, "http request",
 			slog.String("service", service),
 			slog.String("correlation_id", GetCorrelationID(c)),
+			slog.String("trace_id", platform.TraceID(c.Request.Context())),
 			slog.String("method", c.Request.Method),
 			slog.String("path", c.Request.URL.Path),
 			slog.Int("status_code", c.Writer.Status()),

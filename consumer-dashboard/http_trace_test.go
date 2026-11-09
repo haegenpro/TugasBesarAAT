@@ -7,13 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestHTTPRequestLogsCorrelationStatusAndLatency(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

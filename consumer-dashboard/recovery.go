@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -46,19 +45,15 @@ type recoveryAudit struct {
 func (a *app) resume(ctx context.Context, operator, recoveryReason string, generation uint64) (bool, string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	tx, err := a.db.BeginTx(ctx, nil)
+	state, err := a.controls().State(ctx)
 	if err != nil {
 		return false, "", err
 	}
-	defer tx.Rollback()
-	var reason string
-	err = tx.QueryRowContext(ctx, `SELECT value FROM consumer_control WHERE key='halt_reason'`).Scan(&reason)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, "", err
-	}
-	if errors.Is(err, sql.ErrNoRows) && !a.halted.Load() && !a.haltSticky.Load() {
+	reason := state.Reason
+	if !state.Exists && !a.halted.Load() && !a.haltSticky.Load() {
 		return false, "", nil
 	}
+
 	if generation != a.generation {
 		return false, "", errHaltChanged
 	}
@@ -70,18 +65,11 @@ func (a *app) resume(ctx context.Context, operator, recoveryReason string, gener
 	if err != nil {
 		return false, "", err
 	}
-	// This write verifies persistence even for an in-memory halt whose original
-	// write failed and therefore has no halt_reason row to delete.
-	if _, err = tx.ExecContext(ctx, `INSERT INTO consumer_control(key,value) VALUES('last_resume',?)
-		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, string(audit)); err != nil {
+	// An intervening halt, even with the same reason, invalidates this resume.
+	if err = a.controls().Resume(ctx, state, audit); err != nil {
 		return false, "", err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM consumer_control WHERE key='halt_reason'`); err != nil {
-		return false, "", err
-	}
-	if err = tx.Commit(); err != nil {
-		return false, "", err
-	}
+
 	a.ready.Store(false)
 	if a.lifecycle != nil {
 		a.lifecycle.ready.Store(false)

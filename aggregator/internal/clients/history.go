@@ -3,6 +3,7 @@ package clients
 import (
 	"aggregator/internal/avrowire"
 	"aggregator/internal/middleware"
+	"aggregator/internal/platform"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,7 +27,7 @@ type HistoryPage struct {
 	HasMore    bool          `json:"has_more"`
 }
 
-func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, key, source, entity, cid string, after int64, logger *slog.Logger, registry *avrowire.Client, reader *avrowire.SourceReader) (HistoryPage, error) {
+func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, key, source, entity, cid string, after int64, logger *slog.Logger, registry *avrowire.Client, reader *avrowire.SourceReader, recorder FailureRecorder) (result HistoryPage, retErr error) {
 	p := HistoryPage{}
 	path := "/history?entity=" + url.QueryEscape(entity) + "&after=" + strconv.FormatInt(after, 10) + "&limit=100"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
@@ -44,6 +46,23 @@ func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, ke
 		return p, err
 	}
 	defer resp.Body.Close()
+	rawBody, truncated, readErr := platform.ReadPayload(resp.Body)
+	defer func() {
+		capture(ctx, recorder, Failure{Source: strings.ToUpper(source), Entity: "history:" + entity, Payload: rawBody, Truncated: truncated, CorrelationID: cid}, &retErr)
+	}()
+	if readErr != nil {
+		if truncated {
+			return p, fmt.Errorf("%w: %v", ErrContractViolation, readErr)
+		}
+		return p, readErr
+	}
+	if registry == nil && resp.StatusCode == 200 {
+		if e := platform.ValidateJSON(rawBody); e != nil {
+			return p, fmt.Errorf("%w: %v", ErrContractViolation, e)
+		}
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(rawBody))
+
 	middleware.LogOutbound(logger, "aggregator", cid, source, path, resp.StatusCode, resp.StatusCode == 200, time.Since(started).Milliseconds(), "")
 	if resp.StatusCode != 200 {
 		return p, fmt.Errorf("history returned status %d", resp.StatusCode)
@@ -92,7 +111,7 @@ func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, ke
 	return p, nil
 }
 func (c *BMKGClient) FetchHistory(ctx context.Context, cid, entity string, after int64) (HistoryPage, error) {
-	return fetchHistory(ctx, c.HTTP, c.BaseURL, "X-BMKG-Key", c.APIKey, "bmkg", entity, cid, after, c.Logger, c.Registry, c.Readers["/"+entity])
+	return fetchHistory(ctx, c.HTTP, c.BaseURL, "X-BMKG-Key", c.APIKey, "bmkg", entity, cid, after, c.Logger, c.Registry, c.Readers["/"+entity], c.CaptureFailure)
 }
 func (c *PVMBGClient) FetchHistory(ctx context.Context, cid, entity string, after int64) (HistoryPage, error) {
 	reader := c.Reader
@@ -105,7 +124,7 @@ func (c *PVMBGClient) FetchHistory(ctx context.Context, cid, entity string, afte
 		}
 		defer release()
 	}
-	return fetchHistory(ctx, c.HTTP, c.BaseURL, "Authorization", "Bearer "+c.Token, "pvmbg", entity, cid, after, c.Logger, c.Registry, reader)
+	return fetchHistory(ctx, c.HTTP, c.BaseURL, "Authorization", "Bearer "+c.Token, "pvmbg", entity, cid, after, c.Logger, c.Registry, reader, c.CaptureFailure)
 }
 func DecodeSeismic(raw json.RawMessage) (SeismicEvent, error) {
 	var e SeismicEvent

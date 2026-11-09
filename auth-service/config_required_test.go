@@ -8,7 +8,7 @@ import (
 func TestConfigurationRequiresExplicitValues(t *testing.T) {
 	values := map[string]string{
 		"AUTH_PORT":              "8083",
-		"AUTH_DB_PATH":           "/data/auth.db",
+		"DATABASE_URL":           "postgres://app:example@localhost/auth?sslmode=disable",
 		"AUTH_INTERNAL_KEY":      "replace-with-random-internal-key",
 		"ACCESS_TOKEN_TTL_SEC":   "60",
 		"REFRESH_TOKEN_TTL_SEC":  "86400",

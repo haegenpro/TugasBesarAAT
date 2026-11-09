@@ -6,11 +6,13 @@ import (
 	"aggregator/internal/domain"
 	"aggregator/internal/mapping"
 	"aggregator/internal/middleware"
+	"aggregator/internal/platform"
 	"aggregator/internal/volcano"
 	"context"
 	"errors"
 	"github.com/google/uuid"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -29,36 +31,50 @@ type RecoveryStore interface {
 type pollFunc func(context.Context, string, time.Time) error
 
 type Poller struct {
-	BMKG       *clients.BMKGClient
-	PVMBG      *clients.PVMBGClient
-	Store      HazardSaver
-	Lookup     volcano.Lookuper
-	Status     *PVMBGStatus
-	Ready      func() bool
-	Interval   time.Duration
-	MaxBackoff time.Duration
-	Logger     *slog.Logger
+	metricsMu     sync.Mutex
+	heads         map[string]int64
+	cursors       map[string]int64
+	DisablePoll   bool
+	DisableReplay bool
+	BMKG          *clients.BMKGClient
+	PVMBG         *clients.PVMBGClient
+	Store         HazardSaver
+	Lookup        volcano.Lookuper
+	Status        *PVMBGStatus
+	Ready         func() bool
+	Interval      time.Duration
+	MaxBackoff    time.Duration
+	Logger        *slog.Logger
 }
 
 func (p *Poller) Run(ctx context.Context) {
-	go p.loop(ctx, "BMKG", p.pollSeismic)
-	go p.loop(ctx, "BMKG_TSUNAMI", p.pollWarnings)
-	go p.loop(ctx, "PVMBG", p.pollVolcanic)
-	if _, ok := p.Store.(interface {
-		PendingVolcanic(context.Context) ([]clients.VolcanicReport, error)
-	}); ok {
-		go p.loop(ctx, "mapping:volcanic", func(ctx context.Context, cid string, _ time.Time) error {
-			return p.retryVolcanicMapping(ctx, cid)
-		})
+	var wg sync.WaitGroup
+	launch := func(endpoint string, fn pollFunc) {
+		wg.Add(1)
+		go func() { defer wg.Done(); p.loop(ctx, endpoint, fn) }()
 	}
-	if _, ok := p.Store.(RecoveryStore); ok {
-		for _, entity := range []string{"seismic-events", "tsunami-warnings", "volcanic-reports"} {
-			entity := entity
-			go p.loop(ctx, "history:"+entity, func(ctx context.Context, cid string, _ time.Time) error { return p.replay(ctx, cid, entity) })
+	if !p.DisablePoll {
+		launch("BMKG", p.pollSeismic)
+		launch("BMKG_TSUNAMI", p.pollWarnings)
+		launch("PVMBG", p.pollVolcanic)
+		if _, ok := p.Store.(interface {
+			PendingVolcanic(context.Context) ([]clients.VolcanicReport, error)
+		}); ok {
+			launch("mapping:volcanic", func(c context.Context, id string, _ time.Time) error { return p.retryVolcanicMapping(c, id) })
+		}
+	}
+	if !p.DisableReplay {
+		if _, ok := p.Store.(RecoveryStore); ok {
+			for _, entity := range []string{"seismic-events", "tsunami-warnings", "volcanic-reports"} {
+				entity := entity
+				launch("history:"+entity, func(c context.Context, id string, _ time.Time) error { return p.replay(c, id, entity) })
+			}
 		}
 	}
 	<-ctx.Done()
+	wg.Wait()
 }
+
 func (p *Poller) loop(ctx context.Context, endpoint string, fn pollFunc) {
 	interval := p.Interval
 	maxBackoff := p.MaxBackoff
@@ -121,6 +137,8 @@ func (p *Poller) since(endpoint string, lastSuccess *time.Time, started time.Tim
 }
 
 func (p *Poller) attempt(ctx context.Context, endpoint, cid string, status domain.EndpointStatus, fn pollFunc) error {
+	ctx, span := platform.Start(ctx, "ingest "+endpoint)
+	defer span.End()
 	started := domain.Now()
 	err := fn(ctx, cid, p.since(endpoint, status.LastSuccess, started))
 	if st, ok := p.Store.(RecoveryStore); ok {
@@ -155,6 +173,9 @@ func sleep(ctx context.Context, d time.Duration) bool {
 }
 func (p *Poller) pollSeismic(ctx context.Context, cid string, since time.Time) error {
 	events, err := p.BMKG.FetchSeismicEvents(ctx, cid, since)
+	for _, e := range events {
+		p.replayMetric("seismic-events", e.SourceSequence, 0)
+	}
 	if err != nil {
 		return err
 	}
@@ -174,6 +195,9 @@ func (p *Poller) pollSeismic(ctx context.Context, cid string, since time.Time) e
 func (p *Poller) pollWarnings(ctx context.Context, cid string, since time.Time) error {
 	started := domain.Now()
 	warnings, err := p.BMKG.FetchTsunamiWarnings(ctx, cid, since)
+	for _, e := range warnings {
+		p.replayMetric("tsunami-warnings", e.SourceSequence, 0)
+	}
 	if err != nil {
 		return err
 	}
@@ -203,6 +227,9 @@ func (p *Poller) pollVolcanic(ctx context.Context, cid string, since time.Time) 
 		ctx = leaseCtx
 	}
 	reports, err := p.PVMBG.FetchVolcanicReports(ctx, cid, since)
+	for _, e := range reports {
+		p.replayMetric("volcanic-reports", e.SourceSequence, 0)
+	}
 	if err != nil {
 		if p.Status != nil {
 			p.Status.MarkUnhealthy(domain.Now())
@@ -316,6 +343,7 @@ func (p *Poller) replay(ctx context.Context, cid, entity string) error {
 			return err
 		}
 	}
+	p.replayMetric(entity, page.NextCursor, page.NextCursor)
 	if entity == "tsunami-warnings" && !page.HasMore {
 		// Do not resolve observations received after this history request began.
 		return st.CommitWarnings(ctx, nil, cid, 0, started, true)
@@ -363,4 +391,26 @@ func (p *Poller) retryVolcanicMapping(ctx context.Context, cid string) error {
 		}
 	}
 	return nil
+}
+
+func (p *Poller) replayMetric(entity string, head, cursor int64) {
+	p.metricsMu.Lock()
+	defer p.metricsMu.Unlock()
+	if p.heads == nil {
+		p.heads = map[string]int64{}
+		p.cursors = map[string]int64{}
+	}
+	if head > p.heads[entity] {
+		p.heads[entity] = head
+	}
+	if cursor > p.cursors[entity] {
+		p.cursors[entity] = cursor
+	}
+	var total int64
+	for key, h := range p.heads {
+		if gap := h - p.cursors[key]; gap > 0 {
+			total += gap
+		}
+	}
+	platform.Gauge("replay_backlog", float64(total))
 }

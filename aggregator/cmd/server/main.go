@@ -1,11 +1,13 @@
 package main
 
 import (
+	"aggregator/internal/platform"
 	"context"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,10 +20,16 @@ import (
 	"aggregator/internal/publisher"
 	"aggregator/internal/server"
 	"aggregator/internal/store"
-	"aggregator/internal/volcano"
 )
 
 func main() {
+	flushTelemetry := platform.Init("aggregator")
+	defer func() {
+		c, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = flushTelemetry(c)
+	}()
+
 	logger := middleware.NewLogger()
 	cfg, err := config.Load()
 	if err != nil {
@@ -63,6 +71,8 @@ func main() {
 	deps := &api.Dependencies{}
 	bmkgClient := clients.NewBMKGClient(cfg.BMKGBaseURL, cfg.BMKGAPIKey, logger)
 	pvmbgClient := clients.NewPVMBGClient(cfg.PVMBGBaseURL, cfg.PVMBGToken, logger)
+	bmkgClient.CaptureFailure = st.RecordFailure
+	pvmbgClient.CaptureFailure = st.RecordFailure
 	registry := avrowire.NewClient(cfg.SchemaRegistryURL)
 	registry.ConfigureLogging(logger, "aggregator")
 	bmkgClient.Registry = registry
@@ -70,10 +80,11 @@ func main() {
 	pvmbgClient.Registry = registry
 	pvmbgClient.Reader = volcanicReader
 	pvmbgClient.ReaderSwitch = volcanicReaders
-	lookup := volcano.NewLookup(st.Pool)
+	lookup := st
 	status := poller.NewPVMBGStatus()
 
 	p := &poller.Poller{
+		DisablePoll: !platform.Bool("AGGREGATOR_POLL_ENABLED", true), DisableReplay: !platform.Bool("AGGREGATOR_REPLAY_ENABLED", true),
 		BMKG:       bmkgClient,
 		PVMBG:      pvmbgClient,
 		Store:      st,
@@ -88,27 +99,24 @@ func main() {
 	a := api.New(st, status, deps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
 	router := server.New(logger, a)
 	server.RegisterSchemaAdmin(router, volcanicReaders, cfg.AdminToken)
-	srv := &http.Server{Addr: ":" + cfg.Port, Handler: router}
-	go monitorStore(ctx, st, deps, p, logger)
-	go dispatchOutbox(ctx, st, cfg, deps, registry, logger)
-	go dispatchLifecycle(ctx, st, cfg, deps, registry, logger)
-
-	go func() {
-		logger.Info("starting aggregator", "service", "aggregator", "port", cfg.Port, "poll_interval_sec", cfg.PollInterval.Seconds())
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("server failed", "service", "aggregator", "error", err.Error())
-			os.Exit(1)
-		}
-	}()
-
-	<-ctx.Done()
-	logger.Info("shutting down aggregator", "service", "aggregator")
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("graceful shutdown failed", "service", "aggregator", "error", err.Error())
+	srv := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("aggregator", router)}
+	var workers sync.WaitGroup
+	launch := func(fn func()) { workers.Add(1); go func() { defer workers.Done(); fn() }() }
+	launch(func() { monitorStore(ctx, st, deps, p, logger) })
+	launch(func() { st.CollectMetrics(ctx) })
+	if platform.Bool("AGGREGATOR_PUBLISH_ENABLED", true) {
+		launch(func() { dispatchOutbox(ctx, st, cfg, deps, registry, logger) })
+		launch(func() { dispatchLifecycle(ctx, st, cfg, deps, registry, logger) })
 	}
+
+	logger.Info("starting aggregator", "service", "aggregator", "port", cfg.Port)
+	if err := platform.Serve(ctx, srv); err != nil {
+		logger.Error("http server failed", "error", err)
+		stopSignals()
+	}
+	stopSignals()
+	workers.Wait()
+
 }
 
 // monitorStore keeps the API alive while Postgres is unavailable and starts
@@ -116,6 +124,13 @@ func main() {
 func monitorStore(ctx context.Context, st *store.Store, deps *api.Dependencies, p *poller.Poller, logger *slog.Logger) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+	pollDone := make(chan struct{})
+	pollStarted := false
+	defer func() {
+		if pollStarted {
+			<-pollDone
+		}
+	}()
 	pollerStarted := false
 	schemaReady := false
 	for {
@@ -131,7 +146,8 @@ func monitorStore(ctx context.Context, st *store.Store, deps *api.Dependencies, 
 		deps.SetStoreReady(err == nil)
 		if err == nil {
 			if !pollerStarted {
-				go p.Run(ctx)
+				pollStarted = true
+				go func() { defer close(pollDone); p.Run(ctx) }()
 				pollerStarted = true
 				logger.Info("canonical store ready; polling started", "service", "aggregator")
 			}

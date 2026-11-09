@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -12,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -65,7 +63,7 @@ func testFrame(t *testing.T) []byte {
 }
 
 func TestDecodeCachesSchemaAndPreservesAttributeType(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "consumer.db")
+	path := testDSN(t)
 	db, err := openDB(path)
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +112,7 @@ func TestDecodeCachesSchemaAndPreservesAttributeType(t *testing.T) {
 }
 
 func TestLookupClassifiesRegistryFailures(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +135,7 @@ func TestLookupClassifiesRegistryFailures(t *testing.T) {
 }
 
 func TestStoreDeduplicatesAfterRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "consumer.db")
+	path := testDSN(t)
 	e := envelope{HazardID: "hazard-1", CorrelationID: "cid-1", Payload: hazardEvent{HazardID: "hazard-1", Severity: "SIAGA", Source: "PVMBG", AreaName: "Merapi", OccurredAt: "now"}}
 	meta := &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 41}}
 	raw := []byte("same published message")
@@ -182,7 +180,7 @@ func TestStoreDeduplicatesAfterRestart(t *testing.T) {
 }
 
 func TestUnknownSchemaCounterSurvivesRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "consumer.db")
+	path := testDSN(t)
 	meta := &jetstream.MsgMetadata{Stream: "HAZARDS", Sequence: jetstream.SequencePair{Stream: 41}}
 	start := time.Now().Add(-2 * time.Minute).Truncate(time.Millisecond)
 	for want := 1; want <= 5; want++ {
@@ -202,7 +200,7 @@ func TestUnknownSchemaCounterSurvivesRestart(t *testing.T) {
 }
 
 func TestSaveRollsBackMessageIdentityOnConflictingHazard(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +223,7 @@ func TestSaveRollsBackMessageIdentityOnConflictingHazard(t *testing.T) {
 }
 
 func TestUnknownSchemaStormCountsDistinctMessages(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +240,7 @@ func TestUnknownSchemaStormCountsDistinctMessages(t *testing.T) {
 }
 
 func TestCorruptPayloadStormCountsDistinctMessages(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +257,7 @@ func TestCorruptPayloadStormCountsDistinctMessages(t *testing.T) {
 }
 
 func TestDecodeSeparatesCorruptBytesFromUnsupportedEnvelope(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +278,7 @@ func TestDecodeSeparatesCorruptBytesFromUnsupportedEnvelope(t *testing.T) {
 }
 
 func TestSQLiteConstraintIsDistinctFromStoreOutage(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +294,7 @@ func TestSQLiteConstraintIsDistinctFromStoreOutage(t *testing.T) {
 	if classifyStoreFailure(context.DeadlineExceeded) != storeTransient {
 		t.Fatal("deadline should retry")
 	}
-	if _, err := db.Exec(`PRAGMA query_only=ON`); err != nil {
+	if _, err := db.Exec(`SET default_transaction_read_only=on`); err != nil {
 		t.Fatal(err)
 	}
 	_, err = db.Exec(`INSERT INTO records(hazard_id,payload,correlation_id,processed_at) VALUES ('h2','{}','c','now')`)
@@ -305,20 +303,19 @@ func TestSQLiteConstraintIsDistinctFromStoreOutage(t *testing.T) {
 	}
 }
 
-func TestSQLiteBusyRetries(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "consumer.db")
+func TestPostgresLockTimeoutRetries(t *testing.T) {
+	path := testDSN(t)
 	first, err := openDB(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer first.Close()
-	second, err := sql.Open("sqlite", path)
+	second, err := openDB(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer second.Close()
-	second.SetMaxOpenConns(1)
-	if _, err := second.Exec(`PRAGMA busy_timeout=0`); err != nil {
+	if _, err = first.Exec(`INSERT INTO records VALUES('held','{}','c','now')`); err != nil {
 		t.Fatal(err)
 	}
 	tx, err := first.Begin()
@@ -326,17 +323,19 @@ func TestSQLiteBusyRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO records(hazard_id,payload,correlation_id,processed_at) VALUES ('held','{}','c','now')`); err != nil {
+	if _, err = tx.Exec(`UPDATE records SET payload='{}' WHERE hazard_id='held'`); err != nil {
 		t.Fatal(err)
 	}
-	_, err = second.Exec(`INSERT INTO records(hazard_id,payload,correlation_id,processed_at) VALUES ('other','{}','c','now')`)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = second.ExecContext(ctx, `UPDATE records SET payload='{}' WHERE hazard_id='held'`)
 	if err == nil || classifyStoreFailure(err) != storeTransient {
-		t.Fatalf("busy database should retry: %v", err)
+		t.Fatalf("locked row must retry: %v", err)
 	}
 }
 
 func TestAckFailureAfterCommitOnlyRetriesAckOnRedelivery(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +362,7 @@ func TestAckFailureAfterCommitOnlyRetriesAckOnRedelivery(t *testing.T) {
 }
 
 func TestRegistryNakFailureRequestsReconnect(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +379,7 @@ func TestRegistryNakFailureRequestsReconnect(t *testing.T) {
 }
 
 func TestHaltPersistsAcrossRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "consumer.db")
+	path := testDSN(t)
 	db, err := openDB(path)
 	if err != nil {
 		t.Fatal(err)
@@ -402,7 +401,7 @@ func TestHaltPersistsAcrossRestart(t *testing.T) {
 }
 
 func TestUnknownSchemaCarriesCorrelationIntoRegistryAndLogs(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +434,7 @@ func TestUnknownSchemaCarriesCorrelationIntoRegistryAndLogs(t *testing.T) {
 }
 
 func TestCorrelationHeaderMustMatchDecodedEnvelope(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +454,7 @@ func TestCorrelationHeaderMustMatchDecodedEnvelope(t *testing.T) {
 }
 
 func TestSuccessfulMessageKeepsCorrelationThroughLookupAndAck(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +533,7 @@ func TestDLQRetainsOneEntryAfterLostAckAndAmbiguousPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), streamName) })
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}

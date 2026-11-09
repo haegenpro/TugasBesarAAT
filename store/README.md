@@ -3,13 +3,7 @@
 PostgreSQL 16 (`postgres:16-alpine3.24`). Owned exclusively by the Aggregator —
 no other service connects to this database directly.
 
-`init.sql` is mounted at `/docker-entrypoint-initdb.d/init.sql` and creates all
-tables, including the outbox, on first container boot. The Aggregator checks
-the canonical tables and applies idempotent lifecycle migrations under an advisory lock. Compose mounts Postgres
-data in the `postgres-data` volume so pending events survive container
-recreation. Lifecycle tables and columns are added on existing canonical
-schemas by the Aggregator migration. Installations missing the original
-canonical tables still need the base schema initialized.
+`init.sql` initializes a fresh PostgreSQL volume through the bootstrap role. Aggregator runtime credentials have data access only; startup validates tables without issuing DDL. Existing volumes are intentionally unsupported by this preparation refactor.
 
 ## Tables
 
@@ -55,3 +49,5 @@ Both rows live in the same table, same column, with no migration between them.
 ## Reporting lifecycle
 
 Validated observations, replay cursors, retry schedules, notices, transitions, and lifecycle outbox work are Aggregator-owned PostgreSQL data. Hazard corrections retain the hazard ID and increment a storage revision. See [Reporting Lifecycle](../docs/Reporting%20Lifecycle.md).
+
+`failed_ingestions` preserves original failed source-response bytes (or an explicitly marked bounded prefix for oversized input), identity/digest, reason, retry classification, timestamps and attempts. It is not a complete M2 quarantine/replay API. Both outboxes persist traceparent/tracestate separately from canonical JSON.

@@ -14,3 +14,12 @@ datasources:
     access: proxy
     url: {{quote .LOKI_URL}}
     editable: false
+  - name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: {{quote .TEMPO_URL}}
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki

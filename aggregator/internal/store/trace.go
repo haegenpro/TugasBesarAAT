@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"aggregator/internal/middleware"
+	"aggregator/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Trace at the driver boundary so transactions and volcano lookups are covered
@@ -39,6 +41,7 @@ func startSQL(ctx context.Context, operation, query string) context.Context {
 		fingerprint = hex.EncodeToString(digest[:])
 	}
 	ctx = middleware.EnsureCorrelationID(ctx)
+	ctx, _ = platform.Start(ctx, "postgresql "+operation)
 	return context.WithValue(ctx, sqlTraceKey{}, sqlTrace{time.Now(), operation, fingerprint})
 }
 
@@ -48,6 +51,7 @@ func (t *sqlTracer) end(ctx context.Context, err error) {
 		return
 	}
 	logSQL(t.logger, ctx, trace.operation, trace.fingerprint, trace.started, err)
+	spanFromSQL(ctx).End()
 }
 
 func logSQL(logger *slog.Logger, ctx context.Context, operation, fingerprint string, started time.Time, err error) {
@@ -113,3 +117,5 @@ func (t *sqlTracer) TraceAcquireStart(ctx context.Context, _ *pgxpool.Pool, _ pg
 func (t *sqlTracer) TraceAcquireEnd(ctx context.Context, _ *pgxpool.Pool, data pgxpool.TraceAcquireEndData) {
 	t.end(ctx, data.Err)
 }
+
+func spanFromSQL(ctx context.Context) trace.Span { return trace.SpanFromContext(ctx) }

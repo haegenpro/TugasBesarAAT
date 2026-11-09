@@ -1,6 +1,7 @@
 package main
 
 import (
+	"clientapi/internal/platform"
 	"net/http"
 	"strings"
 	"time"
@@ -21,6 +22,9 @@ type refreshRequest struct {
 func (a *api) router() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	r.HandleMethodNotAllowed = true
+	r.NoRoute(func(c *gin.Context) { c.JSON(404, gin.H{"error": platform.ProblemStatus(404, "not found")}) })
+	r.NoMethod(func(c *gin.Context) { c.JSON(405, gin.H{"error": platform.ProblemStatus(405, "method not allowed")}) })
 	r.Use(gin.Recovery(), correlation(), requestLog(a.log))
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "client-api"})
@@ -66,7 +70,7 @@ func limitInFlight(n int, log logger) gin.HandlerFunc {
 		default:
 			log.Warn("request rejected", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "reason", "max_in_flight", "limit", n)
 			c.Header("Retry-After", "1")
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "server busy"})
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": platform.ProblemStatus(http.StatusTooManyRequests, "server busy")})
 		}
 	}
 }
@@ -75,12 +79,12 @@ func requestLog(log logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		c.Next()
-		log.Info("http request", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "method", c.Request.Method, "path", c.FullPath(), "status_code", c.Writer.Status(), "latency_ms", time.Since(start).Milliseconds())
+		log.Info("http request", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "trace_id", platform.TraceID(c.Request.Context()), "method", c.Request.Method, "path", c.FullPath(), "status_code", c.Writer.Status(), "latency_ms", time.Since(start).Milliseconds())
 	}
 }
 
 func (a *api) ready(c *gin.Context) {
-	authCode, authErr := a.call(c, "auth-service", http.MethodGet, joinURL(a.cfg.AuthURL, "/health"), nil, false, nil)
+	authCode, authErr := a.call(c, "auth-service", http.MethodGet, joinURL(a.cfg.AuthURL, "/ready"), nil, false, nil)
 	aggCode, aggErr := a.call(c, "aggregator", http.MethodGet, joinURL(a.cfg.AggregatorURL, "/ready"), nil, false, nil)
 	if authErr != nil || aggErr != nil || authCode != http.StatusOK || aggCode != http.StatusOK {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "auth": authErr == nil && authCode == http.StatusOK, "aggregator": aggErr == nil && aggCode == http.StatusOK})
@@ -92,7 +96,7 @@ func (a *api) ready(c *gin.Context) {
 func (a *api) login(c *gin.Context) {
 	var req loginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "client_id and client_secret are required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": platform.ProblemStatus(http.StatusBadRequest, "client_id and client_secret are required")})
 		return
 	}
 	a.proxyAuth(c, "/internal/login", req)
@@ -101,7 +105,7 @@ func (a *api) login(c *gin.Context) {
 func (a *api) refresh(c *gin.Context) {
 	var req refreshRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "refresh_token is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": platform.ProblemStatus(http.StatusBadRequest, "refresh_token is required")})
 		return
 	}
 	a.proxyAuth(c, "/internal/refresh", req)
@@ -110,7 +114,7 @@ func (a *api) refresh(c *gin.Context) {
 func (a *api) logout(c *gin.Context) {
 	var req refreshRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "refresh_token is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": platform.ProblemStatus(http.StatusBadRequest, "refresh_token is required")})
 		return
 	}
 	a.proxyAuth(c, "/internal/logout", req)
@@ -120,7 +124,7 @@ func (a *api) proxyAuth(c *gin.Context, path string, payload any) {
 	var response map[string]any
 	status, err := a.call(c, "auth-service", http.MethodPost, joinURL(a.cfg.AuthURL, path), payload, true, &response)
 	if err != nil || status >= 500 || status == 0 {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth service unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "auth service unavailable")})
 		return
 	}
 	if status == http.StatusNoContent {
@@ -128,7 +132,7 @@ func (a *api) proxyAuth(c *gin.Context, path string, payload any) {
 		return
 	}
 	if status != http.StatusOK {
-		c.JSON(status, gin.H{"error": "invalid credentials or token"})
+		c.JSON(status, gin.H{"error": platform.ProblemStatus(status, "invalid credentials or token")})
 		return
 	}
 	c.JSON(http.StatusOK, response)
@@ -139,17 +143,17 @@ func (a *api) authenticate() gin.HandlerFunc {
 		header := c.GetHeader("Authorization")
 		parts := strings.SplitN(header, " ", 2)
 		if len(parts) != 2 || parts[0] != "Bearer" || strings.TrimSpace(parts[1]) == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "bearer token required"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": platform.ProblemStatus(http.StatusUnauthorized, "bearer token required")})
 			return
 		}
 		var principal principal
 		status, err := a.call(c, "auth-service", http.MethodPost, joinURL(a.cfg.AuthURL, "/internal/introspect"), gin.H{"access_token": parts[1]}, true, &principal)
 		if err != nil || status >= 500 || status == 0 {
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "auth service unavailable"})
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "auth service unavailable")})
 			return
 		}
 		if status != http.StatusOK {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid access token"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": platform.ProblemStatus(http.StatusUnauthorized, "invalid access token")})
 			return
 		}
 		c.Set("principal", principal)
@@ -177,11 +181,11 @@ func (a *api) view(c *gin.Context) (string, bool) {
 		}
 	}
 	if view != "summary" && view != "raw" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "view must be summary or raw"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": platform.ProblemStatus(http.StatusBadRequest, "view must be summary or raw")})
 		return "", false
 	}
 	if view == "raw" && !hasScope(principal.Scope, "hazards:raw") {
-		c.JSON(http.StatusForbidden, gin.H{"error": "raw view forbidden for media"})
+		c.JSON(http.StatusForbidden, gin.H{"error": platform.ProblemStatus(http.StatusForbidden, "raw view forbidden for media")})
 		return "", false
 	}
 	return view, true
@@ -194,7 +198,7 @@ func (a *api) listHazards(c *gin.Context) {
 	}
 	query, err := filterQuery(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": platform.ProblemStatus(http.StatusBadRequest, err.Error())})
 		return
 	}
 	endpoint := joinURL(a.cfg.AggregatorURL, "/internal/hazards")
@@ -203,8 +207,12 @@ func (a *api) listHazards(c *gin.Context) {
 	}
 	var list aggregatorList
 	status, err := a.call(c, "aggregator", http.MethodGet, endpoint, nil, false, &list)
+	if err == nil && status == http.StatusBadRequest {
+		c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid pagination cursor")})
+		return
+	}
 	if err != nil || status != http.StatusOK {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "aggregator unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "aggregator unavailable")})
 		return
 	}
 	if list.Data == nil {
@@ -215,10 +223,10 @@ func (a *api) listHazards(c *gin.Context) {
 		for _, item := range list.Data {
 			summaries = append(summaries, item.summary())
 		}
-		c.JSON(http.StatusOK, gin.H{"data": summaries, "count": len(summaries), "as_of": list.AsOf, "source_status": list.SourceStatus, "metadata": list.Metadata})
+		c.JSON(http.StatusOK, gin.H{"data": summaries, "count": len(summaries), "as_of": list.AsOf, "next_cursor": list.NextCursor, "partial": list.Partial, "unavailable_units": list.UnavailableUnits, "source_status": list.SourceStatus, "metadata": list.Metadata})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": list.Data, "count": len(list.Data), "as_of": list.AsOf, "source_status": list.SourceStatus, "metadata": list.Metadata})
+	c.JSON(http.StatusOK, gin.H{"data": list.Data, "count": len(list.Data), "as_of": list.AsOf, "next_cursor": list.NextCursor, "partial": list.Partial, "unavailable_units": list.UnavailableUnits, "source_status": list.SourceStatus, "metadata": list.Metadata})
 }
 
 func (a *api) getHazard(c *gin.Context) {
@@ -228,21 +236,21 @@ func (a *api) getHazard(c *gin.Context) {
 	}
 	id := c.Param("id")
 	if _, err := uuid.Parse(id); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid hazard ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": platform.ProblemStatus(http.StatusBadRequest, "invalid hazard ID")})
 		return
 	}
 	var detail aggregatorDetail
 	status, err := a.call(c, "aggregator", http.MethodGet, joinURL(a.cfg.AggregatorURL, "/internal/hazards/"+id), nil, false, &detail)
 	if err != nil || status >= 500 || status == 0 {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "aggregator unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "aggregator unavailable")})
 		return
 	}
 	if status == http.StatusNotFound {
-		c.JSON(http.StatusNotFound, gin.H{"error": "hazard not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": platform.ProblemStatus(http.StatusNotFound, "hazard not found")})
 		return
 	}
 	if status != http.StatusOK {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "aggregator unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "aggregator unavailable")})
 		return
 	}
 	item := detail.Data

@@ -4,11 +4,13 @@ import (
 	"aggregator/internal/avrowire"
 	"aggregator/internal/domain"
 	"aggregator/internal/middleware"
+	"aggregator/internal/platform"
 	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"net/http"
 	"time"
 )
 
@@ -16,6 +18,10 @@ import (
 const lifecycleSchema = `{"type":"record","name":"ReportLifecycleEnvelope","namespace":"id.go.bnpb","fields":[{"name":"envelope_version","type":"int"},{"name":"correlation_id","type":"string"},{"name":"event_id","type":"string"},{"name":"record_id","type":"string"},{"name":"revision","type":"long"},{"name":"event_type","type":"string"},{"name":"snapshot","type":"bytes"}]}`
 
 func (p *Publisher) PublishLifecycle(ctx context.Context, e domain.LifecycleEvent) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ctx, span := platform.Start(ctx, "publish "+p.subject)
+	defer span.End()
 	if p.schema == nil {
 		schema, err := p.registry.Register(avrowire.WithCorrelationID(ctx, e.CorrelationID), p.subject+"-value", lifecycleSchema)
 		if err != nil {
@@ -33,6 +39,7 @@ func (p *Publisher) PublishLifecycle(ctx context.Context, e domain.LifecycleEven
 	}
 	msg := nats.NewMsg(p.subject)
 	msg.Header.Set("X-Correlation-ID", e.CorrelationID)
+	platform.Inject(ctx, http.Header(msg.Header))
 	msg.Data = data
 	started := time.Now()
 	_, err = p.js.PublishMsg(ctx, msg, jetstream.WithMsgID(e.EventID))

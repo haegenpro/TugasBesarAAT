@@ -1,6 +1,8 @@
 package clients
 
 import (
+	"aggregator/internal/platform"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -62,25 +64,26 @@ func decodeVolcanicReport(raw map[string]interface{}) (VolcanicReport, error) {
 }
 
 type PVMBGClient struct {
-	BaseURL      string
-	Token        string
-	HTTP         *http.Client
-	Logger       *slog.Logger
-	Registry     *avrowire.Client
-	Reader       *avrowire.SourceReader
-	ReaderSwitch *avrowire.ReaderSwitch
+	CaptureFailure FailureRecorder
+	BaseURL        string
+	Token          string
+	HTTP           *http.Client
+	Logger         *slog.Logger
+	Registry       *avrowire.Client
+	Reader         *avrowire.SourceReader
+	ReaderSwitch   *avrowire.ReaderSwitch
 }
 
 func NewPVMBGClient(baseURL, token string, logger *slog.Logger) *PVMBGClient {
 	return &PVMBGClient{
 		BaseURL: baseURL,
 		Token:   token,
-		HTTP:    &http.Client{Timeout: 5 * time.Second},
+		HTTP:    platform.Client(5 * time.Second),
 		Logger:  logger,
 	}
 }
 
-func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID string, since time.Time) ([]VolcanicReport, error) {
+func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID string, since time.Time) (result []VolcanicReport, retErr error) {
 	reader := c.Reader
 	if c.ReaderSwitch != nil {
 		var release func()
@@ -117,6 +120,13 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 		return nil, err
 	}
 	defer resp.Body.Close()
+	rawBody, truncated, readErr := platform.ReadPayload(resp.Body)
+	defer func() {
+		capture(callCtx, c.CaptureFailure, Failure{Source: "PVMBG", Entity: path, Payload: rawBody, Truncated: truncated, CorrelationID: correlationID}, &retErr)
+	}()
+	if readErr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrContractViolation, readErr)
+	}
 
 	success := resp.StatusCode < 400
 	middleware.LogOutbound(c.Logger, "aggregator", correlationID, "pvmbg", path, resp.StatusCode, success, latency, "")
@@ -124,6 +134,12 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 		return nil, fmt.Errorf("pvmbg %s returned status %d", path, resp.StatusCode)
 	}
 
+	if c.Registry == nil {
+		if err := platform.ValidateJSON(rawBody); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrContractViolation, err)
+		}
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(rawBody))
 	var raws []map[string]interface{}
 	var writer *avrowire.Schema
 	if c.Registry != nil {

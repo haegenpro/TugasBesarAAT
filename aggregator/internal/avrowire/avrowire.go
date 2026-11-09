@@ -3,6 +3,7 @@
 package avrowire
 
 import (
+	"aggregator/internal/platform"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -52,7 +53,7 @@ func (c *Client) ConfigureLogging(logger *slog.Logger, service string) {
 }
 
 func NewClient(base string) *Client {
-	return &Client{base: strings.TrimRight(base, "/"), http: &http.Client{Timeout: 2 * time.Second}, byID: map[int]*Schema{}, bySubject: map[string]*Schema{}}
+	return &Client{base: strings.TrimRight(base, "/"), http: platform.Client(2 * time.Second), byID: map[int]*Schema{}, bySubject: map[string]*Schema{}}
 }
 
 func (c *Client) request(ctx context.Context, method, path string, body any, output any) (requestErr error) {

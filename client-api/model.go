@@ -87,11 +87,14 @@ func (status *sourceStatus) UnmarshalJSON(data []byte) error {
 }
 
 type aggregatorList struct {
-	Data         []hazard                  `json:"data"`
-	Count        int                       `json:"count"`
-	AsOf         string                    `json:"as_of"`
-	SourceStatus map[string]sourceStatus   `json:"source_status"`
-	Metadata     map[string]recordMetadata `json:"metadata,omitempty"`
+	NextCursor       *string                   `json:"next_cursor"`
+	Partial          bool                      `json:"partial"`
+	UnavailableUnits []string                  `json:"unavailable_units"`
+	Data             []hazard                  `json:"data"`
+	Count            int                       `json:"count"`
+	AsOf             string                    `json:"as_of"`
+	SourceStatus     map[string]sourceStatus   `json:"source_status"`
+	Metadata         map[string]recordMetadata `json:"metadata,omitempty"`
 }
 
 func (list *aggregatorList) UnmarshalJSON(data []byte) error {

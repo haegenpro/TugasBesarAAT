@@ -23,8 +23,8 @@ var streamName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 var required = map[string][]string{
 	"nats-exporter": {"NATS_EXPORTER_PORT", "NATS_MONITOR_URL"},
-	"grafana":       {"GRAFANA_PORT", "GRAFANA_BIND_ADDRESS", "GRAFANA_HOST_PORT", "GF_SECURITY_ADMIN_USER", "GF_SECURITY_ADMIN_PASSWORD", "PROMETHEUS_URL", "LOKI_URL", "DLQ_STREAM_NAME"},
-	"prometheus":    {"PROMETHEUS_PORT", "METRICS_RETENTION_DAYS", "ALLOY_METRICS_URL", "LOKI_METRICS_URL", "NATS_EXPORTER_METRICS_URL"},
+	"grafana":       {"GRAFANA_PORT", "GRAFANA_BIND_ADDRESS", "GRAFANA_HOST_PORT", "GF_SECURITY_ADMIN_USER", "GF_SECURITY_ADMIN_PASSWORD", "PROMETHEUS_URL", "LOKI_URL", "DLQ_STREAM_NAME", "TEMPO_URL"},
+	"prometheus":    {"PROMETHEUS_PORT", "METRICS_RETENTION_DAYS", "ALLOY_METRICS_URL", "LOKI_METRICS_URL", "NATS_EXPORTER_METRICS_URL", "BMKG_PORT", "PVMBG_PORT", "AGGREGATOR_PORT", "AUTH_PORT", "CLIENT_API_PORT", "DASHBOARD_PORT", "NOTIFIER_PORT"},
 	"loki":          {"LOKI_PORT", "LOKI_GRPC_PORT", "LOG_RETENTION_DAYS"},
 	"alloy":         {"ALLOY_PORT", "COMPOSE_PROJECT_NAME", "PROMETHEUS_WRITE_URL", "LOKI_PUSH_URL", "BMKG_HEALTH_URL", "PVMBG_HEALTH_URL", "AGGREGATOR_HEALTH_URL", "AGGREGATOR_READY_URL", "AUTH_HEALTH_URL", "CLIENT_API_HEALTH_URL", "CLIENT_API_READY_URL", "DASHBOARD_HEALTH_URL", "DASHBOARD_READY_URL", "NOTIFIER_HEALTH_URL", "NOTIFIER_READY_URL", "REGISTRY_READY_URL", "NATS_HEALTH_URL"},
 }
@@ -150,6 +150,15 @@ func prepare(service string, values map[string]string, source, dest string) erro
 	if err := render(service, values, source, dest); err != nil {
 		return err
 	}
+	if service == "grafana" {
+		b, err := os.ReadFile(filepath.Join(source, "grafana", "application.json"))
+		if err != nil {
+			return err
+		}
+		if err = os.WriteFile(filepath.Join(dest, "application.json"), b, 0600); err != nil {
+			return err
+		}
+	}
 	if service != "grafana" {
 		return nil
 	}
@@ -169,6 +178,9 @@ func prepare(service string, values map[string]string, source, dest string) erro
 		return err
 	}
 	if err := os.Rename(filepath.Join(dest, "dashboard.json"), filepath.Join(dest, "dashboards", "monitoring.json")); err != nil {
+		return err
+	}
+	if err := os.Rename(filepath.Join(dest, "application.json"), filepath.Join(dest, "dashboards", "application.json")); err != nil {
 		return err
 	}
 	return os.Setenv("GF_PATHS_PROVISIONING", filepath.Join(dest, "provisioning"))

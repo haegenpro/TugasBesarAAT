@@ -14,7 +14,9 @@ CREATE TABLE IF NOT EXISTS hazard_events (
     occurred_at    TIMESTAMPTZ NOT NULL,
     ingested_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     attributes     JSONB NOT NULL DEFAULT '{}'::jsonb,
-    raw_payload    JSONB
+    raw_payload    JSONB,
+    revision BIGINT NOT NULL DEFAULT 1,
+    last_seen_at TIMESTAMPTZ
 );
 
 -- Canonical deduplication key: a source record is uniquely identified by
@@ -34,7 +36,7 @@ CREATE TABLE IF NOT EXISTS hazard_outbox (
     hazard_id UUID PRIMARY KEY REFERENCES hazard_events(hazard_id) ON DELETE CASCADE,
     event_payload JSONB NOT NULL,
     correlation_id TEXT NOT NULL,
-    queued_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    queued_at TIMESTAMPTZ NOT NULL DEFAULT now(), traceparent TEXT NOT NULL DEFAULT '', tracestate TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS ix_hazard_outbox_queued_at
@@ -62,16 +64,14 @@ INSERT INTO volcano_reference (volcano_id, area_name, latitude, longitude) VALUE
     ('ibu',      'Gunung Ibu',        1.4883, 127.6300)
 ON CONFLICT (volcano_id) DO NOTHING;
 
--- Additive reporting lifecycle schema (also migrated by Aggregator on existing volumes).
-ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 1;
-ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+-- Reporting lifecycle schema, initialized with the canonical tables on a fresh volume.
 CREATE TABLE IF NOT EXISTS source_observations (
  source TEXT NOT NULL, entity TEXT NOT NULL, record_id TEXT NOT NULL,
  payload JSONB NOT NULL, observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  history_sequence BIGINT NOT NULL DEFAULT 0,
+ last_seen_at TIMESTAMPTZ,
  PRIMARY KEY(source,entity,record_id)
 );
-ALTER TABLE source_observations ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS warning_related ON source_observations ((payload->>'related_event_id')) WHERE entity='tsunami-warnings';
 CREATE TABLE IF NOT EXISTS source_history_cursors (
  source TEXT NOT NULL, entity TEXT NOT NULL, cursor BIGINT NOT NULL DEFAULT 0,
@@ -93,5 +93,14 @@ CREATE TABLE IF NOT EXISTS report_lifecycle_events (
 );
 CREATE INDEX IF NOT EXISTS lifecycle_record ON report_lifecycle_events(record_id,revision);
 CREATE TABLE IF NOT EXISTS report_lifecycle_outbox (
- event_id UUID PRIMARY KEY REFERENCES report_lifecycle_events(event_id), queued_at TIMESTAMPTZ NOT NULL DEFAULT now()
+ event_id UUID PRIMARY KEY REFERENCES report_lifecycle_events(event_id), queued_at TIMESTAMPTZ NOT NULL DEFAULT now(), traceparent TEXT NOT NULL DEFAULT '', tracestate TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE failed_ingestions (
+ message_id UUID PRIMARY KEY, source TEXT NOT NULL, entity TEXT NOT NULL,
+ digest TEXT NOT NULL, raw_payload BYTEA NOT NULL, truncated BOOLEAN NOT NULL,
+ retryable BOOLEAN NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('retrying','parked')),
+ correlation_id TEXT NOT NULL, received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(), attempts BIGINT NOT NULL DEFAULT 1,
+ UNIQUE(source,entity,digest)
 );

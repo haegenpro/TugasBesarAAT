@@ -26,12 +26,12 @@ func recoveryApp(t *testing.T) *app {
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	path := filepath.Join(dir, "consumer.db")
-	db, err := openDB(path)
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	a := &app{haltController: &haltController{}, db: db, cfg: config{Role: "notifier", DBPath: path}}
+	a := &app{haltController: &haltController{}, db: db, cfg: config{Role: "notifier", AdminSocket: adminSocketPath(path)}}
 	a.lifecycle = &app{haltController: a.haltController, db: db, cfg: a.cfg}
 	a.ready.Store(true)
 	a.lifecycle.ready.Store(true)
@@ -49,7 +49,7 @@ func startRecoveryAdmin(t *testing.T, a *app) {
 }
 
 func localResume(a *app) (localResumeResponse, error) {
-	return requestLocalResume(context.Background(), adminSocketPath(a.cfg.DBPath), localResumeRequest{
+	return requestLocalResume(context.Background(), a.cfg.AdminSocket, localResumeRequest{
 		Operator: "operator-test", Reason: "updated consumer model", CorrelationID: "recovery-test",
 	})
 }
@@ -88,7 +88,7 @@ func TestLocalRecoveryClearsBothSubscriptionsAndAudits(t *testing.T) {
 		}
 	}
 	startRecoveryAdmin(t, a)
-	t.Setenv("CONSUMER_DB_PATH", a.cfg.DBPath)
+	t.Setenv("CONSUMER_ADMIN_SOCKET", a.cfg.AdminSocket)
 	t.Setenv("AUTH_BASE_URL", "")
 	t.Setenv("AUTH_INTERNAL_KEY", "")
 	old := slog.Default()
@@ -157,7 +157,7 @@ func TestLocalRecoveryClearsBothSubscriptionsAndAudits(t *testing.T) {
 func TestLocalRecoveryStorageFailureRollsBackAudit(t *testing.T) {
 	a := recoveryApp(t)
 	startRecoveryAdmin(t, a)
-	if _, err := a.db.Exec(`CREATE TRIGGER deny_clear BEFORE DELETE ON consumer_control WHEN OLD.key='halt_reason' BEGIN SELECT RAISE(ABORT,'cannot clear'); END`); err != nil {
+	if _, err := a.db.Exec(`CREATE FUNCTION deny_clear_fn() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'cannot clear'; END $$; CREATE TRIGGER deny_clear BEFORE DELETE ON consumer_control FOR EACH ROW EXECUTE FUNCTION deny_clear_fn()`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := localResume(a); err == nil || !a.halted.Load() {
@@ -167,7 +167,7 @@ func TestLocalRecoveryStorageFailureRollsBackAudit(t *testing.T) {
 	if err := a.db.QueryRow(`SELECT count(*) FROM consumer_control WHERE key='last_resume'`).Scan(&count); err != nil || count != 0 {
 		t.Fatal("failed transaction retained audit", err)
 	}
-	if _, err := a.db.Exec(`DROP TRIGGER deny_clear`); err != nil {
+	if _, err := a.db.Exec(`DROP TRIGGER deny_clear ON consumer_control`); err != nil {
 		t.Fatal(err)
 	}
 	if response, err := localResume(a); err != nil || response.Status != "resume_requested" {
@@ -181,7 +181,7 @@ func TestLocalRecoveryStickyHaltRequiresWritableStorage(t *testing.T) {
 	if _, err := a.db.Exec(`DELETE FROM consumer_control WHERE key='halt_reason'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.db.Exec(`PRAGMA query_only=ON`); err != nil {
+	if _, err := a.db.Exec(`SET default_transaction_read_only=on`); err != nil {
 		t.Fatal(err)
 	}
 	a.lifecycle.halt("disk write failed")
@@ -191,7 +191,7 @@ func TestLocalRecoveryStickyHaltRequiresWritableStorage(t *testing.T) {
 	if _, err := localResume(a); err == nil || !a.haltSticky.Load() {
 		t.Fatal("read-only recovery cleared halt", err)
 	}
-	if _, err := a.db.Exec(`PRAGMA query_only=OFF`); err != nil {
+	if _, err := a.db.Exec(`SET default_transaction_read_only=off`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := localResume(a); err != nil || a.haltSticky.Load() || a.lifecycle.halted.Load() {
@@ -237,7 +237,7 @@ func TestConcurrentControlOperationsKeepMemoryAndStorageConsistent(t *testing.T)
 func TestLocalAdminSocketPermissionsAndActiveListener(t *testing.T) {
 	a := recoveryApp(t)
 	startRecoveryAdmin(t, a)
-	path := adminSocketPath(a.cfg.DBPath)
+	path := a.cfg.AdminSocket
 	for name, want := range map[string]os.FileMode{path: 0600, filepath.Dir(path): 0700} {
 		info, err := os.Stat(name)
 		if err != nil || info.Mode().Perm() != want {
@@ -255,7 +255,7 @@ func TestLocalAdminSocketPermissionsAndActiveListener(t *testing.T) {
 
 func TestLocalAdminRecoversStaleSocketAndCleansUp(t *testing.T) {
 	a := recoveryApp(t)
-	path := adminSocketPath(a.cfg.DBPath)
+	path := a.cfg.AdminSocket
 	listener, err := listenLocalAdmin(path)
 	if err != nil {
 		t.Fatal(err)
@@ -278,7 +278,7 @@ func TestLocalAdminRecoversStaleSocketAndCleansUp(t *testing.T) {
 
 func TestLocalAdminDoesNotRemoveRegularFile(t *testing.T) {
 	a := recoveryApp(t)
-	path := adminSocketPath(a.cfg.DBPath)
+	path := a.cfg.AdminSocket
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestLocalResumeRejectsInvalidRequests(t *testing.T) {
 		`{"operator":"op","reason":"fixed"}{}`,
 		`{"operator":"op","reason":"` + strings.Repeat("x", adminMessageLimit) + `"}`,
 	} {
-		conn, err := net.Dial("unix", adminSocketPath(a.cfg.DBPath))
+		conn, err := net.Dial("unix", a.cfg.AdminSocket)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -323,7 +323,7 @@ func TestLocalResumeRejectsInvalidRequests(t *testing.T) {
 }
 
 func TestLocalRecoveryCLIValidation(t *testing.T) {
-	t.Setenv("CONSUMER_DB_PATH", "")
+	t.Setenv("CONSUMER_ADMIN_SOCKET", "")
 	for _, args := range [][]string{
 		{}, {"unknown"}, {"resume"}, {"resume", "--operator", "op"},
 		{"resume", "--operator", "op", "--reason", "fixed", "extra"},

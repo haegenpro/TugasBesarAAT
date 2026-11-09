@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bmkg-mock/internal/platform"
 	"context"
 	"log/slog"
 	"math/rand"
@@ -132,7 +133,7 @@ func (h *Handler) SeismicEvents(c *gin.Context) {
 		head, err := h.Archive.Head()
 		if err != nil {
 			h.mu.RUnlock()
-			c.JSON(503, gin.H{"error": "archive unavailable"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive unavailable")})
 			return
 		}
 		c.Header("X-Source-Sequence", strconv.FormatInt(head, 10))
@@ -146,12 +147,12 @@ func (h *Handler) SeismicEvents(c *gin.Context) {
 	h.mu.RUnlock()
 	if c.GetHeader("Accept") == avrowire.MediaType {
 		if h.Registry == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registry unavailable")})
 			return
 		}
 		data, err := h.encodeSeismic(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), out)
 		if err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registry unavailable")})
 			return
 		}
 		c.Data(http.StatusOK, avrowire.MediaType, data)
@@ -168,7 +169,7 @@ func (h *Handler) TsunamiWarnings(c *gin.Context) {
 		head, err := h.Archive.Head()
 		if err != nil {
 			h.mu.RUnlock()
-			c.JSON(503, gin.H{"error": "archive unavailable"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive unavailable")})
 			return
 		}
 		c.Header("X-Source-Sequence", strconv.FormatInt(head, 10))
@@ -186,12 +187,12 @@ func (h *Handler) TsunamiWarnings(c *gin.Context) {
 	h.mu.RUnlock()
 	if c.GetHeader("Accept") == avrowire.MediaType {
 		if h.Registry == nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registry unavailable")})
 			return
 		}
 		data, err := h.encodeWarnings(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), out)
 		if err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "schema registry unavailable"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registry unavailable")})
 			return
 		}
 		c.Data(http.StatusOK, avrowire.MediaType, data)

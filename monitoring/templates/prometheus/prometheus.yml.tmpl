@@ -24,3 +24,24 @@ scrape_configs:
     static_configs:
       - targets: [{{quote (urlHost .NATS_EXPORTER_METRICS_URL)}}]
     scheme: {{quote (urlScheme .NATS_EXPORTER_METRICS_URL)}}
+  - job_name: bmkg-mock
+    static_configs:
+      - targets: [{{quote (printf "bmkg-mock:%s" .BMKG_PORT)}}]
+  - job_name: pvmbg-mock
+    static_configs:
+      - targets: [{{quote (printf "pvmbg-mock:%s" .PVMBG_PORT)}}]
+  - job_name: aggregator
+    static_configs:
+      - targets: [{{quote (printf "aggregator:%s" .AGGREGATOR_PORT)}}]
+  - job_name: auth-service
+    static_configs:
+      - targets: [{{quote (printf "auth-service:%s" .AUTH_PORT)}}]
+  - job_name: client-api
+    static_configs:
+      - targets: [{{quote (printf "client-api:%s" .CLIENT_API_PORT)}}]
+  - job_name: consumer-dashboard
+    static_configs:
+      - targets: [{{quote (printf "consumer-dashboard:%s" .DASHBOARD_PORT)}}]
+  - job_name: consumer-notifier
+    static_configs:
+      - targets: [{{quote (printf "consumer-notifier:%s" .NOTIFIER_PORT)}}]

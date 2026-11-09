@@ -233,33 +233,51 @@ func (a *app) list(view string) {
 }
 
 func (a *app) requestRaw() {
-	status, data, err := a.protected(http.MethodGet, "/hazards?view=raw")
-	if err != nil {
-		fmt.Println("Gagal:", err)
-		a.pause()
-		return
-	}
-	fmt.Printf("HTTP %d\n", status)
-	if status == http.StatusOK {
-		var result struct {
-			Data []json.RawMessage `json:"data"`
+	query := url.Values{"view": []string{"raw"}}
+	for {
+		status, data, err := a.protected(http.MethodGet, "/hazards?"+query.Encode())
+		if err != nil {
+			fmt.Println("Gagal:", err)
+			a.pause()
+			return
+		}
+		if status != http.StatusOK {
+			fmt.Printf("HTTP %d: %s\n", status, data)
+			a.pause()
+			return
+		}
+		var page struct {
+			Data             []json.RawMessage `json:"data"`
+			NextCursor       *string           `json:"next_cursor"`
+			Partial          bool              `json:"partial"`
+			UnavailableUnits []string          `json:"unavailable_units"`
 		}
 		if err := requireResponseFields(data, "data"); err != nil {
 			fmt.Println("Respons tidak valid:", err)
-		} else if err := json.Unmarshal(data, &result); err != nil {
-			fmt.Println("Respons tidak valid:", err)
-		} else if len(result.Data) > 0 {
-			fmt.Printf("Data raw: %d hazard\n", len(result.Data))
-			for i, item := range result.Data {
-				fmt.Printf("\n[%d/%d]\n%s\n", i+1, len(result.Data), pretty(item))
-			}
-		} else {
-			fmt.Println("Data kosong")
+			a.pause()
+			return
 		}
-	} else {
-		fmt.Println(pretty(data))
+		if err := json.Unmarshal(data, &page); err != nil {
+			fmt.Println("Respons tidak valid:", err)
+			a.pause()
+			return
+		}
+		fmt.Printf("Data raw: %d hazard\n", len(page.Data))
+		for i, item := range page.Data {
+			fmt.Printf("\n[%d/%d]\n%s\n", i+1, len(page.Data), pretty(item))
+		}
+		if page.Partial {
+			fmt.Println("Data belum lengkap:", page.UnavailableUnits)
+		}
+		if page.NextCursor == nil {
+			a.pause()
+			return
+		}
+		if !strings.EqualFold(a.prompt("n = halaman berikutnya; Enter = kembali"), "n") {
+			return
+		}
+		query.Set("cursor", *page.NextCursor)
 	}
-	a.pause()
 }
 
 func (a *app) filteredList() {
@@ -307,6 +325,17 @@ func (a *app) showList(query url.Values) {
 	fmt.Println("Status sumber:", pretty(result.SourceStatus))
 	if len(result.Metadata) > 0 {
 		fmt.Println("Kebaruan / assessment:", pretty(result.Metadata))
+	}
+	if result.Partial {
+		fmt.Println("Data belum lengkap:", result.UnavailableUnits)
+	}
+	if result.NextCursor != nil {
+		fmt.Println("Tekan n untuk halaman berikutnya, Enter untuk kembali.")
+		if strings.EqualFold(a.prompt(""), "n") {
+			query.Set("cursor", *result.NextCursor)
+			a.showList(query)
+			return
+		}
 	}
 	a.pause()
 }

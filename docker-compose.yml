@@ -4,370 +4,675 @@ services:
       context: ./broker
       dockerfile: Dockerfile
     env_file:
-      - ./broker/.env
+    - ./broker/.env
     volumes:
-      - ./broker/nats.conf:/etc/nats/nats.conf:ro
-      - nats-data:/data
-    # No host ports: downstream clients access data through Client API only.
-    # Operators run broker tools with docker compose exec; no host mapping needed.
+    - ./broker/nats.conf:/etc/nats/nats.conf:ro
+    - nats-data:/data
     environment:
-      NATS_PORT: "${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
-      NATS_MONITOR_PORT: "${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}"
-      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
+      NATS_PORT: ${NATS_PORT:?Set NATS_PORT in root .env or the shell}
+      NATS_MONITOR_PORT: ${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}
+      NATS_URL: nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/broker-ready && broker-init --check"]
+      test:
+      - CMD-SHELL
+      - test -f /tmp/broker-ready && broker-init --check
       interval: 5s
       timeout: 5s
       retries: 10
     restart: unless-stopped
-    networks: [backend]
-
+    networks:
+    - backend
   broker-init:
     build:
       context: ./broker
       dockerfile: Dockerfile.init
     env_file:
-      - ./broker/.env
+    - ./broker/.env
     profiles:
-      - tools
+    - tools
     environment:
-      NATS_PORT: "${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
-      NATS_MONITOR_PORT: "${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}"
-      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
-    networks: [backend]
-
+      NATS_PORT: ${NATS_PORT:?Set NATS_PORT in root .env or the shell}
+      NATS_MONITOR_PORT: ${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}
+      NATS_URL: nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}
+    networks:
+    - backend
   postgres:
-    command: ["postgres", "-p", "${POSTGRES_PORT:?Set POSTGRES_PORT in root .env or the shell}"]
+    command:
+    - postgres
+    - -p
+    - ${POSTGRES_PORT:?Set POSTGRES_PORT in root .env or the shell}
     image: postgres:16-alpine3.24
     env_file:
-      - ./store/.env
+    - ./store/.env
     volumes:
-      - ./store/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-      - postgres-data:/var/lib/postgresql/data
+    - postgres-data:/var/lib/postgresql/data
+    - ./deployment/postgres/00-runtime-role.sh:/docker-entrypoint-initdb.d/00-runtime-role.sh:ro
+    - ./store/init.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    - ./deployment/postgres/99-runtime-grants.sh:/docker-entrypoint-initdb.d/99-runtime-grants.sh:ro
     environment:
-      PGPORT: "${POSTGRES_PORT:?Set POSTGRES_PORT in root .env or the shell}"
+      PGPORT: ${POSTGRES_PORT:?Set POSTGRES_PORT in root .env or the shell}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      test:
+      - CMD-SHELL
+      - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [store]
-
+    networks:
+    - store
   registry-db:
-    command: ["postgres", "-p", "${REGISTRY_DB_PORT:?Set REGISTRY_DB_PORT in root .env or the shell}"]
+    command:
+    - postgres
+    - -p
+    - ${REGISTRY_DB_PORT:?Set REGISTRY_DB_PORT in root .env or the shell}
     image: postgres:16-alpine3.24
     env_file:
-      - ./registry/.env
+    - ./registry/.env
     volumes:
-      - registry-data:/var/lib/postgresql/data
+    - registry-data:/var/lib/postgresql/data
     environment:
-      PGPORT: "${REGISTRY_DB_PORT:?Set REGISTRY_DB_PORT in root .env or the shell}"
+      PGPORT: ${REGISTRY_DB_PORT:?Set REGISTRY_DB_PORT in root .env or the shell}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      test:
+      - CMD-SHELL
+      - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [registry]
-
+    networks:
+    - registry
   schema-registry:
     build: ./registry
     env_file:
-      - ./registry/.env
-    # Schema writes are trusted backend operations; no public registry port.
+    - ./registry/.env
     environment:
-      QUARKUS_HTTP_PORT: "${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}"
-      QUARKUS_MANAGEMENT_PORT: "${SCHEMA_REGISTRY_MANAGEMENT_PORT:?Set SCHEMA_REGISTRY_MANAGEMENT_PORT in root .env or the shell}"
+      QUARKUS_HTTP_PORT: ${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}
+      QUARKUS_MANAGEMENT_PORT: ${SCHEMA_REGISTRY_MANAGEMENT_PORT:?Set SCHEMA_REGISTRY_MANAGEMENT_PORT in root .env or the shell}
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:${SCHEMA_REGISTRY_MANAGEMENT_PORT:?Set SCHEMA_REGISTRY_MANAGEMENT_PORT in root .env or the shell}/health/ready"]
+      test:
+      - CMD
+      - curl
+      - --fail
+      - --silent
+      - http://localhost:${SCHEMA_REGISTRY_MANAGEMENT_PORT:?Set SCHEMA_REGISTRY_MANAGEMENT_PORT in root .env or the shell}/health/ready
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [backend, registry]
-
+    networks:
+    - backend
+    - registry
   bmkg-mock:
     build: ./bmkg-mock
-    volumes: [bmkg-history:/data]
-    ports: ["${BMKG_HOST_PORT:?Set BMKG_HOST_PORT in root .env or the shell}:${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}"]
+    volumes:
+    - bmkg-history:/data
+    ports:
+    - ${BMKG_HOST_PORT:?Set BMKG_HOST_PORT in root .env or the shell}:${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}
     env_file:
-      - ./bmkg-mock/.env
+    - ./bmkg-mock/.env
     environment:
-      BMKG_PORT: "${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}"
-      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
+      BMKG_PORT: ${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}
+      SCHEMA_REGISTRY_URL: http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:?Set DB_MAX_OPEN_CONNS in root .env}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:?Set DB_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS: ${HTTP_MAX_IDLE_CONNS:?Set HTTP_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS_PER_HOST: ${HTTP_MAX_IDLE_CONNS_PER_HOST:?Set HTTP_MAX_IDLE_CONNS_PER_HOST in root .env}
+      HTTP_MAX_CONNS_PER_HOST: ${HTTP_MAX_CONNS_PER_HOST:?Set HTTP_MAX_CONNS_PER_HOST in root .env}
+      MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:?Set MAX_PAYLOAD_BYTES in root .env}
+      MAX_JSON_DEPTH: ${MAX_JSON_DEPTH:?Set MAX_JSON_DEPTH in root .env}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:?Set SHUTDOWN_TIMEOUT in root .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:${OTLP_HTTP_PORT:?Set OTLP_HTTP_PORT in root .env}
+      DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:?Set DB_STATEMENT_TIMEOUT in root .env}
+      DB_LOCK_TIMEOUT: ${DB_LOCK_TIMEOUT:?Set DB_LOCK_TIMEOUT in root .env}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$BMKG_PORT/health\""]
+      test:
+      - CMD-SHELL
+      - wget -q --spider "http://localhost:$$BMKG_PORT/health"
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [backend]
-
+    networks:
+    - backend
+    stop_grace_period: 40s
   pvmbg-mock:
     build: ./pvmbg-mock
-    volumes: [pvmbg-history:/data]
-    ports: ["${PVMBG_HOST_PORT:?Set PVMBG_HOST_PORT in root .env or the shell}:${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}"]
+    volumes:
+    - pvmbg-history:/data
+    ports:
+    - ${PVMBG_HOST_PORT:?Set PVMBG_HOST_PORT in root .env or the shell}:${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}
     env_file:
-      - ./pvmbg-mock/.env
+    - ./pvmbg-mock/.env
     environment:
-      PVMBG_PORT: "${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}"
-      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
+      PVMBG_PORT: ${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}
+      SCHEMA_REGISTRY_URL: http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:?Set DB_MAX_OPEN_CONNS in root .env}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:?Set DB_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS: ${HTTP_MAX_IDLE_CONNS:?Set HTTP_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS_PER_HOST: ${HTTP_MAX_IDLE_CONNS_PER_HOST:?Set HTTP_MAX_IDLE_CONNS_PER_HOST in root .env}
+      HTTP_MAX_CONNS_PER_HOST: ${HTTP_MAX_CONNS_PER_HOST:?Set HTTP_MAX_CONNS_PER_HOST in root .env}
+      MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:?Set MAX_PAYLOAD_BYTES in root .env}
+      MAX_JSON_DEPTH: ${MAX_JSON_DEPTH:?Set MAX_JSON_DEPTH in root .env}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:?Set SHUTDOWN_TIMEOUT in root .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:${OTLP_HTTP_PORT:?Set OTLP_HTTP_PORT in root .env}
+      DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:?Set DB_STATEMENT_TIMEOUT in root .env}
+      DB_LOCK_TIMEOUT: ${DB_LOCK_TIMEOUT:?Set DB_LOCK_TIMEOUT in root .env}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$PVMBG_PORT/health\""]
+      test:
+      - CMD-SHELL
+      - wget -q --spider "http://localhost:$$PVMBG_PORT/health"
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [backend]
-
+    networks:
+    - backend
+    stop_grace_period: 40s
   aggregator:
     build: ./aggregator
     env_file:
-      - ./aggregator/.env
+    - ./aggregator/.env
     environment:
-      AGGREGATOR_PORT: "${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}"
-      BMKG_BASE_URL: "http://bmkg-mock:${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}"
-      PVMBG_BASE_URL: "http://pvmbg-mock:${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}"
-      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
-      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
+      AGGREGATOR_PORT: ${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}
+      BMKG_BASE_URL: http://bmkg-mock:${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}
+      PVMBG_BASE_URL: http://pvmbg-mock:${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}
+      NATS_URL: nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}
+      SCHEMA_REGISTRY_URL: http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:?Set DB_MAX_OPEN_CONNS in root .env}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:?Set DB_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS: ${HTTP_MAX_IDLE_CONNS:?Set HTTP_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS_PER_HOST: ${HTTP_MAX_IDLE_CONNS_PER_HOST:?Set HTTP_MAX_IDLE_CONNS_PER_HOST in root .env}
+      HTTP_MAX_CONNS_PER_HOST: ${HTTP_MAX_CONNS_PER_HOST:?Set HTTP_MAX_CONNS_PER_HOST in root .env}
+      MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:?Set MAX_PAYLOAD_BYTES in root .env}
+      MAX_JSON_DEPTH: ${MAX_JSON_DEPTH:?Set MAX_JSON_DEPTH in root .env}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:?Set SHUTDOWN_TIMEOUT in root .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:${OTLP_HTTP_PORT:?Set OTLP_HTTP_PORT in root .env}
+      AGGREGATOR_POLL_ENABLED: ${AGGREGATOR_POLL_ENABLED:?Set AGGREGATOR_POLL_ENABLED in root .env}
+      AGGREGATOR_REPLAY_ENABLED: ${AGGREGATOR_REPLAY_ENABLED:?Set AGGREGATOR_REPLAY_ENABLED in root .env}
+      AGGREGATOR_PUBLISH_ENABLED: ${AGGREGATOR_PUBLISH_ENABLED:?Set AGGREGATOR_PUBLISH_ENABLED in root .env}
+      DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:?Set DB_STATEMENT_TIMEOUT in root .env}
+      DB_LOCK_TIMEOUT: ${DB_LOCK_TIMEOUT:?Set DB_LOCK_TIMEOUT in root .env}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$AGGREGATOR_PORT/health\""]
+      test:
+      - CMD-SHELL
+      - wget -q --spider "http://localhost:$$AGGREGATOR_PORT/health"
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [backend, store]
-
+    networks:
+    - backend
+    - store
+    stop_grace_period: 40s
   auth-service:
     build: ./auth-service
     env_file:
-      - ./auth-service/.env
-    volumes:
-      - auth-data:/data
+    - ./auth-service/.env
     environment:
-      AUTH_PORT: "${AUTH_PORT:?Set AUTH_PORT in root .env or the shell}"
+      AUTH_PORT: ${AUTH_PORT:?Set AUTH_PORT in root .env or the shell}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:?Set DB_MAX_OPEN_CONNS in root .env}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:?Set DB_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS: ${HTTP_MAX_IDLE_CONNS:?Set HTTP_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS_PER_HOST: ${HTTP_MAX_IDLE_CONNS_PER_HOST:?Set HTTP_MAX_IDLE_CONNS_PER_HOST in root .env}
+      HTTP_MAX_CONNS_PER_HOST: ${HTTP_MAX_CONNS_PER_HOST:?Set HTTP_MAX_CONNS_PER_HOST in root .env}
+      MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:?Set MAX_PAYLOAD_BYTES in root .env}
+      MAX_JSON_DEPTH: ${MAX_JSON_DEPTH:?Set MAX_JSON_DEPTH in root .env}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:?Set SHUTDOWN_TIMEOUT in root .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:${OTLP_HTTP_PORT:?Set OTLP_HTTP_PORT in root .env}
+      DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:?Set DB_STATEMENT_TIMEOUT in root .env}
+      DB_LOCK_TIMEOUT: ${DB_LOCK_TIMEOUT:?Set DB_LOCK_TIMEOUT in root .env}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$AUTH_PORT/health\""]
+      test:
+      - CMD-SHELL
+      - wget -q --spider "http://localhost:$$AUTH_PORT/health"
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [backend]
-
+    networks:
+    - backend
+    - auth-store
+    stop_grace_period: 40s
   client-api:
     build: ./client-api
-    ports: ["${CLIENT_API_HOST_PORT:?Set CLIENT_API_HOST_PORT in root .env or the shell}:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}"]
+    ports:
+    - ${CLIENT_API_HOST_PORT:?Set CLIENT_API_HOST_PORT in root .env or the shell}:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}
     env_file:
-      - ./client-api/.env
+    - ./client-api/.env
     environment:
-      CLIENT_API_PORT: "${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}"
-      AUTH_BASE_URL: "http://auth-service:${AUTH_PORT:?Set AUTH_PORT in root .env or the shell}"
-      AGGREGATOR_BASE_URL: "http://aggregator:${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}"
+      CLIENT_API_PORT: ${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}
+      AUTH_BASE_URL: http://auth-service:${AUTH_PORT:?Set AUTH_PORT in root .env or the shell}
+      AGGREGATOR_BASE_URL: http://aggregator:${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:?Set DB_MAX_OPEN_CONNS in root .env}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:?Set DB_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS: ${HTTP_MAX_IDLE_CONNS:?Set HTTP_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS_PER_HOST: ${HTTP_MAX_IDLE_CONNS_PER_HOST:?Set HTTP_MAX_IDLE_CONNS_PER_HOST in root .env}
+      HTTP_MAX_CONNS_PER_HOST: ${HTTP_MAX_CONNS_PER_HOST:?Set HTTP_MAX_CONNS_PER_HOST in root .env}
+      MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:?Set MAX_PAYLOAD_BYTES in root .env}
+      MAX_JSON_DEPTH: ${MAX_JSON_DEPTH:?Set MAX_JSON_DEPTH in root .env}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:?Set SHUTDOWN_TIMEOUT in root .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:${OTLP_HTTP_PORT:?Set OTLP_HTTP_PORT in root .env}
+      DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:?Set DB_STATEMENT_TIMEOUT in root .env}
+      DB_LOCK_TIMEOUT: ${DB_LOCK_TIMEOUT:?Set DB_LOCK_TIMEOUT in root .env}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$CLIENT_API_PORT/health\""]
+      test:
+      - CMD-SHELL
+      - wget -q --spider "http://localhost:$$CLIENT_API_PORT/health"
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [backend, client]
-
+    networks:
+    - backend
+    - client
+    stop_grace_period: 40s
   client-tui:
     build: ./client-tui
-    profiles: [demo]
+    profiles:
+    - demo
     stdin_open: true
     tty: true
     env_file:
-      - ./client-tui/.env
+    - ./client-tui/.env
     environment:
-      BNPB_API_URL: "http://client-api:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}"
-    networks: [client]
-
+      BNPB_API_URL: http://client-api:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}
+    networks:
+    - client
   consumer-dashboard:
     build: ./consumer-dashboard
     env_file:
-      - ./consumer-dashboard/.env
-    volumes:
-      - dashboard-data:/data
+    - ./consumer-dashboard/.env
     environment:
-      CONSUMER_PORT: "${DASHBOARD_PORT:?Set DASHBOARD_PORT in root .env or the shell}"
-      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
-      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
+      CONSUMER_PORT: ${DASHBOARD_PORT:?Set DASHBOARD_PORT in root .env or the shell}
+      NATS_URL: nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}
+      SCHEMA_REGISTRY_URL: http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:?Set DB_MAX_OPEN_CONNS in root .env}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:?Set DB_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS: ${HTTP_MAX_IDLE_CONNS:?Set HTTP_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS_PER_HOST: ${HTTP_MAX_IDLE_CONNS_PER_HOST:?Set HTTP_MAX_IDLE_CONNS_PER_HOST in root .env}
+      HTTP_MAX_CONNS_PER_HOST: ${HTTP_MAX_CONNS_PER_HOST:?Set HTTP_MAX_CONNS_PER_HOST in root .env}
+      MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:?Set MAX_PAYLOAD_BYTES in root .env}
+      MAX_JSON_DEPTH: ${MAX_JSON_DEPTH:?Set MAX_JSON_DEPTH in root .env}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:?Set SHUTDOWN_TIMEOUT in root .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:${OTLP_HTTP_PORT:?Set OTLP_HTTP_PORT in root .env}
+      CONSUMER_WORKERS: ${CONSUMER_WORKERS:?Set CONSUMER_WORKERS in root .env}
+      NATS_MAX_ACK_PENDING: ${NATS_MAX_ACK_PENDING:?Set NATS_MAX_ACK_PENDING in root .env}
+      NATS_ACK_WAIT: ${NATS_ACK_WAIT:?Set NATS_ACK_WAIT in root .env}
+      DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:?Set DB_STATEMENT_TIMEOUT in root .env}
+      DB_LOCK_TIMEOUT: ${DB_LOCK_TIMEOUT:?Set DB_LOCK_TIMEOUT in root .env}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$CONSUMER_PORT/health\""]
+      test:
+      - CMD-SHELL
+      - wget -q --spider "http://localhost:$$CONSUMER_PORT/health"
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [backend]
-
+    networks:
+    - backend
+    - dashboard-store
+    tmpfs:
+    - /data:uid=10001,gid=10001,mode=0700
+    stop_grace_period: 40s
   consumer-notifier:
     build: ./consumer-notifier
     env_file:
-      - ./consumer-notifier/.env
-    volumes:
-      - notifier-data:/data
+    - ./consumer-notifier/.env
     environment:
-      CONSUMER_PORT: "${NOTIFIER_PORT:?Set NOTIFIER_PORT in root .env or the shell}"
-      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
-      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
+      CONSUMER_PORT: ${NOTIFIER_PORT:?Set NOTIFIER_PORT in root .env or the shell}
+      NATS_URL: nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}
+      SCHEMA_REGISTRY_URL: http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:?Set DB_MAX_OPEN_CONNS in root .env}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:?Set DB_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS: ${HTTP_MAX_IDLE_CONNS:?Set HTTP_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS_PER_HOST: ${HTTP_MAX_IDLE_CONNS_PER_HOST:?Set HTTP_MAX_IDLE_CONNS_PER_HOST in root .env}
+      HTTP_MAX_CONNS_PER_HOST: ${HTTP_MAX_CONNS_PER_HOST:?Set HTTP_MAX_CONNS_PER_HOST in root .env}
+      MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:?Set MAX_PAYLOAD_BYTES in root .env}
+      MAX_JSON_DEPTH: ${MAX_JSON_DEPTH:?Set MAX_JSON_DEPTH in root .env}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:?Set SHUTDOWN_TIMEOUT in root .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:${OTLP_HTTP_PORT:?Set OTLP_HTTP_PORT in root .env}
+      CONSUMER_WORKERS: ${CONSUMER_WORKERS:?Set CONSUMER_WORKERS in root .env}
+      NATS_MAX_ACK_PENDING: ${NATS_MAX_ACK_PENDING:?Set NATS_MAX_ACK_PENDING in root .env}
+      NATS_ACK_WAIT: ${NATS_ACK_WAIT:?Set NATS_ACK_WAIT in root .env}
+      DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:?Set DB_STATEMENT_TIMEOUT in root .env}
+      DB_LOCK_TIMEOUT: ${DB_LOCK_TIMEOUT:?Set DB_LOCK_TIMEOUT in root .env}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider \"http://localhost:$$CONSUMER_PORT/health\""]
+      test:
+      - CMD-SHELL
+      - wget -q --spider "http://localhost:$$CONSUMER_PORT/health"
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [backend]
-
+    networks:
+    - backend
+    - notifier-store
+    tmpfs:
+    - /data:uid=10001,gid=10001,mode=0700
+    stop_grace_period: 40s
   consumer-dashboard-demo:
     build: ./consumer-dashboard
-    profiles: [consumer-demo]
+    profiles:
+    - consumer-demo
     env_file:
-      - ./consumer-dashboard/.env
+    - ./consumer-dashboard-demo/.env
     environment:
-      CONSUMER_PORT: "${DEMO_CONSUMER_PORT:?Set DEMO_CONSUMER_PORT in root .env or the shell}"
-      NATS_URL: "nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}"
-      SCHEMA_REGISTRY_URL: "http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7"
+      CONSUMER_PORT: ${DEMO_CONSUMER_PORT:?Set DEMO_CONSUMER_PORT in root .env or the shell}
+      NATS_URL: nats://broker:${NATS_PORT:?Set NATS_PORT in root .env or the shell}
+      SCHEMA_REGISTRY_URL: http://schema-registry:${SCHEMA_REGISTRY_PORT:?Set SCHEMA_REGISTRY_PORT in root .env or the shell}/apis/ccompat/v7
       NATS_DURABLE: dashboard-demo-v1
-      CONSUMER_DB_PATH: /data/demo.db
       NATS_DLQ_SUBJECT: hazard.dlq.dashboard-demo
-    volumes:
-      - dashboard-demo-data:/data
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:?Set DB_MAX_OPEN_CONNS in root .env}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:?Set DB_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS: ${HTTP_MAX_IDLE_CONNS:?Set HTTP_MAX_IDLE_CONNS in root .env}
+      HTTP_MAX_IDLE_CONNS_PER_HOST: ${HTTP_MAX_IDLE_CONNS_PER_HOST:?Set HTTP_MAX_IDLE_CONNS_PER_HOST in root .env}
+      HTTP_MAX_CONNS_PER_HOST: ${HTTP_MAX_CONNS_PER_HOST:?Set HTTP_MAX_CONNS_PER_HOST in root .env}
+      MAX_PAYLOAD_BYTES: ${MAX_PAYLOAD_BYTES:?Set MAX_PAYLOAD_BYTES in root .env}
+      MAX_JSON_DEPTH: ${MAX_JSON_DEPTH:?Set MAX_JSON_DEPTH in root .env}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:?Set SHUTDOWN_TIMEOUT in root .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:${OTLP_HTTP_PORT:?Set OTLP_HTTP_PORT in root .env}
+      CONSUMER_WORKERS: ${CONSUMER_WORKERS:?Set CONSUMER_WORKERS in root .env}
+      NATS_MAX_ACK_PENDING: ${NATS_MAX_ACK_PENDING:?Set NATS_MAX_ACK_PENDING in root .env}
+      NATS_ACK_WAIT: ${NATS_ACK_WAIT:?Set NATS_ACK_WAIT in root .env}
+      DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:?Set DB_STATEMENT_TIMEOUT in root .env}
+      DB_LOCK_TIMEOUT: ${DB_LOCK_TIMEOUT:?Set DB_LOCK_TIMEOUT in root .env}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:$$CONSUMER_PORT/health"]
+      test:
+      - CMD-SHELL
+      - wget -q --spider http://localhost:$$CONSUMER_PORT/health
       interval: 5s
       timeout: 5s
       retries: 10
-    networks: [backend]
-
+    networks:
+    - backend
+    - dashboard-demo-store
+    tmpfs:
+    - /data:uid=10001,gid=10001,mode=0700
+    stop_grace_period: 40s
   nats-exporter:
-    profiles: [monitoring]
+    profiles:
+    - monitoring
     build:
       context: ./monitoring
       target: nats-exporter
     environment:
-      NATS_EXPORTER_PORT: "${NATS_EXPORTER_PORT:?Set NATS_EXPORTER_PORT in root .env or the shell}"
-      NATS_MONITOR_URL: "http://broker:${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}"
+      NATS_EXPORTER_PORT: ${NATS_EXPORTER_PORT:?Set NATS_EXPORTER_PORT in root .env or the shell}
+      NATS_MONITOR_URL: http://broker:${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}
     healthcheck:
-      test: ["CMD", "monitoring-launch", "probe", "http://localhost:${NATS_EXPORTER_PORT:?Set NATS_EXPORTER_PORT in root .env or the shell}/metrics"]
+      test:
+      - CMD
+      - monitoring-launch
+      - probe
+      - http://localhost:${NATS_EXPORTER_PORT:?Set NATS_EXPORTER_PORT in root .env or the shell}/metrics
       interval: 15s
       timeout: 5s
       retries: 3
-    networks: [backend, monitoring]
-
+    networks:
+    - backend
+    - monitoring
   grafana:
-    profiles: [monitoring]
+    profiles:
+    - monitoring
     build:
       context: ./monitoring
       target: grafana
-    env_file: [./monitoring/grafana/.env]
+    env_file:
+    - ./monitoring/grafana/.env
     environment:
-      GRAFANA_PORT: "${GRAFANA_PORT:?Set GRAFANA_PORT in root .env or the shell}"
-      GF_SERVER_HTTP_PORT: "${GRAFANA_PORT:?Set GRAFANA_PORT in root .env or the shell}"
-      PROMETHEUS_URL: "http://prometheus:${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}"
-      LOKI_URL: "http://loki:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}"
-      GRAFANA_BIND_ADDRESS: "${GRAFANA_BIND_ADDRESS:?Set GRAFANA_BIND_ADDRESS in root .env or the shell}"
-      GRAFANA_HOST_PORT: "${GRAFANA_HOST_PORT:?Set GRAFANA_HOST_PORT in root .env or the shell}"
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-      GF_SERVER_HTTP_ADDR: "0.0.0.0"
-      GF_ANALYTICS_REPORTING_ENABLED: "false"
-      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
-      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GRAFANA_PORT: ${GRAFANA_PORT:?Set GRAFANA_PORT in root .env or the shell}
+      GF_SERVER_HTTP_PORT: ${GRAFANA_PORT:?Set GRAFANA_PORT in root .env or the shell}
+      PROMETHEUS_URL: http://prometheus:${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}
+      LOKI_URL: http://loki:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}
+      GRAFANA_BIND_ADDRESS: ${GRAFANA_BIND_ADDRESS:?Set GRAFANA_BIND_ADDRESS in root .env or the shell}
+      GRAFANA_HOST_PORT: ${GRAFANA_HOST_PORT:?Set GRAFANA_HOST_PORT in root .env or the shell}
+      GF_AUTH_ANONYMOUS_ENABLED: 'false'
+      GF_SERVER_HTTP_ADDR: 0.0.0.0
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_PLUGINS_PREINSTALL_DISABLED: 'true'
+      TEMPO_URL: http://tempo:${TEMPO_PORT:?Set TEMPO_PORT in root .env}
     ports:
-      - "${GRAFANA_BIND_ADDRESS:?Set GRAFANA_BIND_ADDRESS in root .env or the shell}:${GRAFANA_HOST_PORT:?Set GRAFANA_HOST_PORT in root .env or the shell}:${GRAFANA_PORT:?Set GRAFANA_PORT in root .env or the shell}"
+    - ${GRAFANA_BIND_ADDRESS:?Set GRAFANA_BIND_ADDRESS in root .env or the shell}:${GRAFANA_HOST_PORT:?Set GRAFANA_HOST_PORT in root .env or the shell}:${GRAFANA_PORT:?Set
+      GRAFANA_PORT in root .env or the shell}
     volumes:
-      - ./monitoring/templates:/etc/monitoring/templates:ro
-      - grafana-data:/var/lib/grafana
+    - ./monitoring/templates:/etc/monitoring/templates:ro
+    - grafana-data:/var/lib/grafana
     healthcheck:
-      test: ["CMD", "monitoring-launch", "probe", "http://localhost:${GRAFANA_PORT:?Set GRAFANA_PORT in root .env or the shell}/api/health"]
+      test:
+      - CMD
+      - monitoring-launch
+      - probe
+      - http://localhost:${GRAFANA_PORT:?Set GRAFANA_PORT in root .env or the shell}/api/health
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 60s
-    networks: [monitoring]
-
+    networks:
+    - monitoring
   prometheus:
-    profiles: [monitoring]
+    profiles:
+    - monitoring
     build:
       context: ./monitoring
       target: prometheus
-    env_file: [./monitoring/prometheus/.env]
+    env_file:
+    - ./monitoring/prometheus/.env
     volumes:
-      - ./monitoring/templates:/etc/monitoring/templates:ro
-      - prometheus-data:/prometheus
+    - ./monitoring/templates:/etc/monitoring/templates:ro
+    - prometheus-data:/prometheus
     environment:
-      PROMETHEUS_PORT: "${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}"
-      ALLOY_METRICS_URL: "http://alloy:${ALLOY_PORT:?Set ALLOY_PORT in root .env or the shell}/metrics"
-      LOKI_METRICS_URL: "http://loki:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}/metrics"
-      NATS_EXPORTER_METRICS_URL: "http://nats-exporter:${NATS_EXPORTER_PORT:?Set NATS_EXPORTER_PORT in root .env or the shell}/metrics"
+      PROMETHEUS_PORT: ${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}
+      ALLOY_METRICS_URL: http://alloy:${ALLOY_PORT:?Set ALLOY_PORT in root .env or the shell}/metrics
+      LOKI_METRICS_URL: http://loki:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}/metrics
+      NATS_EXPORTER_METRICS_URL: http://nats-exporter:${NATS_EXPORTER_PORT:?Set NATS_EXPORTER_PORT in root .env or the shell}/metrics
+      BMKG_PORT: ${BMKG_PORT:?Set BMKG_PORT in root .env}
+      PVMBG_PORT: ${PVMBG_PORT:?Set PVMBG_PORT in root .env}
+      AGGREGATOR_PORT: ${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env}
+      AUTH_PORT: ${AUTH_PORT:?Set AUTH_PORT in root .env}
+      CLIENT_API_PORT: ${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env}
+      DASHBOARD_PORT: ${DASHBOARD_PORT:?Set DASHBOARD_PORT in root .env}
+      NOTIFIER_PORT: ${NOTIFIER_PORT:?Set NOTIFIER_PORT in root .env}
     healthcheck:
-      test: ["CMD", "monitoring-launch", "probe", "http://localhost:${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}/-/ready"]
+      test:
+      - CMD
+      - monitoring-launch
+      - probe
+      - http://localhost:${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}/-/ready
       interval: 15s
       timeout: 5s
       retries: 3
-    networks: [monitoring]
-
+    networks:
+    - monitoring
+    - backend
   loki:
-    profiles: [monitoring]
+    profiles:
+    - monitoring
     build:
       context: ./monitoring
       target: loki
-    env_file: [./monitoring/loki/.env]
+    env_file:
+    - ./monitoring/loki/.env
     volumes:
-      - ./monitoring/templates:/etc/monitoring/templates:ro
-      - loki-data:/loki
+    - ./monitoring/templates:/etc/monitoring/templates:ro
+    - loki-data:/loki
     environment:
-      LOKI_PORT: "${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}"
+      LOKI_PORT: ${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}
     healthcheck:
-      test: ["CMD", "monitoring-launch", "probe", "http://localhost:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}/ready"]
+      test:
+      - CMD
+      - monitoring-launch
+      - probe
+      - http://localhost:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}/ready
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 30s
-    networks: [monitoring]
-
+    networks:
+    - monitoring
   alloy:
-    profiles: [monitoring]
+    profiles:
+    - monitoring
     build:
       context: ./monitoring
       target: alloy
     environment:
-      ALLOY_PORT: "${ALLOY_PORT:?Set ALLOY_PORT in root .env or the shell}"
-      PROMETHEUS_WRITE_URL: "http://prometheus:${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}/api/v1/write"
-      LOKI_PUSH_URL: "http://loki:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}/loki/api/v1/push"
-      BMKG_HEALTH_URL: "http://bmkg-mock:${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}/health"
-      PVMBG_HEALTH_URL: "http://pvmbg-mock:${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}/health"
-      AGGREGATOR_HEALTH_URL: "http://aggregator:${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}/health"
-      AGGREGATOR_READY_URL: "http://aggregator:${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}/ready"
-      AUTH_HEALTH_URL: "http://auth-service:${AUTH_PORT:?Set AUTH_PORT in root .env or the shell}/health"
-      CLIENT_API_HEALTH_URL: "http://client-api:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}/health"
-      CLIENT_API_READY_URL: "http://client-api:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}/ready"
-      DASHBOARD_HEALTH_URL: "http://consumer-dashboard:${DASHBOARD_PORT:?Set DASHBOARD_PORT in root .env or the shell}/health"
-      DASHBOARD_READY_URL: "http://consumer-dashboard:${DASHBOARD_PORT:?Set DASHBOARD_PORT in root .env or the shell}/ready"
-      NOTIFIER_HEALTH_URL: "http://consumer-notifier:${NOTIFIER_PORT:?Set NOTIFIER_PORT in root .env or the shell}/health"
-      NOTIFIER_READY_URL: "http://consumer-notifier:${NOTIFIER_PORT:?Set NOTIFIER_PORT in root .env or the shell}/ready"
-      REGISTRY_READY_URL: "http://schema-registry:${SCHEMA_REGISTRY_MANAGEMENT_PORT:?Set SCHEMA_REGISTRY_MANAGEMENT_PORT in root .env or the shell}/health/ready"
-      NATS_HEALTH_URL: "http://broker:${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}/healthz"
-      COMPOSE_PROJECT_NAME: "${COMPOSE_PROJECT_NAME:?Compose project name must be resolved}"
+      ALLOY_PORT: ${ALLOY_PORT:?Set ALLOY_PORT in root .env or the shell}
+      PROMETHEUS_WRITE_URL: http://prometheus:${PROMETHEUS_PORT:?Set PROMETHEUS_PORT in root .env or the shell}/api/v1/write
+      LOKI_PUSH_URL: http://loki:${LOKI_PORT:?Set LOKI_PORT in root .env or the shell}/loki/api/v1/push
+      BMKG_HEALTH_URL: http://bmkg-mock:${BMKG_PORT:?Set BMKG_PORT in root .env or the shell}/health
+      PVMBG_HEALTH_URL: http://pvmbg-mock:${PVMBG_PORT:?Set PVMBG_PORT in root .env or the shell}/health
+      AGGREGATOR_HEALTH_URL: http://aggregator:${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}/health
+      AGGREGATOR_READY_URL: http://aggregator:${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}/ready
+      AUTH_HEALTH_URL: http://auth-service:${AUTH_PORT:?Set AUTH_PORT in root .env or the shell}/health
+      CLIENT_API_HEALTH_URL: http://client-api:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}/health
+      CLIENT_API_READY_URL: http://client-api:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}/ready
+      DASHBOARD_HEALTH_URL: http://consumer-dashboard:${DASHBOARD_PORT:?Set DASHBOARD_PORT in root .env or the shell}/health
+      DASHBOARD_READY_URL: http://consumer-dashboard:${DASHBOARD_PORT:?Set DASHBOARD_PORT in root .env or the shell}/ready
+      NOTIFIER_HEALTH_URL: http://consumer-notifier:${NOTIFIER_PORT:?Set NOTIFIER_PORT in root .env or the shell}/health
+      NOTIFIER_READY_URL: http://consumer-notifier:${NOTIFIER_PORT:?Set NOTIFIER_PORT in root .env or the shell}/ready
+      REGISTRY_READY_URL: http://schema-registry:${SCHEMA_REGISTRY_MANAGEMENT_PORT:?Set SCHEMA_REGISTRY_MANAGEMENT_PORT in root .env or the shell}/health/ready
+      NATS_HEALTH_URL: http://broker:${NATS_MONITOR_PORT:?Set NATS_MONITOR_PORT in root .env or the shell}/healthz
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:?Compose project name must be resolved}
     volumes:
-      - ./monitoring/templates:/etc/monitoring/templates:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - alloy-data:/var/lib/alloy/data
+    - ./monitoring/templates:/etc/monitoring/templates:ro
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+    - alloy-data:/var/lib/alloy/data
     healthcheck:
-      test: ["CMD", "monitoring-launch", "probe", "http://localhost:${ALLOY_PORT:?Set ALLOY_PORT in root .env or the shell}/-/ready"]
+      test:
+      - CMD
+      - monitoring-launch
+      - probe
+      - http://localhost:${ALLOY_PORT:?Set ALLOY_PORT in root .env or the shell}/-/ready
       interval: 15s
       timeout: 5s
       retries: 3
-    networks: [monitoring, backend]
-
+    networks:
+    - monitoring
+    - backend
+  auth-db:
+    image: postgres:16-alpine3.24
+    command:
+    - postgres
+    - -p
+    - ${POSTGRES_PORT:?Set POSTGRES_PORT in root .env}
+    env_file:
+    - ./auth-db/.env
+    volumes:
+    - auth-data:/var/lib/postgresql/data
+    - ./deployment/postgres/00-runtime-role.sh:/docker-entrypoint-initdb.d/00-runtime-role.sh:ro
+    - ./auth-service/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    - ./deployment/postgres/99-runtime-grants.sh:/docker-entrypoint-initdb.d/99-runtime-grants.sh:ro
+    environment:
+      PGPORT: ${POSTGRES_PORT:?Set POSTGRES_PORT in root .env}
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+    - auth-store
+  dashboard-db:
+    image: postgres:16-alpine3.24
+    command: &id001
+    - postgres
+    - -p
+    - ${POSTGRES_PORT:?Set POSTGRES_PORT in root .env}
+    env_file:
+    - ./dashboard-db/.env
+    volumes:
+    - dashboard-data:/var/lib/postgresql/data
+    - ./deployment/postgres/00-runtime-role.sh:/docker-entrypoint-initdb.d/00-runtime-role.sh:ro
+    - ./consumer-dashboard/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    - ./deployment/postgres/99-runtime-grants.sh:/docker-entrypoint-initdb.d/99-runtime-grants.sh:ro
+    environment: &id002
+      PGPORT: ${POSTGRES_PORT:?Set POSTGRES_PORT in root .env}
+    healthcheck: &id003
+      test:
+      - CMD-SHELL
+      - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+    - dashboard-store
+  notifier-db:
+    image: postgres:16-alpine3.24
+    command:
+    - postgres
+    - -p
+    - ${POSTGRES_PORT:?Set POSTGRES_PORT in root .env}
+    env_file:
+    - ./notifier-db/.env
+    volumes:
+    - notifier-data:/var/lib/postgresql/data
+    - ./deployment/postgres/00-runtime-role.sh:/docker-entrypoint-initdb.d/00-runtime-role.sh:ro
+    - ./consumer-notifier/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    - ./deployment/postgres/99-runtime-grants.sh:/docker-entrypoint-initdb.d/99-runtime-grants.sh:ro
+    environment:
+      PGPORT: ${POSTGRES_PORT:?Set POSTGRES_PORT in root .env}
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+    - notifier-store
+  dashboard-demo-db:
+    image: postgres:16-alpine3.24
+    command: *id001
+    env_file:
+    - ./dashboard-demo-db/.env
+    volumes:
+    - dashboard-demo-data:/var/lib/postgresql/data
+    - ./deployment/postgres/00-runtime-role.sh:/docker-entrypoint-initdb.d/00-runtime-role.sh:ro
+    - ./consumer-dashboard/schema.sql:/docker-entrypoint-initdb.d/10-schema.sql:ro
+    - ./deployment/postgres/99-runtime-grants.sh:/docker-entrypoint-initdb.d/99-runtime-grants.sh:ro
+    environment: *id002
+    healthcheck: *id003
+    networks:
+    - dashboard-demo-store
+    profiles:
+    - consumer-demo
+  tempo:
+    profiles:
+    - monitoring
+    image: grafana/tempo:2.9.0
+    command:
+    - -config.file=/etc/tempo.yml
+    - -config.expand-env=true
+    environment:
+      TEMPO_PORT: ${TEMPO_PORT:?Set TEMPO_PORT in root .env}
+      OTLP_HTTP_PORT: ${OTLP_HTTP_PORT:?Set OTLP_HTTP_PORT in root .env}
+      OTLP_GRPC_PORT: ${OTLP_GRPC_PORT:?Set OTLP_GRPC_PORT in root .env}
+    volumes:
+    - ./monitoring/tempo.yml:/etc/tempo.yml:ro
+    - tempo-data:/var/tempo
+    networks:
+    - backend
+    - monitoring
 volumes:
-  grafana-data:
-  prometheus-data:
-  loki-data:
-  alloy-data:
-  bmkg-history:
-  pvmbg-history:
-  nats-data:
-  postgres-data:
-  auth-data:
-  registry-data:
-  dashboard-data:
-  notifier-data:
-  dashboard-demo-data:
-
+  grafana-data: null
+  prometheus-data: null
+  loki-data: null
+  alloy-data: null
+  bmkg-history: null
+  pvmbg-history: null
+  nats-data: null
+  postgres-data: null
+  auth-data: null
+  registry-data: null
+  dashboard-data: null
+  notifier-data: null
+  dashboard-demo-data: null
+  tempo-data: null
 networks:
-  backend:
+  backend: null
   store:
-  client:
-  registry:
-  monitoring:
+    internal: true
+  client: null
+  registry: null
+  monitoring: null
+  auth-store:
+    internal: true
+  dashboard-store:
+    internal: true
+  notifier-store:
+    internal: true
+  dashboard-demo-store:
+    internal: true

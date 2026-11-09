@@ -101,7 +101,7 @@ func listenLocalAdmin(path string) (*net.UnixListener, error) {
 }
 
 func (a *app) startLocalAdmin(parent context.Context) (func(), error) {
-	listener, err := listenLocalAdmin(adminSocketPath(a.cfg.DBPath))
+	listener, err := listenLocalAdmin(a.cfg.AdminSocket)
 	if err != nil {
 		return nil, err
 	}
@@ -245,11 +245,11 @@ func runAdminCommand(ctx context.Context, args []string, output io.Writer) error
 	if err := request.validate(); err != nil {
 		return err
 	}
-	values, err := requiredEnv("CONSUMER_DB_PATH")
+	values, err := requiredEnv("CONSUMER_ADMIN_SOCKET")
 	if err != nil {
 		return err
 	}
-	response, err := requestLocalResume(ctx, adminSocketPath(values["CONSUMER_DB_PATH"]), request)
+	response, err := requestLocalResume(ctx, values["CONSUMER_ADMIN_SOCKET"], request)
 	if err != nil {
 		return err
 	}

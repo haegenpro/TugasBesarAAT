@@ -16,6 +16,8 @@ import (
 )
 
 type Config struct {
+	Replicas         int
+	MaxBytes         int64
 	LifecycleStream  string
 	LifecycleSubject string
 	LifecycleMaxAge  time.Duration
@@ -109,7 +111,22 @@ func loadConfig() (Config, error) {
 	if dlqAge < lifecycleAge {
 		return Config{}, fmt.Errorf("DLQ retention must cover lifecycle retention")
 	}
-	return Config{
+	replicas := 1
+	maxBytes := int64(256 << 20)
+	if raw := os.Getenv("NATS_REPLICAS"); raw != "" {
+		replicas, err = strconv.Atoi(raw)
+		if err != nil || replicas < 1 || replicas > 5 {
+			return Config{}, errors.New("NATS_REPLICAS must be between 1 and 5")
+		}
+	}
+	if raw := os.Getenv("NATS_MAX_BYTES"); raw != "" {
+		maxBytes, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || maxBytes < 1 {
+			return Config{}, errors.New("NATS_MAX_BYTES must be positive")
+		}
+	}
+
+	return Config{Replicas: replicas, MaxBytes: maxBytes,
 		LifecycleStream: lifecycleStream, LifecycleSubject: lifecycleSubject, LifecycleMaxAge: lifecycleAge,
 		NATSURL:       natsURL,
 		StreamName:    streamName,
@@ -126,7 +143,7 @@ func ensureStream(parent context.Context, js jetstream.JetStream, cfg Config) er
 	defer cancel()
 
 	streamConfig := jetstream.StreamConfig{
-		Name: cfg.StreamName,
+		Name: cfg.StreamName, Replicas: cfg.Replicas, MaxBytes: cfg.MaxBytes,
 		Subjects: []string{
 			cfg.StreamSubject,
 		},
@@ -147,14 +164,14 @@ func ensureStream(parent context.Context, js jetstream.JetStream, cfg Config) er
 	brokerLog(ctx, slog.LevelInfo, "stream ready", "stream", info.Config.Name, "subjects", info.Config.Subjects, "storage", info.Config.Storage, "max_age", info.Config.MaxAge.String())
 	if cfg.LifecycleStream != "" {
 		if _, err = brokerCall(ctx, "lifecycle_stream_create_or_update", func() (jetstream.Stream, error) {
-			return js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{Name: cfg.LifecycleStream, Subjects: []string{cfg.LifecycleSubject}, Storage: jetstream.FileStorage, MaxAge: cfg.LifecycleMaxAge})
+			return js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{Name: cfg.LifecycleStream, Replicas: cfg.Replicas, MaxBytes: cfg.MaxBytes, Subjects: []string{cfg.LifecycleSubject}, Storage: jetstream.FileStorage, MaxAge: cfg.LifecycleMaxAge})
 		}); err != nil {
 			return fmt.Errorf("create lifecycle stream: %w", err)
 		}
 	}
 	_, err = brokerCall(ctx, "dlq_stream_create_or_update", func() (jetstream.Stream, error) {
 		return js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name: cfg.DLQStream, Subjects: []string{cfg.DLQPrefix + ".>"},
+			Name: cfg.DLQStream, Replicas: cfg.Replicas, MaxBytes: cfg.MaxBytes, Subjects: []string{cfg.DLQPrefix + ".>"},
 			Storage: jetstream.FileStorage, MaxAge: cfg.DLQMaxAge,
 			Discard: jetstream.DiscardNew, DiscardNewPerSubject: true, MaxMsgsPerSubject: 1,
 		})
@@ -192,7 +209,7 @@ func checkStream(parent context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("inspect stream %q: %w", cfg.StreamName, err)
 	}
-	if info.Config.Storage != jetstream.FileStorage || info.Config.MaxAge != cfg.StreamMaxAge ||
+	if (cfg.Replicas > 0 && info.Config.Replicas != cfg.Replicas) || (cfg.MaxBytes > 0 && info.Config.MaxBytes != cfg.MaxBytes) || info.Config.Storage != jetstream.FileStorage || info.Config.MaxAge != cfg.StreamMaxAge ||
 		len(info.Config.Subjects) != 1 || info.Config.Subjects[0] != cfg.StreamSubject {
 		return fmt.Errorf("stream %q has unexpected configuration", cfg.StreamName)
 	}
@@ -205,7 +222,7 @@ func checkStream(parent context.Context, cfg Config) error {
 		if err != nil {
 			return err
 		}
-		if info.Config.Storage != jetstream.FileStorage || info.Config.MaxAge != cfg.LifecycleMaxAge || len(info.Config.Subjects) != 1 || info.Config.Subjects[0] != cfg.LifecycleSubject {
+		if (cfg.Replicas > 0 && info.Config.Replicas != cfg.Replicas) || (cfg.MaxBytes > 0 && info.Config.MaxBytes != cfg.MaxBytes) || info.Config.Storage != jetstream.FileStorage || info.Config.MaxAge != cfg.LifecycleMaxAge || len(info.Config.Subjects) != 1 || info.Config.Subjects[0] != cfg.LifecycleSubject {
 			return fmt.Errorf("unexpected lifecycle stream configuration")
 		}
 	}
@@ -217,7 +234,7 @@ func checkStream(parent context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if dlqInfo.Config.Storage != jetstream.FileStorage || dlqInfo.Config.MaxAge != cfg.DLQMaxAge ||
+	if (cfg.Replicas > 0 && dlqInfo.Config.Replicas != cfg.Replicas) || (cfg.MaxBytes > 0 && dlqInfo.Config.MaxBytes != cfg.MaxBytes) || dlqInfo.Config.Storage != jetstream.FileStorage || dlqInfo.Config.MaxAge != cfg.DLQMaxAge ||
 		dlqInfo.Config.Discard != jetstream.DiscardNew || !dlqInfo.Config.DiscardNewPerSubject || dlqInfo.Config.MaxMsgsPerSubject != 1 ||
 		len(dlqInfo.Config.Subjects) != 1 || dlqInfo.Config.Subjects[0] != cfg.DLQPrefix+".>" {
 		return fmt.Errorf("DLQ stream %q has unexpected configuration", cfg.DLQStream)

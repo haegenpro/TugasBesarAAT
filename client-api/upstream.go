@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,20 +88,29 @@ func joinURL(base, path string) string {
 
 func filterQuery(c *gin.Context) (url.Values, error) {
 	query := url.Values{}
-	for _, key := range []string{"since", "hazard_type", "severity", "area_name"} {
+	for _, key := range []string{"since", "hazard_type", "severity", "area_name", "limit", "cursor"} {
 		if value := c.Query(key); value != "" {
 			query.Set(key, value)
 		}
+	}
+	if raw := query.Get("limit"); raw != "" {
+		n, e := strconv.Atoi(raw)
+		if e != nil || n < 1 || n > 1000 {
+			return nil, errors.New("limit must be between 1 and 1000")
+		}
+	}
+	if len(query.Get("cursor")) > 2048 {
+		return nil, errors.New("invalid cursor")
 	}
 	if since := query.Get("since"); since != "" {
 		if _, err := time.Parse(time.RFC3339Nano, since); err != nil {
 			return nil, errors.New("since must be an ISO 8601 timestamp")
 		}
 	}
-	if value := query.Get("hazard_type"); value != "" && value != "SEISMIC" && value != "VOLCANIC" {
+	if value := query.Get("hazard_type"); value != "" && !validHazardType(value) {
 		return nil, errors.New("invalid hazard_type")
 	}
-	if value := query.Get("severity"); value != "" && value != "NORMAL" && value != "WASPADA" && value != "SIAGA" && value != "AWAS" {
+	if value := query.Get("severity"); value != "" && !validSeverity(value) {
 		return nil, errors.New("invalid severity")
 	}
 	return query, nil

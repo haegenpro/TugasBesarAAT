@@ -4,6 +4,7 @@ import (
 	"bmkg-mock/internal/avrowire"
 	"bmkg-mock/internal/domain"
 	"bmkg-mock/internal/middleware"
+	"bmkg-mock/internal/platform"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -31,7 +32,7 @@ func (h *Handler) History(c *gin.Context) {
 	h.delay()
 	entity := c.Query("entity")
 	if entity != "seismic-events" && entity != "tsunami-warnings" {
-		c.JSON(400, gin.H{"error": "invalid entity"})
+		c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid entity")})
 		return
 	}
 	after := int64(0)
@@ -40,24 +41,24 @@ func (h *Handler) History(c *gin.Context) {
 	if v := c.Query("after"); v != "" {
 		after, err = strconv.ParseInt(v, 10, 64)
 		if err != nil || after < 0 {
-			c.JSON(400, gin.H{"error": "invalid cursor"})
+			c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid cursor")})
 			return
 		}
 	}
 	if v := c.Query("limit"); v != "" {
 		limit, err = strconv.Atoi(v)
 		if err != nil || limit < 1 || limit > 1000 {
-			c.JSON(400, gin.H{"error": "invalid limit"})
+			c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid limit")})
 			return
 		}
 	}
 	if h.Archive == nil {
-		c.JSON(503, gin.H{"error": "archive unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive unavailable")})
 		return
 	}
 	page, err := h.Archive.Read(entity, after, limit)
 	if err != nil {
-		c.JSON(503, gin.H{"error": "archive unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive unavailable")})
 		return
 	}
 
@@ -71,12 +72,12 @@ func (h *Handler) History(c *gin.Context) {
 			value = &domain.TsunamiWarning{}
 		}
 		if err := json.Unmarshal(page.Data[i].Payload, value); err != nil {
-			c.JSON(503, gin.H{"error": "archive invalid"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive invalid")})
 			return
 		}
 		b, err := json.Marshal(value)
 		if err != nil {
-			c.JSON(503, gin.H{"error": "archive invalid"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive invalid")})
 			return
 		}
 		page.Data[i].Payload = b
@@ -84,7 +85,7 @@ func (h *Handler) History(c *gin.Context) {
 
 	if strings.Contains(c.GetHeader("Accept"), avrowire.MediaType) {
 		if h.Registry == nil {
-			c.JSON(503, gin.H{"error": "schema registry unavailable"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "schema registry unavailable")})
 			return
 		}
 		live, name := seismicSchema, "SeismicHistoryPage"
@@ -93,17 +94,17 @@ func (h *Handler) History(c *gin.Context) {
 		}
 		text, err := avrowire.HistorySchema(live, name)
 		if err != nil {
-			c.JSON(503, gin.H{"error": "history schema invalid"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "history schema invalid")})
 			return
 		}
 		schema, err := h.Registry.Register(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), "bmkg."+entity+"-history-value", text)
 		if err != nil {
-			c.JSON(503, gin.H{"error": "history schema unavailable"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "history schema unavailable")})
 			return
 		}
 		body, err := avrowire.EncodeJSON(schema, page)
 		if err != nil {
-			c.JSON(503, gin.H{"error": "history encoding failed"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "history encoding failed")})
 			return
 		}
 		c.Data(200, avrowire.MediaType, body)

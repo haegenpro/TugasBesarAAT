@@ -8,6 +8,7 @@ import (
 	"pvmbg-mock/internal/domain"
 	"pvmbg-mock/internal/history"
 	"pvmbg-mock/internal/middleware"
+	"pvmbg-mock/internal/platform"
 	"strconv"
 	"strings"
 )
@@ -25,17 +26,17 @@ func (h *Handler) AttachArchive(a *history.Archive) error {
 }
 func (h *Handler) History(c *gin.Context) {
 	if h.Toggles.Outage() {
-		c.JSON(503, gin.H{"error": "pvmbg outage in progress"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "pvmbg outage in progress")})
 		return
 	}
 	h.randomDelay()
 	if h.Toggles.Outage() {
-		c.JSON(503, gin.H{"error": "pvmbg outage in progress"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "pvmbg outage in progress")})
 		return
 	}
 	entity := c.Query("entity")
 	if entity != "volcanic-reports" {
-		c.JSON(400, gin.H{"error": "invalid entity"})
+		c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid entity")})
 		return
 	}
 	after := int64(0)
@@ -44,19 +45,19 @@ func (h *Handler) History(c *gin.Context) {
 	if v := c.Query("after"); v != "" {
 		after, err = strconv.ParseInt(v, 10, 64)
 		if err != nil || after < 0 {
-			c.JSON(400, gin.H{"error": "invalid cursor"})
+			c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid cursor")})
 			return
 		}
 	}
 	if v := c.Query("limit"); v != "" {
 		limit, err = strconv.Atoi(v)
 		if err != nil || limit < 1 || limit > 1000 {
-			c.JSON(400, gin.H{"error": "invalid limit"})
+			c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid limit")})
 			return
 		}
 	}
 	if h.Archive == nil {
-		c.JSON(503, gin.H{"error": "archive unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive unavailable")})
 		return
 	}
 	// Keep each history page on one schema view while a toggle is in flight.
@@ -64,13 +65,13 @@ func (h *Handler) History(c *gin.Context) {
 	defer h.schemaMu.RUnlock()
 	page, err := h.Archive.Read(entity, after, limit)
 	if err != nil {
-		c.JSON(503, gin.H{"error": "archive unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive unavailable")})
 		return
 	}
 	for i := range page.Data {
 		var r domain.VolcanicReport
 		if err := json.Unmarshal(page.Data[i].Payload, &r); err != nil {
-			c.JSON(503, gin.H{"error": "archive invalid"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive invalid")})
 			return
 		}
 		b, _ := json.Marshal(r.WireCopy(h.Toggles.ShowConfidence()))
@@ -78,22 +79,22 @@ func (h *Handler) History(c *gin.Context) {
 	}
 	if strings.Contains(c.GetHeader("Accept"), avrowire.MediaType) {
 		if h.Registry == nil {
-			c.JSON(503, gin.H{"error": "schema registry unavailable"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "schema registry unavailable")})
 			return
 		}
 		text, err := volcanicHistorySchema(h.Toggles.ShowConfidence())
 		if err != nil {
-			c.JSON(503, gin.H{"error": "history schema invalid"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "history schema invalid")})
 			return
 		}
 		schema, err := h.Registry.Register(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), volcanicHistorySubject, text)
 		if err != nil {
-			c.JSON(503, gin.H{"error": "history schema unavailable"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "history schema unavailable")})
 			return
 		}
 		body, err := avrowire.EncodeJSON(schema, page)
 		if err != nil {
-			c.JSON(503, gin.H{"error": "history encoding failed"})
+			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "history encoding failed")})
 			return
 		}
 		c.Data(200, avrowire.MediaType, body)

@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -12,29 +11,13 @@ import (
 	"aggregator/internal/domain"
 	"aggregator/internal/mapping"
 	"aggregator/internal/middleware"
+	"aggregator/internal/platform"
 	"aggregator/internal/timeutil"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"net/http"
 )
 
-//go:embed lifecycle.sql
-var lifecycleMigration string
-
-func (s *Store) Migrate(ctx context.Context) error {
-	ctx = middleware.EnsureCorrelationID(ctx)
-	tx, err := s.Pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(4031001)`); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, lifecycleMigration); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
 func queueLifecycle(ctx context.Context, tx pgx.Tx, e domain.LifecycleEvent) error {
 	e.EventID = uuid.NewString()
 	e.PublishedAt = domain.Now()
@@ -50,7 +33,9 @@ func queueLifecycle(ctx context.Context, tx pgx.Tx, e domain.LifecycleEvent) err
 	if _, err = tx.Exec(ctx, `INSERT INTO report_lifecycle_events(event_id,record_id,revision,event_payload) VALUES ($1,$2,$3,$4)`, e.EventID, e.RecordID, e.Revision, b); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO report_lifecycle_outbox(event_id) VALUES ($1)`, e.EventID)
+	headers := http.Header{}
+	platform.Inject(ctx, headers)
+	_, err = tx.Exec(ctx, `INSERT INTO report_lifecycle_outbox(event_id,traceparent,tracestate) VALUES ($1,$2,$3)`, e.EventID, headers.Get("traceparent"), headers.Get("tracestate"))
 	return err
 }
 
@@ -105,7 +90,9 @@ func (s *Store) saveHazardTx(ctx context.Context, tx pgx.Tx, e domain.HazardEven
 		if err != nil {
 			return e, false, err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO hazard_outbox(hazard_id,event_payload,correlation_id) VALUES($1,$2,$3)`, e.HazardID, b, cid)
+		headers := http.Header{}
+		platform.Inject(ctx, headers)
+		_, err = tx.Exec(ctx, `INSERT INTO hazard_outbox(hazard_id,event_payload,correlation_id,traceparent,tracestate) VALUES($1,$2,$3,$4,$5)`, e.HazardID, b, cid, headers.Get("traceparent"), headers.Get("tracestate"))
 		if err != nil {
 			return e, false, err
 		}

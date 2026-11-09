@@ -4,12 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/nats-io/nats.go/jetstream"
-	"path/filepath"
 	"testing"
 )
 
 func TestCorrectionBeforeCanonicalCannotRegressProjection(t *testing.T) {
-	db, err := openDB(filepath.Join(t.TempDir(), "consumer.db"))
+	db, err := openDB(testDSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +30,7 @@ func TestCorrectionBeforeCanonicalCannotRegressProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	var b string
-	if err = db.QueryRow(`SELECT payload FROM records WHERE hazard_id=?`, h.HazardID).Scan(&b); err != nil {
+	if err = db.QueryRow(`SELECT payload FROM records WHERE hazard_id=$1`, h.HazardID).Scan(&b); err != nil {
 		t.Fatal(err)
 	}
 	var got map[string]any

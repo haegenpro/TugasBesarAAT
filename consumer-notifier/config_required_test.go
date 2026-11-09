@@ -11,7 +11,8 @@ func TestConfigurationRequiresExplicitValues(t *testing.T) {
 	values := map[string]string{
 		"CONSUMER_ROLE":          "dashboard",
 		"CONSUMER_PORT":          "8091",
-		"CONSUMER_DB_PATH":       "/data/dashboard.db",
+		"DATABASE_URL":           "postgres://app:example@localhost/dashboard?sslmode=disable",
+		"CONSUMER_ADMIN_SOCKET":  "/data/admin/consumer.sock",
 		"NATS_URL":               "nats://broker:4222",
 		"NATS_STREAM":            "HAZARDS",
 		"NATS_SUBJECT":           "hazard.events",

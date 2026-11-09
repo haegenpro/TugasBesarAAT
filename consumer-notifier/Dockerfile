@@ -6,7 +6,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /consumer .
 
 FROM alpine:3.24
-RUN addgroup -S app && adduser -S app -G app && mkdir /data && chown app:app /data
+RUN addgroup -S -g 10001 app && adduser -S -u 10001 app -G app && mkdir /data && chown app:app /data
 COPY --from=build /consumer /usr/local/bin/consumer
 USER app
 ENTRYPOINT ["/usr/local/bin/consumer"]

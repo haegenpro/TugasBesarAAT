@@ -1,9 +1,9 @@
 # Monitoring
 
-All five use the optional `monitoring` Compose profile. A plain
+All six use the optional `monitoring` Compose profile. A plain
 `docker compose up -d --build` starts only the application services.
 
-Five containers provide continuous endpoint history, broker metrics, and searchable logs:
+Six containers provide continuous endpoint history, broker metrics, and searchable logs:
 
 | Service | Pinned upstream image | Responsibility |
 | --- | --- | --- |
@@ -11,11 +11,11 @@ Five containers provide continuous endpoint history, broker metrics, and searcha
 | Prometheus | `prom/prometheus:v3.15.0` | Metrics storage, independent collector scrapes |
 | Loki | `grafana/loki:3.7.8` | Logs storage and retention |
 | Alloy | `grafana/alloy:v1.20.1` | Embedded Blackbox probes and Docker log collection |
+| Tempo | `grafana/tempo:2.9.0` | OTLP HTTP/gRPC ingestion and trace storage |
 | NATS exporter | `natsio/prometheus-nats-exporter:0.20.2` | Read-only NATS/JetStream monitoring metrics |
 
 The multi-stage Dockerfile builds only the small Go startup launcher, then copies
-it into each official image. There is no OpenTelemetry SDK, separate Blackbox
-container, or application instrumentation in this version.
+it into each official image. Application services now use OpenTelemetry and expose Prometheus RED metrics. Tempo receives bounded asynchronous exports directly; Alloy continues to collect logs and run its embedded Blackbox probes.
 
 ## Required configuration
 
@@ -263,3 +263,7 @@ check config`, `loki -verify-config=true`, and `alloy validate` inside their
 containers. The generated configurations live in `/tmp/monitoring`; Grafana
 provisioning lives under `/tmp/monitoring/provisioning`. Recreate affected
 containers after changing environment or templates.
+
+## Application performance and trace dashboard
+
+The monitoring profile also provisions **AAT Application Performance**. Prometheus scrapes all seven application `/metrics` endpoints; the URLs follow root port configuration. Use Grafana Explore with the Tempo datasource and an HTTP `X-Trace-ID` to inspect a request. Ingestion traces continue through durable outbox dispatch and NATS consumers. Application/database request labels are bounded; no SQL parameters, token values or DSNs are trace attributes. Tempo stores data in `tempo-data`; its ports remain internal.

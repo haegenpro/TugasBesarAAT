@@ -4,6 +4,14 @@ This repository holds everything for Milestone 1, which includes the BMKG and PV
 the BNPB Aggregator and its Canonical Store, the Client API, the Auth Service,
 an interactive downstream client, and two durable broker consumers.
 
+The M1 preparation refactor preserves these service boundaries. Auth and both
+consumers now own separate PostgreSQL instances; the two source history archives
+remain SQLite. This checkout starts from fresh volumes: no existing-data migration
+is provided. Sharding, replication, leader election/fencing, Kubernetes, additional
+M2 sources and the M2 Audit API remain future work. See the
+[preparation verification report](docs/Preparation%20Verification.md) for measured
+results and limitations.
+
 ## Services
 
 | Service | Directory | Example host port, or internal port | Purpose |
@@ -13,11 +21,14 @@ an interactive downstream client, and two durable broker consumers.
 | Aggregator | [`aggregator/`](aggregator/) | internal (8080) | Polls both mocks, maps to canonical `HazardEvent`, owns the Store, publishes to NATS, serves the internal read API |
 | Canonical Store | [`store/`](store/) | internal (5432) | PostgreSQL 16, accessed only by the Aggregator |
 | Schema Registry | [`registry/`](registry/) | internal (8080) | Apicurio Registry with its own persistent PostgreSQL database |
-| Auth Service | [`auth-service/`](auth-service/) | internal (8083) | Owns persistent sessions, issues and rotates tokens |
+| Auth Service | [`auth-service/`](auth-service/) | internal (8083) | Owns PostgreSQL sessions, issues and rotates tokens |
 | Client API | [`client-api/`](client-api/) | 18080 | Authenticated downstream reads and server-side field projection |
 | Client TUI | [`client-tui/`](client-tui/) | interactive | One terminal app for Media, Field, and Internal identities |
-| Dashboard consumer | [`consumer-dashboard/`](consumer-dashboard/) | internal (8091) | Durable JetStream subscription and SQLite hazard projection |
-| Notifier consumer | [`consumer-notifier/`](consumer-notifier/) | internal (8092) | Durable JetStream subscription and simulated notification ledger |
+| Dashboard consumer | [`consumer-dashboard/`](consumer-dashboard/) | internal (8091) | Durable JetStream subscription and PostgreSQL hazard projection |
+| Notifier consumer | [`consumer-notifier/`](consumer-notifier/) | internal (8092) | Durable JetStream subscription and PostgreSQL simulated notification ledger |
+| Auth PostgreSQL | `auth-db` in Compose | internal (5432) | Sessions, owned only by Auth |
+| Dashboard PostgreSQL | `dashboard-db` in Compose | internal (5432) | Projection and reliability state, owned only by Dashboard |
+| Notifier PostgreSQL | `notifier-db` in Compose | internal (5432) | Projection and reliability state, owned only by Notifier |
 
 Every Go service has its own `go.mod`, so there is no shared workspace module,
 and its own multi-stage Dockerfile that builds on `golang:1.27.1-alpine3.24`
@@ -45,19 +56,22 @@ Here is how the broker is set up:
 
 ## Continuous monitoring
 
-Grafana, Prometheus, Loki, Alloy, and a NATS exporter are optional services in the
+Grafana, Prometheus, Loki, Alloy, NATS exporter and Tempo are optional services in the
 `monitoring` Compose profile. Enable them with
 `docker compose --profile monitoring up -d --build`. Alloy embeds
 Blackbox probing for existing health/readiness endpoints and collects this Compose
 project's Docker logs. Grafana provides endpoint history, logged outbound latency,
 correlation-ID search, DLQ archive size, consumer delivery metrics, and alerts.
-The NATS exporter reads broker monitoring endpoints without consuming messages. No OTel or separate
-Blackbox container is required.
+The NATS exporter reads broker monitoring endpoints without consuming messages.
+All seven application HTTP services expose `/metrics` and use OpenTelemetry spans.
+Tempo stores traces; Grafana also provisions **AAT Application Performance**.
+Alloy supplies embedded Blackbox probes, so no separate Blackbox container is needed.
+Trace export is bounded and asynchronous; monitoring failure does not block business requests.
 
 Each monitoring image adds a small startup validator to its pinned official image.
 Missing/empty/whitespace-only required settings are reported together by name;
-there are no environment fallbacks. Create the three monitoring service `.env`
-files from their sections in `.env.example`, plus the root deployment port plan.
+their required configuration has no environment fallbacks. The setup generator
+creates the three monitoring `.env` files and root deployment settings, including Tempo ports.
 See [Monitoring setup and evidence](monitoring/README.md) for all required settings,
 access, retention, dashboard interpretation, and verification.
 
@@ -82,7 +96,7 @@ bmkg-mock/        # Go module, :8081
 pvmbg-mock/       # Go module, :8082
 aggregator/       # Go module, :8080 (internal read API)
 store/            # init.sql + Store README (Postgres, Aggregator-owned)
-auth-service/     # Go module, :8083 (internal token service + SQLite)
+auth-service/     # Go module, :8083 (internal token service + PostgreSQL)
 client-api/       # Go module, :8080 (public API)
 client-tui/       # Go module, interactive terminal client
 broker/           # NATS JetStream + stream initializer
@@ -90,7 +104,8 @@ registry/         # Apicurio Registry + separate persistent database
 consumer-dashboard/ # durable dashboard projection
 consumer-notifier/  # durable simulated notifications
 scripts/          # smoke test, isolation demo, k6 load test
-monitoring/      # five monitoring wrappers, configuration, provisioned dashboard
+monitoring/      # five monitoring wrappers + Tempo, configuration, dashboards
+deployment/      # PostgreSQL bootstrap role/grant scripts
 docker-compose.yml
 .env.example
 docs/             # Team contract docs (wire format, stack, deployment)
@@ -98,14 +113,30 @@ docs/             # Team contract docs (wire format, stack, deployment)
 
 ## Quick start: Docker Compose
 
+Untuk persiapan presentasi, lihat [Panduan Demo M1](docs/Panduan%20Demo%20M1.md)
+yang memuat urutan demo, kriteria P1–P5, pembagian waktu, dan alat bantu operator.
+Jalankan `node scripts/m1-demo.mjs --help` untuk daftar perintah. Pada checkout
+tanpa konfigurasi, `python3 scripts/setup-env.py` membuat `.env` lokal dengan
+kredensial acak yang konsisten tanpa menimpa file yang sudah ada.
+
 Start from a fresh clone with Docker Engine / Docker Desktop running (Linux
-containers), Docker Compose v2 or newer, Git, and PowerShell 5.1 or newer.
+containers), Docker Compose v2 or newer, Git, and Python 3. PowerShell 5.1+
+is needed only for the Windows command variants.
 Internet access is needed for the first image build. Go is built inside Docker;
 install Go 1.27.1 only to run the native unit tests below. Node.js 18+ is needed
 for the evidence probes and JavaScript tests. Bash demos additionally require
 curl and Python 3; examples using `jq` require jq.
 
-Open a terminal in the cloned repository root, then run:
+Open a terminal in the cloned repository root, then run on Linux/macOS/Git Bash:
+
+```bash
+python3 scripts/setup-env.py
+docker compose --profile monitoring --profile demo --profile tools --profile consumer-demo config --quiet
+docker compose up -d --build --wait --wait-timeout 300
+docker compose ps
+```
+
+PowerShell (the wrapper also requires Python 3):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-env.ps1
@@ -114,19 +145,24 @@ docker compose up -d --build --wait --wait-timeout 300
 docker compose ps
 ```
 
-The setup script splits `.env.example` into root `.env` and all fourteen required
-service files, including shared credentials, source archive paths, lifecycle
-streams, distinct consumer identities, and monitoring settings. It preserves
-existing files and prints only filenames. Generated credentials are demo values.
-If some files already exist, check the shared values listed below before booting.
-For an existing `aggregator/.env`, also ensure `AGGREGATOR_ADMIN_TOKEN`,
-`BMKG_SEISMIC_READER_SCHEMA`, `BMKG_TSUNAMI_READER_SCHEMA`, and
-`PVMBG_READER_SCHEMA` are present; the script does not update existing files.
-Linux/macOS users can run the script with `pwsh -File scripts/setup-env.ps1`, or
-create the files manually from the template and tables below.
+The generator creates **20 local environment files**, including database bootstrap
+configuration and the optional third subscriber. It generates random, matching
+credentials and prints filenames without their contents. Existing complete
+configuration is preserved. A partial set is rejected without writing files,
+because generating only the missing files could produce mismatched secrets.
+
+For an older checkout that will start with fresh volumes, run
+`python3 scripts/setup-env.py --fresh`. This moves existing local configuration to
+the gitignored `.local-config-backup/<UTC timestamp>/` directory and generates a
+coherent replacement set. The PowerShell wrapper supports initial generation;
+invoke Python directly for `--fresh`. Do not regenerate credentials against data
+you intend to keep: environment changes do not alter users in existing databases.
+No transfer from the former Auth/consumer SQLite databases or upgrade of old
+canonical schemas is included. All application schemas initialize only on empty
+volumes.
 
 `config --quiet` must exit successfully; it validates configuration without
-printing secrets. `up --wait` must finish successfully with the eleven application
+printing secrets. `up --wait` must finish successfully with the fourteen application
 containers running. Then load the host URLs below and check Client API `/ready`
 (HTTP 200); consumer `/ready` and record checks in the test runbook establish
 that subscriptions are processing. On failure, inspect `docker compose logs
@@ -137,7 +173,7 @@ consumer-demo down -v` deletes this project's persisted data; use only when that
 reset is intended.
 
 Alternatively, create root `.env` with the deployment port plan and Grafana bind address,
-then the fourteen service env files by hand. Shared listener ports and URLs are
+then the nineteen service/database env files by hand. Shared listener ports and URLs are
 injected by Compose; the root template lists the complete port plan.
 Use the root `.env.example` together with the tables below, and copy into each file only
 the variables that service needs, including the shared ones the template
@@ -147,7 +183,7 @@ points out. Then, from the repository root, run:
 docker compose up -d --build
 ```
 
-This starts the eleven application containers. To include the five monitoring
+This starts fourteen application/database containers. To include the six monitoring
 containers, run:
 
 ```powershell
@@ -157,7 +193,7 @@ docker compose --profile monitoring up -d --build
 To stop monitoring while keeping the application running:
 
 ```powershell
-docker compose --profile monitoring stop grafana prometheus loki alloy nats-exporter
+docker compose --profile monitoring stop grafana prometheus loki alloy nats-exporter tempo
 ```
 
 Starting without the profile does not stop monitoring containers that are already
@@ -178,10 +214,11 @@ A few things are worth knowing about startup:
 - Changes to `broker/nats.conf` take effect after you recreate the broker
   with `docker compose up -d --force-recreate broker`. You do not need to
   rebuild its image.
-- Postgres runs `init.sql` on a brand new volume. Aggregator applies the
-  idempotent lifecycle migration to existing canonical schemas; no volume reset
-  is required for these additions. Older installations missing the original
-  canonical tables still need their base schema initialized.
+- Canonical PostgreSQL runs `store/init.sql` on a fresh volume. Auth and consumer
+  databases run their service's `schema.sql`. Bootstrap scripts create restricted
+  runtime roles and grant DML on existing tables; application startup performs no
+  DDL. PostgreSQL initialization does not run again on a populated volume.
+  The third-party Registry manages its own schema in its separate database.
 - There are no Compose startup dependencies. With valid configuration and
   writable service-owned storage, `docker compose up -d --build <service>`
   starts that service without starting its upstreams. External dependencies
@@ -236,23 +273,28 @@ curl "${API_URL}/ready"    # auth and aggregator readiness
 
 ### Per-service environment files
 
-The root `.env.example` is the only template. Create the following
-gitignored files yourself, each with just the variables its service needs:
+The root `.env.example` is the combined template. The generator creates the
+following gitignored files, each with only the variables its service needs:
 
 | File | Used by | Configuration |
 | --- | --- | --- |
-| `.env` | Compose | Internal and published ports plus Grafana bind address; copy the root section |
+| `.env` | Compose | Deployment ports, Grafana bind address and operational budgets; root template section |
 | `bmkg-mock/.env` | BMKG mock | API key, delay, event interval, archive path |
 | `pvmbg-mock/.env` | PVMBG mock | Source/admin tokens, delays, report interval, archive path |
 | `broker/.env` | Broker and optional broker-init tool | Streams, subjects, retention |
-| `store/.env` | PostgreSQL | Database name, user, password |
+| `store/.env` | Canonical PostgreSQL | Database name, bootstrap credentials and separate runtime credentials |
+| `auth-db/.env` | Auth PostgreSQL | Auth database, bootstrap credentials and runtime credentials |
+| `dashboard-db/.env` | Dashboard PostgreSQL | Dashboard database, bootstrap credentials and runtime credentials |
+| `notifier-db/.env` | Notifier PostgreSQL | Notifier database, bootstrap credentials and runtime credentials |
+| `dashboard-demo-db/.env` | Optional demo PostgreSQL | Separate demo database and credentials |
+| `consumer-dashboard-demo/.env` | Optional third subscriber | Own runtime DSN, durable identity, admin socket and stream settings |
 | `registry/.env` | Schema Registry and its database | Separate database credentials and Apicurio storage settings |
 | `aggregator/.env` | Aggregator | Source credentials, database URL, NATS stream settings, polling |
-| `auth-service/.env` | Auth Service | Three client credentials, internal key, TTLs, SQLite path |
+| `auth-service/.env` | Auth Service | Three client credentials, internal key, TTLs and runtime `DATABASE_URL` |
 | `client-api/.env` | Client API | Internal key, request limits |
 | `client-tui/.env` | Interactive TUI | Public client IDs, no login secrets |
-| `consumer-dashboard/.env` | Dashboard consumer | Role, durable name, SQLite path, stream settings, DLQ subject |
-| `consumer-notifier/.env` | Notifier consumer | Role, durable name, SQLite path, stream settings, DLQ subject |
+| `consumer-dashboard/.env` | Dashboard consumer | Role, runtime `DATABASE_URL`, admin socket, durable name, streams and DLQ subject |
+| `consumer-notifier/.env` | Notifier consumer | Role, runtime `DATABASE_URL`, admin socket, durable name, streams and DLQ subject |
 | `monitoring/grafana/.env` | Grafana | Administrator credentials and DLQ stream name |
 | `monitoring/prometheus/.env` | Prometheus | Required metrics retention |
 | `monitoring/loki/.env` | Loki | Required log retention and private gRPC port |
@@ -277,12 +319,16 @@ Several values appear in more than one file and must match:
 - The client IDs are in Auth and in the TUI.
 - NATS streams and subjects match across Broker, Aggregator, and consumers.
   Compose generates their NATS URLs from the root port plan.
-- The Aggregator's `DATABASE_URL` is built from the credentials in
-  `store/.env`. URI-encode the user, password, or database name if they
-  contain special characters.
+- Each application's `DATABASE_URL` uses `APP_USER`/`APP_PASSWORD` from its
+  owning database's env file, rather than `POSTGRES_USER`/`POSTGRES_PASSWORD`.
+  URI-encode user/password/database components containing special characters.
+  The generator keeps the port interpolated from root `POSTGRES_PORT`.
+- Runtime application accounts cannot create tables, roles or databases.
+  Bootstrap/admin credentials stay in the database containers. Each application's
+  private storage network contains that owner and its database only.
 
-If you change the PostgreSQL credentials later, update `store/.env` and the
-Aggregator's URL together, and update the existing database as well.
+If you change PostgreSQL credentials later, update the owning database's env
+file and its application's URL together, and update the existing database as well.
 Recreating the container does not change users in a volume that is already
 initialized.
 
@@ -299,7 +345,7 @@ must be set explicitly:
 | NATS monitoring | internal only | No default host mapping | 8222 |
 | Grafana | 13000 | `GRAFANA_HOST_PORT` (also requires `GRAFANA_BIND_ADDRESS`) | 3000 |
 
-Copy the complete **root deployment ports** section of `.env.example` into a root `.env`, or export those variables in
+Copy the complete **root deployment ports and operational budgets** section of `.env.example` into a root `.env`, or export those variables in
 your shell. Compose uses these variables when creating containers; putting
 a duplicate managed port in a service's `.env` is overridden by Compose. Compose refuses
 to run if any of these settings is missing or empty. Do not copy the entire
@@ -361,17 +407,19 @@ To apply an env change, run `docker compose up -d --force-recreate` (include
 restart the TUI if you have one open. You only need to rebuild images when
 the code changes.
 
-The Auth Service keeps its SQLite database in the `auth-data` volume, so
-restarting the Auth container does not log anyone out.
+The Auth database container keeps PostgreSQL data in `auth-data`, so restarting
+Auth does not log anyone out. Dashboard and Notifier similarly retain their
+PostgreSQL state in `dashboard-data` and `notifier-data`; their local admin socket
+directories are ephemeral tmpfs, separate from persisted state.
 
 ### Configuration variables
 
-Every configuration variable used by a project Go service is required.
-Missing, empty, or whitespace-only settings stop startup before opening a
-listener or storage. The error lists missing names without exposing values.
-Invalid numeric settings, ports, URLs, durations, and contradictory settings
-also fail rather than selecting a fallback. The examples below are suggested
-values, never defaults in the program. All settings appear in `.env.example`.
+Service credentials, endpoints and business settings are required. Missing,
+empty or whitespace-only required settings fail startup without exposing values.
+The operational budgets below have native-process defaults; Compose supplies
+them explicitly from root `.env`. Invalid explicit numbers, URLs, durations and
+contradictory settings fail instead of silently selecting a fallback.
+All template settings appear in `.env.example`.
 
 **`bmkg-mock/.env`**
 
@@ -405,7 +453,7 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | `POLL_INTERVAL` | Polling interval in seconds (spec suggests 2 to 5) | `3` |
 | `BMKG_BASE_URL`, `PVMBG_BASE_URL` | Source URLs generated by Compose from root ports | `http://bmkg-mock:8081`, `http://pvmbg-mock:8082` (Compose) |
 | `BMKG_API_KEY`, `PVMBG_TOKEN` | Source credentials, must match the mocks and differ from each other | Required |
-| `DATABASE_URL` | Canonical Store connection, must match `store/.env` | Required |
+| `DATABASE_URL` | Canonical connection using `store/.env` runtime `APP_USER`/`APP_PASSWORD` | Required |
 | `NATS_URL` | Broker URL | `nats://broker:4222` (Compose) |
 | `NATS_STREAM`, `NATS_SUBJECT` | JetStream stream and subject to publish to | Required |
 | `SCHEMA_REGISTRY_URL` | Registry for source and broker schemas | Required |
@@ -416,14 +464,33 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | `SOURCE_RETRY_MAX_SEC` | Maximum retry delay; at least `POLL_INTERVAL` | `60` |
 | `NATS_LIFECYCLE_STREAM`, `NATS_LIFECYCLE_SUBJECT` | Separate lifecycle stream and subject | `REPORT_LIFECYCLE`, `report.lifecycle` |
 
-**`store/.env`** and **`registry/.env`**
+**Database container configuration** (`store/.env`, `auth-db/.env`, `dashboard-db/.env`, `notifier-db/.env`, optional `dashboard-demo-db/.env`, and `registry/.env`)
 
 | Variable | Purpose | Example / required value |
 | --- | --- | --- |
-| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Database credentials, each file has its own values | Required |
+| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Database name and bootstrap/admin credentials; distinct per instance | Required |
+| `APP_USER`, `APP_PASSWORD` | Restricted runtime account used in the owning application's `DATABASE_URL`; not used by Registry | Required for application databases |
 | `APICURIO_STORAGE_KIND`, `APICURIO_STORAGE_SQL_KIND` | Registry storage backend (`registry/.env` only) | Required |
 | `APICURIO_DATASOURCE_URL`, `APICURIO_DATASOURCE_USERNAME`, `APICURIO_DATASOURCE_PASSWORD` | Registry database connection, must match the `POSTGRES_*` values in `registry/.env` | Required |
 | `REGISTRY_RETRY_DELAY_SEC` | Registry supervisor delay after the child process exits (`registry/.env` only) | `5` |
+
+Database and network ownership in Compose:
+
+| Owner | Database container | Persistent volume | Private storage network |
+| --- | --- | --- | --- |
+| Aggregator | `postgres` | `postgres-data` | `store` |
+| Auth | `auth-db` | `auth-data` | `auth-store` |
+| Dashboard | `dashboard-db` | `dashboard-data` | `dashboard-store` |
+| Notifier | `notifier-db` | `notifier-data` | `notifier-store` |
+| Optional third subscriber | `dashboard-demo-db` | `dashboard-demo-data` | `dashboard-demo-store` |
+| Schema Registry | `registry-db` | `registry-data` | `registry` |
+
+The two mock archives remain in their separate `bmkg-history` and `pvmbg-history`
+SQLite volumes. Auth persists sessions and token hashes. Consumers persist their
+projection, revisions, processed-message inbox, schema cache, retry history and
+halt/recovery state in PostgreSQL. Each database has one owning application;
+Client API and the TUI read through service APIs. All these PostgreSQL instances
+are single instances without replication or failover in this preparation setup.
 
 **Broker process environment** (ports and URL injected from root `.env`; remaining settings in `broker/.env`)
 
@@ -437,6 +504,8 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | `NATS_DLQ_MAX_AGE` | Dead-letter retention, covering both streams | `168h` |
 | `NATS_LIFECYCLE_STREAM`, `NATS_LIFECYCLE_SUBJECT` | Lifecycle stream and subject | `REPORT_LIFECYCLE`, `report.lifecycle` |
 | `NATS_LIFECYCLE_MAX_AGE` | Explicit lifecycle retention; no inheritance | `24h` |
+| `NATS_REPLICAS` | Replicas for all three streams; greater than one requires an actual NATS cluster | `1` |
+| `NATS_MAX_BYTES` | Capacity per stream; each of the three streams has this limit | `268435456` |
 
 **`auth-service/.env`**
 
@@ -448,7 +517,7 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | `AUTH_INTERNAL_KEY` | Auth-to-Client-API trust key | Required |
 | `ACCESS_TOKEN_TTL_SEC` | Access token lifetime | `60` |
 | `REFRESH_TOKEN_TTL_SEC` | Refresh token lifetime, must exceed the access TTL | `86400` |
-| `AUTH_DB_PATH` | Auth-owned SQLite file inside its container | `/data/auth.db` |
+| `DATABASE_URL` | Auth runtime PostgreSQL URL using `auth-db/.env` runtime credentials | Required |
 | `AUTH_PORT` | Auth container HTTP port | `8083` |
 
 **`client-api/.env`** and **`client-tui/.env`**
@@ -469,7 +538,8 @@ values, never defaults in the program. All settings appear in `.env.example`.
 | --- | --- | --- | --- |
 | `CONSUMER_ROLE` | Projection type | `dashboard` | `notifier` |
 | `CONSUMER_PORT` | Internal HTTP port | `8091` | `8092` |
-| `CONSUMER_DB_PATH` | Consumer-owned SQLite file | `/data/dashboard.db` | `/data/notifier.db` |
+| `DATABASE_URL` | Runtime PostgreSQL URL | `dashboard-db`, runtime credentials | `notifier-db`, runtime credentials |
+| `CONSUMER_ADMIN_SOCKET` | Owner-only local recovery socket, independent of database DSN | `/data/admin/consumer.sock` | `/data/admin/consumer.sock` |
 | `NATS_DURABLE` | Durable consumer name | `dashboard-v1` | `notifier-v1` |
 | `NATS_DLQ_SUBJECT` | This consumer's dead-letter subject prefix | `hazard.dlq.dashboard` | `hazard.dlq.notifier` |
 | `NATS_URL`, `NATS_STREAM`, `NATS_SUBJECT`, `NATS_DLQ_STREAM` | Same values as `broker/.env` | | |
@@ -480,6 +550,32 @@ Ports and endpoint URLs in the tables above describe each process's environment.
 For Compose deployment, keep those values in the root port plan; Compose generates
 the corresponding service environment. Native execution must export them explicitly.
 
+### Operational budgets and worker controls
+
+
+`.env.example` contains all service credentials, source/schema settings, deployment ports and operational budgets. Root operational settings are injected by Compose. Native programs use documented defaults when optional operational settings are absent; invalid explicit values fail instead of silently falling back.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `DB_MAX_OPEN_CONNS` / `DB_MAX_IDLE_CONNS` | 16 / 8 | Per-process database pool budget (Aggregator uses pgxpool's idle pool) |
+| `DB_STATEMENT_TIMEOUT` / `DB_LOCK_TIMEOUT` | 5s / 2s | Database-enforced query and lock bounds |
+| `HTTP_MAX_IDLE_CONNS` / `HTTP_MAX_IDLE_CONNS_PER_HOST` / `HTTP_MAX_CONNS_PER_HOST` | 128 / 32 / 64 | Outgoing HTTP transport budgets |
+| `MAX_PAYLOAD_BYTES` / `MAX_JSON_DEPTH` | 4194304 / 64 | Source-response and HTTP-body bound; JSON nesting bound |
+| `SHUTDOWN_TIMEOUT` | 30s | HTTP drain deadline; Compose allows 40s before forceful stop |
+| `AGGREGATOR_POLL_ENABLED` | true | Live polling and deferred mapping |
+| `AGGREGATOR_REPLAY_ENABLED` | true | Source history replay |
+| `AGGREGATOR_PUBLISH_ENABLED` | true | Both outbox dispatchers |
+| `CONSUMER_WORKERS` | 1 | Workers per canonical/lifecycle subscription |
+| `NATS_ACK_WAIT` / `NATS_MAX_ACK_PENDING` | 60s / 64 | Explicit acknowledgment and outstanding-delivery budget |
+| `NATS_REPLICAS` / `NATS_MAX_BYTES` | 1 / 268435456 | Per-stream replicas and file capacity; R>1 requires an actual NATS cluster |
+| `INSTANCE_ID` | container hostname | Trace resource identity |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset natively | Optional OTLP HTTP exporter; Compose points to internal Tempo |
+| `CONSUMER_ADMIN_SOCKET` | required | Private local recovery socket, independent of the database DSN |
+
+For an additional read-only Aggregator process set all three worker switches to false. The switches do not elect a leader: enabling ingestion on multiple instances still requires M2 coordination. Scale connection and worker budgets against the total number of processes.
+
+Shutdown stops worker admission/cancels pending operations, drains HTTP requests and joins background workers before closing storage. Failed or canceled transactions remain unacknowledged for replay.
+
 ### Client API and TUI
 
 | Method | Endpoint | Purpose |
@@ -487,9 +583,20 @@ the corresponding service environment. Native execution must export them explici
 | POST | `/auth/login` | JSON `client_id`, `client_secret`. Returns bearer access and refresh tokens, TTL, and the server-assigned role |
 | POST | `/auth/refresh` | JSON `refresh_token`. Rotates both tokens and revokes the old access token immediately |
 | POST | `/auth/logout` | JSON `refresh_token`. Revokes the session |
-| GET | `/hazards` | Bearer token, optional `since`, `hazard_type`, `severity`, `area_name`, `view=summary\|raw` |
+| GET | `/hazards` | Bearer token, optional `since`, `hazard_type`, `severity`, `area_name`, `view=summary\|raw`, `limit`, `cursor` |
 | GET | `/hazards/{id}` | Bearer token, optional `view=summary\|raw` |
 | GET | `/health`, `/ready` | Process health and dependency readiness |
+
+#### Pagination, completeness and errors
+
+
+`GET /hazards` and Aggregator `GET /internal/hazards` accept `limit` (default 100, maximum 1000) and an opaque `cursor`. Ordering is descending `(occurred_at, hazard_id)`. Reuse the same filters for every subsequent page. Responses include `next_cursor` (null at the end), `partial`, and `unavailable_units`; `count` is the current page size. Invalid limits, malformed cursors and changed cursor filters return 400.
+
+TUI list/raw views offer a next-page action. Operator and evidence snapshots traverse all pages. k6 deliberately measures one bounded page per request. These are live keyset pages, not a transactionally frozen multi-request snapshot; concurrent corrections can change the dataset during a traversal.
+
+Completeness describes storage coverage; source freshness remains separate in `source_status` and record metadata. The current single-store implementation returns `partial=false` when reads succeed and 503 when its store is unavailable. Future shard-aware storage can provide partial results through the repository boundary.
+
+Errors use `{"error":{"code":"...","message":"..."}}`. `/health` is process liveness; `/ready` reports whether the relevant dependencies can serve work. A slow source never sits on the client read path.
 
 What each client sees:
 
@@ -500,17 +607,22 @@ What each client sees:
 - `source_status` is response metadata that sits outside the hazard objects,
   so even Media can tell when PVMBG data is stale.
 
+Auth stores SHA-256 hashes of opaque access/refresh tokens. Refresh rotates both
+tokens atomically: competing requests using one refresh token cannot both
+succeed, including across independent Auth connection pools. Logout invalidates
+the session. The three downstream roles retain read-only data scopes.
+
 To try it out, start the stack and open the TUI:
 
 ```bash
 docker compose up -d --build
-docker compose run --rm --build client-tui
+docker compose --profile demo run --rm --build client-tui
 ```
 
 Run the TUI command in three terminals if you want to test the three
 identities side by side. The TUI reads the public client IDs from Compose
 and asks you for the secret. From there you can pick a role, list or filter
-hazards, open a detail, or request raw data. You can also run the same TUI
+hazards, move to the next list/raw page, open a detail, or request raw data. You can also run the same TUI
 on the host after exporting its three client IDs and setting
 `BNPB_API_URL=http://localhost:18080`.
 
@@ -571,14 +683,18 @@ For k6, supply `BASE_URL`, `MODE`, `VUS`, `DURATION`, `CLIENT_ID`, and
 
 Go services read process environment directly. Export the complete variables in
 the per-service tables before starting a native process, including listener ports,
-credentials, storage paths and dependency URLs.
+credentials, database URLs, source archive/admin socket paths and dependency URLs.
 
 Native execution needs separately managed PostgreSQL, JetStream and Apicurio
 endpoints reachable from those processes. The standard Compose broker and
 Registry have internal addresses and no host mappings. Set `NATS_URL` and
 `SCHEMA_REGISTRY_URL` to the endpoints of your native environment. Initialize
-the canonical database with `store/init.sql` and configure the broker initializer
-from the template.
+the canonical database with `store/init.sql`, Auth with `auth-service/schema.sql`,
+and each consumer with its own `schema.sql`. Apply the runtime-role/grant scripts
+under `deployment/postgres/` using bootstrap credentials; applications use the
+restricted runtime accounts and do not initialize schemas. Configure the broker
+initializer from the template. `DATABASE_URL` uses an address reachable from the
+native process, rather than Compose-only DNS such as `auth-db`.
 
 For example, with each terminal's service environment exported:
 
@@ -592,12 +708,48 @@ For example, with each terminal's service environment exported:
 
 Use unique listener ports for services sharing a host, and point caller URLs to
 those configured ports. Choose writable native SQLite paths instead of container
-paths such as `/data/history.db`. The main Compose deployment remains the standard
+paths such as `/data/history.db` for the mocks, and a writable private directory
+for each consumer's `CONSUMER_ADMIN_SOCKET`. The main Compose deployment remains the standard
 path for the assignment demos.
 
 ## Running tests
 
-Run these from the repository root. Each Go directory is a separate module;
+Run these from the repository root. The cross-platform runner covers all ten
+Go modules and inherits integration settings without printing their values:
+
+```bash
+python3 scripts/test-services.py
+python3 scripts/test-services.py --race
+python3 scripts/test-services.py --vet
+node --test scripts/*.test.mjs
+```
+
+`TEST_POSTGRES_URL` enables Auth/consumer tests using isolated schemas and
+independent connection pools. Use a dedicated test server and an account with
+CREATE SCHEMA permission. `TEST_DATABASE_URL` enables canonical tests against a
+dedicated database initialized with `store/init.sql`; tests modify its contents.
+`TEST_NATS_URL` and `TEST_SCHEMA_REGISTRY_URL` enable gated broker/schema tests.
+Missing settings cause explicit integration-test skips, not proof those checks ran.
+Never use the live demo or production databases for these tests. Race builds need
+a supported native C compiler; run the suite separately from heavy image builds.
+
+The preparation verifier runs against a **disposable** live Compose project
+(replace `your-project` with its actual Compose project name):
+
+```bash
+python3 scripts/verify-preparation.py --project your-project
+python3 scripts/verify-preparation.py --project your-project --read-only
+```
+
+The default mode restarts Auth/consumers and checks session persistence,
+projections, pagination, errors, role restrictions, metrics and stored traces.
+`--read-only` skips restarts but still logs in and sends verification requests.
+Start the `monitoring` profile and allow ingestion/trace export first. This check
+does not erase volumes. Results from the completed preparation run are recorded
+in the [verification report](docs/Preparation%20Verification.md); the full M1
+ten-to-twenty-minute outage remains a separate demonstration.
+
+For manual module-by-module execution, each Go directory is a separate module;
 the loop includes all application, broker, and monitoring launcher tests and
 stops on the first failure:
 
@@ -608,7 +760,7 @@ foreach ($module in 'bmkg-mock','pvmbg-mock','aggregator','auth-service','client
   try { go test ./...; if ($LASTEXITCODE -ne 0) { throw "Tests failed: $module" } }
   finally { Pop-Location }
 }
-node --test scripts/port-config.test.mjs scripts/evidence-trace.test.mjs scripts/load-test-summary.test.mjs
+node --test scripts/*.test.mjs
 ```
 
 Bash equivalent:
@@ -617,7 +769,7 @@ Bash equivalent:
 for module in bmkg-mock pvmbg-mock aggregator auth-service client-api client-tui consumer-dashboard consumer-notifier broker monitoring/launcher; do
   (cd "$module" && go test ./...) || exit 1
 done
-node --test scripts/port-config.test.mjs scripts/evidence-trace.test.mjs scripts/load-test-summary.test.mjs
+node --test scripts/*.test.mjs
 ```
 
 Expected: all packages pass and the Node test summary has zero failures.
@@ -627,9 +779,9 @@ modify its contents. Never point them at a database whose data you need to keep.
 For a targeted source/aggregator run:
 
 ```bash
-cd bmkg-mock && go test ./...
-cd pvmbg-mock && go test ./...
-cd aggregator && go test ./...          # store integration tests skip without TEST_DATABASE_URL
+(cd bmkg-mock && go test ./...)
+(cd pvmbg-mock && go test ./...)
+(cd aggregator && go test ./...)        # store integration tests skip without TEST_DATABASE_URL
 ```
 
 If you also want the Aggregator's Postgres-backed store tests to run:
@@ -700,10 +852,13 @@ warnings.
 
 ### Sample requests
 
+Load `BMKG_API_KEY` from `bmkg-mock/.env` using the Bash credential snippet in
+[Demo scenarios](#demo-scenarios), or use the runbook's helpers.
+
 ```bash
-curl -H "X-BMKG-Key: devkey" "${BMKG_URL}/seismic-events" | jq '.[0]'
-curl -H "X-BMKG-Key: devkey" "${BMKG_URL}/seismic-events?since=2026-09-01T00:00:00Z"
-curl -H "X-BMKG-Key: devkey" "${BMKG_URL}/tsunami-warnings" | jq '.[0]'
+curl -H "X-BMKG-Key: $BMKG_API_KEY" "${BMKG_URL}/seismic-events" | jq '.[0]'
+curl -H "X-BMKG-Key: $BMKG_API_KEY" "${BMKG_URL}/seismic-events?since=2026-09-01T00:00:00Z"
+curl -H "X-BMKG-Key: $BMKG_API_KEY" "${BMKG_URL}/tsunami-warnings" | jq '.[0]'
 ```
 
 The response is an array of objects with snake_case fields and UTC
@@ -757,19 +912,22 @@ has two admin toggles that the demos rely on.
 
 ### Schema-version toggle
 
+Load `PVMBG_TOKEN` and `PVMBG_ADMIN_TOKEN` from `pvmbg-mock/.env` using the
+[Demo scenarios](#demo-scenarios) credential snippet, or use the runbook's helpers.
+
 ```bash
 # Before toggle: confidence_level is absent
-curl -H "Authorization: Bearer devtoken" "${PVMBG_URL}/volcanic-reports" | jq '.[0]'
+curl -H "Authorization: Bearer $PVMBG_TOKEN" "${PVMBG_URL}/volcanic-reports" | jq '.[0]'
 
 # Toggle it on
-curl -X POST -H "Authorization: Bearer devadmin" "${PVMBG_URL}/admin/schema-version"
+curl -X POST -H "Authorization: Bearer $PVMBG_ADMIN_TOKEN" "${PVMBG_URL}/admin/schema-version"
 # => {"schema_version":"v2","confidence_level_visible":true}
 
 # After toggle: confidence_level now appears
-curl -H "Authorization: Bearer devtoken" "${PVMBG_URL}/volcanic-reports" | jq '.[0]'
+curl -H "Authorization: Bearer $PVMBG_TOKEN" "${PVMBG_URL}/volcanic-reports" | jq '.[0]'
 
 # Toggle back off
-curl -X POST -H "Authorization: Bearer devadmin" "${PVMBG_URL}/admin/schema-version"
+curl -X POST -H "Authorization: Bearer $PVMBG_ADMIN_TOKEN" "${PVMBG_URL}/admin/schema-version"
 # => {"schema_version":"v1","confidence_level_visible":false}
 ```
 
@@ -777,15 +935,15 @@ curl -X POST -H "Authorization: Bearer devadmin" "${PVMBG_URL}/admin/schema-vers
 
 ```bash
 # Enable outage
-curl -X POST -H "Authorization: Bearer devadmin" "${PVMBG_URL}/admin/outage"
+curl -X POST -H "Authorization: Bearer $PVMBG_ADMIN_TOKEN" "${PVMBG_URL}/admin/outage"
 # => {"outage":true}
 
 # Data endpoint now fails fast (503), health stays healthy
-curl -i -H "Authorization: Bearer devtoken" "${PVMBG_URL}/volcanic-reports"   # 503
+curl -i -H "Authorization: Bearer $PVMBG_TOKEN" "${PVMBG_URL}/volcanic-reports"   # 503
 curl -i "${PVMBG_URL}/health"                                                 # 200
 
 # Clear outage
-curl -X POST -H "Authorization: Bearer devadmin" "${PVMBG_URL}/admin/outage"
+curl -X POST -H "Authorization: Bearer $PVMBG_ADMIN_TOKEN" "${PVMBG_URL}/admin/outage"
 # => {"outage":false}
 ```
 
@@ -865,6 +1023,24 @@ available for correlation.
 The Client API/Aggregator `/hazards?since=...` filter remains based on canonical
 `occurred_at`; it is a client event-time filter, not the source ingestion cursor.
 
+### Bounded ingestion and failed-response capture
+
+Fetching bytes, decoding, schema/value validation, mapping and persistence have
+separate boundaries. Fetches have request deadlines and a `MAX_PAYLOAD_BYTES`
+bound. JSON input is checked for valid UTF-8 and bounded nesting; Avro follows
+the registered writer and selected reader policy described below. Source identity,
+entity and progress stay attached to the ingestion operation. A failed stage
+cannot advance its successful progress boundary.
+
+Failed live/history responses are captured in Aggregator's `failed_ingestions`
+table as bytes, with source/entity, digest, reason, retry classification,
+correlation ID, timestamps and attempt count. Invalid JSON is not forced into
+JSONB. Oversized responses retain only a bounded prefix with `truncated=true`.
+Repeated captures with the same source/entity/digest update the failure record.
+If storage is unavailable the capture itself can fail; ingestion still does not
+advance. This establishes storage for later inspection and replay, without
+implementing M2's full quarantine/Audit API or ordered replay workflow.
+
 ### Mapping
 
 `internal/mapping` does the conversion:
@@ -908,7 +1084,13 @@ Identical polls do not queue another event.
 The details are in [`store/README.md`](store/README.md). The Aggregator is
 the only service that talks to this database, and inside the Aggregator all
 access goes through the repository in `internal/store` (`SaveDedup`,
-`GetByID`, `Query`, `LastKnownVolcanic`).
+`GetByIDWithMetadata`, `QueryPage`, `CommitSeismic`, `CommitWarnings`,
+`CommitVolcanic` and related operations).
+HTTP handlers depend on the API's small repository interface, pollers on their
+ingestion/progress interfaces, and volcano lookup on a reference interface.
+Neither handlers nor the lookup receive a PostgreSQL pool. Consumer event/inbox
+effects and Auth sessions have corresponding service-local interfaces; there is
+no generic database framework or shared business library.
 
 ### Schema evolution
 
@@ -1123,7 +1305,7 @@ publish the same event twice, which is why consumers deduplicate by
 
 | Method | Path | Query params | Returns |
 | --- | --- | --- | --- |
-| GET | `/internal/hazards` | `since`, `hazard_type`, `severity`, `area_name`, all optional and filtered in SQL | `{"data": [...], "count": N, "as_of": "<ISO8601>", "source_status": {...}}` |
+| GET | `/internal/hazards` | `since`, `hazard_type`, `severity`, `area_name`, `limit`, `cursor`; filters applied in SQL | `data`, page `count`, `next_cursor`, `partial`, `unavailable_units`, `as_of`, `source_status`, `metadata` |
 | GET | `/internal/hazards/{id}` | none | `data`/`metadata`/`source_status`/`as_of` envelope, or `404` |
 | GET | `/health` | none | `{"status":"ok","service":"aggregator"}` |
 | GET | `/ready` | none | Store and broker availability, `503` when the store is unavailable |
@@ -1140,7 +1322,7 @@ docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATO
 
 Both consumers subscribe to the same `HAZARDS` stream and `hazard.events`
 subject, each under its own durable name. The dashboard stores the full
-decoded `HazardEvent` in its own SQLite volume, and the notifier stores one
+decoded `HazardEvent` in its own PostgreSQL database, and the notifier stores one
 notification summary per hazard. Their `/health`, `/ready`, and `/records`
 endpoints are reachable only on the Compose backend network. `/records`
 returns the latest 100 processed records so you can inspect them in a demo.
@@ -1150,7 +1332,7 @@ returns the latest 100 processed records so you can inspect them in a demo.
 Delivery is at-least-once, so a message can arrive more than once and the
 consumers are built to handle that:
 
-- Each SQLite transaction commits the projection together with the
+- Each PostgreSQL transaction commits the projection together with the
   message's identity, which is `(stream, sequence, payload digest)`.
 - A consumer acknowledges a message only after that write succeeds.
 - If a message is redelivered after a failed ack, the consumer sees the
@@ -1160,15 +1342,18 @@ consumers are built to handle that:
   consumer rejects an unversioned rewrite. Lifecycle corrections carry increasing
   revisions, and an older initial event cannot overwrite a correction.
 
-The consumer fetches one message at a time. JetStream holds delayed NAKs, so
-later valid events keep flowing as long as fewer than 64 messages are
-pending. Processing is limited to 25 seconds under a 60 second ack wait.
+Each subscription runs `CONSUMER_WORKERS` workers (default one), each fetching
+one message at a time. PostgreSQL transactional uniqueness and locks protect
+conflicting identities/revisions across workers and independent instances.
+JetStream holds delayed NAKs; `NATS_MAX_ACK_PENDING` bounds outstanding delivery
+(example 64). Processing is limited to 25 seconds; configure `NATS_ACK_WAIT`
+above that bound (example 60 seconds).
 
 ### Schema handling
 
 Each consumer reads the five-byte schema-ID frame and fetches the writer
 schema from Apicurio when it is not cached. Validated schemas are saved in
-SQLite by registry URL and ID, so they survive consumer restarts and
+PostgreSQL by registry URL and ID, so they survive consumer restarts and
 registry outages. The consumer forwards `X-Correlation-ID` on registry requests
 and records the lookup and broker-call latency in structured logs. Messages
 without a usable correlation header are logged by original stream and sequence
@@ -1185,9 +1370,9 @@ by one.
 | Corrupt frame or Avro bytes | Sends the message to the DLQ right away |
 | Ten corrupt messages within a minute | Halts, so a broad producer or registry mismatch cannot fill the DLQ |
 | Unsupported envelope or incompatible model | Halts and reports it in the error log and on `/ready` |
-| SQLite busy or locked | Retries |
-| SQLite disk, I/O, or corruption error | Halts |
-| Constraint error on one message | Retries three times, then sends it to the DLQ with `reason_code=sqlite_constraint` |
+| PostgreSQL serialization/deadlock, lock timeout, temporary connection/resource errors | Retries |
+| Unclassified storage/environmental failure | Halts; storage failure may prevent persisting the halt |
+| Constraint error on one message | Retries three times, then sends it to the DLQ with `reason_code=postgres_constraint` |
 | Ten different constraint failures within a minute | Halts |
 
 A DLQ record contains the original bytes (base64 in JSON), the stream
@@ -1217,7 +1402,11 @@ for processing availability and inspect its reported halt reason and the error
 logs to diagnose the halt. Use broker backlog and `/records` checks to verify
 delivery progress; a healthy container alone does not prove delivery.
 
-The halt survives restarts. Fix the cause, then use the local administration
+A successfully persisted halt survives restarts. If storage is unavailable when
+the halt is recorded, the process keeps a sticky in-memory halt and remains
+unready; that flag is not guaranteed across process loss until persistence
+succeeds. The triggering unacknowledged message is eligible for redelivery.
+Fix the cause, then use the local administration
 command inside the affected consumer container:
 
 ```bash
@@ -1245,9 +1434,9 @@ canonical events without regressing the projection.
 
 ### Retention
 
-The main stream keeps messages for `NATS_STREAM_MAX_AGE` (24h in the
-example), so a consumer that was offline can catch up only while its
-messages are still there. The DLQ stream keeps failures for
+The main stream keeps messages for at most `NATS_STREAM_MAX_AGE` (24h in the
+example), also subject to `NATS_MAX_BYTES`. A consumer that was offline can catch
+up only while its messages remain retained. The DLQ stream keeps failures for
 `NATS_DLQ_MAX_AGE` (168h in the example). `NATS_DLQ_STREAM`,
 `NATS_DLQ_SUBJECT_PREFIX`, and `NATS_DLQ_MAX_AGE` go in `broker/.env`, while
 each consumer env file needs `NATS_DLQ_STREAM` and its own
@@ -1261,15 +1450,16 @@ docker compose exec -T consumer-notifier sh -c 'wget -qO- "http://localhost:${CO
 docker compose stop consumer-notifier
 # Both mocks emit a new event every 10 s, wait ~30 s and the dashboard keeps receiving them.
 docker compose start consumer-notifier
-docker compose --profile consumer-demo up -d consumer-dashboard-demo
+docker compose --profile consumer-demo up -d --build dashboard-demo-db consumer-dashboard-demo
 docker compose exec -T consumer-dashboard-demo sh -c 'wget -qO- "http://localhost:${CONSUMER_PORT:?}/records"'
 ```
 
 While the notifier is stopped, the Aggregator keeps publishing and the
 dashboard keeps receiving. Once the notifier is back, it catches up on what
 it missed. The third consumer reuses the dashboard image with a new durable
-name and a separate SQLite volume, and it reads the same stream without any
-change to the Aggregator. You can check both consumer modules with
+name and its own PostgreSQL instance (`dashboard-demo-db`), credentials,
+database volume and private storage network. It reads the same stream without
+any change to the Aggregator. You can check both consumer modules with
 `go test ./...` from their directories.
 
 To show that one bad schema ID does not block later valid events, publish a
@@ -1297,8 +1487,22 @@ Please do not run this fixture against a shared or production broker.
 ## Demo scenarios
 
 All demos assume the stack is already running (`docker compose up -d --build`).
-The commands use the placeholder credentials from `.env.example`, so swap in
-your own.
+The commands read generated credentials from the local service `.env` files.
+Load the host URL variables from Quick start, then load these credentials once
+in Bash/Git Bash (never print them):
+
+```bash
+BMKG_API_KEY=$(demo_env_value "$DEMO_ROOT/bmkg-mock/.env" BMKG_API_KEY)
+PVMBG_TOKEN=$(demo_env_value "$DEMO_ROOT/pvmbg-mock/.env" PVMBG_TOKEN)
+PVMBG_ADMIN_TOKEN=$(demo_env_value "$DEMO_ROOT/pvmbg-mock/.env" PVMBG_ADMIN_TOKEN)
+FIELD_CLIENT_ID=$(demo_env_value "$DEMO_ROOT/auth-service/.env" FIELD_CLIENT_ID)
+FIELD_CLIENT_SECRET=$(demo_env_value "$DEMO_ROOT/auth-service/.env" FIELD_CLIENT_SECRET)
+```
+
+For PowerShell helpers and every M1 criterion's detailed procedure, use
+[Test Runbook](docs/Test%20Runbook.md). `node scripts/m1-demo.mjs preflight`
+checks the current project, and its `fanout`/`third-consumer` commands capture
+asserted evidence without hand-comparing moving record counts.
 
 | Problem | Criterion | Where |
 | --- | --- | --- |
@@ -1319,15 +1523,17 @@ your own.
 ```bash
 sleep 8   # let a few poll cycles happen
 
-curl -H "X-BMKG-Key: changeme-bmkg-key" "${BMKG_URL}/seismic-events" | jq 'length'
-curl -H "Authorization: Bearer changeme-pvmbg-token" "${PVMBG_URL}/volcanic-reports" | jq 'length'
+curl -H "X-BMKG-Key: $BMKG_API_KEY" "${BMKG_URL}/seismic-events" | jq 'length'
+curl -H "Authorization: Bearer $PVMBG_TOKEN" "${PVMBG_URL}/volcanic-reports" | jq 'length'
 docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards"' | jq '.count, .data[0]'
 ```
 
 You should see at least 20 seismic records from BMKG and at least 20
-volcanic reports from PVMBG, all of them available as canonical
-`HazardEvent`s from the Aggregator. Each mock adds one record every 10
-seconds, so the counts keep growing, and
+volcanic reports from PVMBG, available as canonical `HazardEvent`s. Aggregator's
+`count` is the current page size, not a total; follow `next_cursor` for a complete
+traversal or use `node scripts/evidence-probes.mjs mapping`. Each mock adds one
+record every 10 seconds; its live window is bounded while durable history and
+canonical storage continue growing. Meanwhile,
 `docker compose logs aggregator | grep "outbound call"` shows source requests
 and successful publications as new hazards arrive.
 
@@ -1390,19 +1596,24 @@ its schema and the toggle works again.
 
 ### Demo C: PVMBG outage
 
+The following is a short manual check. Retry backoff can delay recovery by
+`SOURCE_RETRY_MAX_SEC` plus source/processing time; a five-second sleep is not a
+recovery assertion. Use `node scripts/evidence-probes.mjs outage --seconds 600`
+for the full M1 outage with cached-read, new-report and no-restart assertions.
+
 ```bash
-curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" "${PVMBG_URL}/admin/outage"
+curl -X POST -H "Authorization: Bearer $PVMBG_ADMIN_TOKEN" "${PVMBG_URL}/admin/outage"
 
 curl -i "${PVMBG_URL}/health"        # still 200
 curl -i "${API_URL}/health"        # still 200
-curl -H "X-BMKG-Key: changeme-bmkg-key" "${BMKG_URL}/seismic-events" | jq 'length'   # unaffected
+curl -H "X-BMKG-Key: $BMKG_API_KEY" "${BMKG_URL}/seismic-events" | jq 'length'   # unaffected
 
 sleep 5   # let the Aggregator notice PVMBG is down
 docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards?hazard_type=VOLCANIC"' | jq '.source_status.PVMBG, .metadata'
 
 docker compose logs aggregator | grep '"level":"warn"' | grep pvmbg
 
-curl -X POST -H "Authorization: Bearer changeme-pvmbg-admin-token" "${PVMBG_URL}/admin/outage"
+curl -X POST -H "Authorization: Bearer $PVMBG_ADMIN_TOKEN" "${PVMBG_URL}/admin/outage"
 sleep 5
 docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards?hazard_type=VOLCANIC"' | jq '.source_status.PVMBG.state'
 # => "fresh", once the next successful poll verifies PVMBG
@@ -1526,7 +1737,7 @@ docker compose stop pvmbg-mock
 
 # While it is down, requests that do not need it are still served.
 TOKEN=$(curl -s -X POST "${API_URL}/auth/login" -H 'Content-Type: application/json' \
-  -d '{"client_id":"field-demo","client_secret":"replace-with-field-secret"}' | jq -r .access_token)
+  -d "$(jq -n --arg id "$FIELD_CLIENT_ID" --arg secret "$FIELD_CLIENT_SECRET" '{client_id:$id,client_secret:$secret}')" | jq -r .access_token)
 curl -s -H "Authorization: Bearer $TOKEN" "${API_URL}/hazards?hazard_type=SEISMIC" | jq '.count'
 curl -s -H "Authorization: Bearer $TOKEN" "${API_URL}/hazards?hazard_type=VOLCANIC" | jq '.count, .source_status'
 
@@ -1538,7 +1749,7 @@ docker compose ps
 
 In the last listing only `pvmbg-mock` has a fresh uptime, and every other
 container kept running the whole time. While it was stopped, the seismic
-count kept growing, and the volcanic request returned stored data with
+canonical dataset kept growing (one API page is capped), and volcanic reads returned stored data with
 `source_status.PVMBG.state` set to `stale` rather than an error. The
 `--no-deps` flag is what keeps Compose from touching any other service.
 Note that restarting `pvmbg-mock` resets its schema toggle to v1.
@@ -1561,11 +1772,12 @@ as Demo B shows.
 Next, check who can actually reach the Store:
 
 ```bash
-# Only postgres and aggregator are attached to the store network.
-docker network inspect tugasbesaraat_store --format '{{range .Containers}}{{.Name}} {{end}}'
+# Discover this project's canonical network from its database container.
+STORE_NETWORK=$(docker inspect -f '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}{{end}}' "$(docker compose ps -q postgres)")
+docker network inspect "$STORE_NETWORK" --format '{{range .Containers}}{{.Name}} {{end}}'
 
 # Postgres publishes no host port.
-docker compose port postgres 5432
+docker compose port postgres "$(demo_env_value "$DEMO_ROOT/.env" POSTGRES_PORT)"
 
 # The hostname resolves from the Aggregator and from nowhere else.
 docker compose exec -T aggregator nslookup postgres
@@ -1574,7 +1786,8 @@ docker compose exec -T client-api nslookup postgres
 
 The last command fails. The Client API is not on the `store` network, so
 its only way to hazard data is the Aggregator's `/internal/hazards` API.
-The network name assumes the default Compose project name, `tugasbesaraat`.
+Auth, Dashboard and Notifier each have a corresponding private network and
+database pair; none joins the canonical `store` network.
 
 ---
 
@@ -1607,3 +1820,16 @@ The network name assumes the default Compose project name, `tugasbesaraat`.
   original `hazard_id`; material changes publish lifecycle corrections. The schema toggle
   creates a report with a fresh source ID, which is why Demo B ends up with
   a new row next to the older ones without changing their IDs.
+
+
+## Application metrics and distributed traces
+
+
+All seven application HTTP services expose internal `/metrics`. Grafana provisions **AAT Application Performance** alongside the existing health/log dashboard. Panels include throughput, errors, p95 latency, database connections, outbox depth, known replay offset backlog and consumer record count. Offset gaps are not exact observation counts because source sequence numbers can interleave entity types.
+
+OpenTelemetry spans propagate through HTTP, PostgreSQL and NATS. Outboxes persist trace context so publication after restart preserves ancestry. Business payloads retain their M1 schema. `X-Trace-ID` identifies HTTP traces; existing correlation IDs remain in logs and messages. Use Grafana Explore → Tempo to inspect durations. Telemetry records neither SQL arguments nor credentials.
+
+
+## Documentation history
+
+The original detailed documents are preserved in [the README archive](docs/archive/M1%20README%20before%20preparation.md) and [runbook archive](docs/archive/M1%20Test%20Runbook%20before%20preparation.md). Those snapshots describe the former setup. Use this README and the active runbook for current commands.

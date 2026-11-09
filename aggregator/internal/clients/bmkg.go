@@ -4,6 +4,8 @@
 package clients
 
 import (
+	"aggregator/internal/platform"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -42,24 +44,25 @@ type TsunamiWarning struct {
 }
 
 type BMKGClient struct {
-	BaseURL  string
-	APIKey   string
-	HTTP     *http.Client
-	Logger   *slog.Logger
-	Registry *avrowire.Client
-	Readers  map[string]*avrowire.SourceReader
+	CaptureFailure FailureRecorder
+	BaseURL        string
+	APIKey         string
+	HTTP           *http.Client
+	Logger         *slog.Logger
+	Registry       *avrowire.Client
+	Readers        map[string]*avrowire.SourceReader
 }
 
 func NewBMKGClient(baseURL, apiKey string, logger *slog.Logger) *BMKGClient {
 	return &BMKGClient{
 		BaseURL: baseURL,
 		APIKey:  apiKey,
-		HTTP:    &http.Client{Timeout: 2 * time.Second},
+		HTTP:    platform.Client(2 * time.Second),
 		Logger:  logger,
 	}
 }
 
-func (c *BMKGClient) get(ctx context.Context, correlationID, path string, required []string, out interface{}) error {
+func (c *BMKGClient) get(ctx context.Context, correlationID, path string, required []string, out interface{}) (retErr error) {
 	callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
@@ -81,6 +84,19 @@ func (c *BMKGClient) get(ctx context.Context, correlationID, path string, requir
 		return err
 	}
 	defer resp.Body.Close()
+	rawBody, truncated, readErr := platform.ReadPayload(resp.Body)
+	defer func() {
+		capture(callCtx, c.CaptureFailure, Failure{Source: "BMKG", Entity: path, Payload: rawBody, Truncated: truncated, CorrelationID: correlationID}, &retErr)
+	}()
+	if readErr != nil {
+		return fmt.Errorf("%w: %v", ErrContractViolation, readErr)
+	}
+	if c.Registry == nil && resp.StatusCode < 400 {
+		if e := platform.ValidateJSON(rawBody); e != nil {
+			return fmt.Errorf("%w: %v", ErrContractViolation, e)
+		}
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(rawBody))
 
 	success := resp.StatusCode < 400
 	middleware.LogOutbound(c.Logger, "aggregator", correlationID, "bmkg", path, resp.StatusCode, success, latency, "")
@@ -162,7 +178,7 @@ func (c *BMKGClient) get(ctx context.Context, correlationID, path string, requir
 	return nil
 }
 
-func (c *BMKGClient) FetchSeismicEvents(ctx context.Context, correlationID string, since time.Time) ([]SeismicEvent, error) {
+func (c *BMKGClient) FetchSeismicEvents(ctx context.Context, correlationID string, since time.Time) (result []SeismicEvent, retErr error) {
 	path := "/seismic-events"
 	if !since.IsZero() {
 		path += "?since=" + since.UTC().Format(time.RFC3339Nano)
@@ -174,7 +190,7 @@ func (c *BMKGClient) FetchSeismicEvents(ctx context.Context, correlationID strin
 	return events, nil
 }
 
-func (c *BMKGClient) FetchTsunamiWarnings(ctx context.Context, correlationID string, since time.Time) ([]TsunamiWarning, error) {
+func (c *BMKGClient) FetchTsunamiWarnings(ctx context.Context, correlationID string, since time.Time) (result []TsunamiWarning, retErr error) {
 	path := "/tsunami-warnings"
 	if !since.IsZero() {
 		path += "?since=" + since.UTC().Format(time.RFC3339Nano)

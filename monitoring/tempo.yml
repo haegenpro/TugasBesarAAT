@@ -1,0 +1,22 @@
+server:
+  http_listen_port: ${TEMPO_PORT}
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:${OTLP_HTTP_PORT}
+        grpc:
+          endpoint: 0.0.0.0:${OTLP_GRPC_PORT}
+ingester:
+  max_block_duration: 5m
+compactor:
+  compaction:
+    block_retention: 24h
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks

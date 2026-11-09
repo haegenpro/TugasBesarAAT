@@ -3,14 +3,13 @@ package main
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
 
 func TestSessionSurvivesRestartAndRotationRevokesOldToken(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "auth.db")
+	path := testDSN(t)
 	store, err := openStore(path, time.Minute, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +53,7 @@ func TestSessionSurvivesRestartAndRotationRevokesOldToken(t *testing.T) {
 }
 
 func TestConcurrentRefreshOnlyOneSucceeds(t *testing.T) {
-	store, err := openStore(filepath.Join(t.TempDir(), "auth.db"), time.Minute, time.Hour)
+	store, err := openStore(testDSN(t), time.Minute, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +91,7 @@ func TestConcurrentRefreshOnlyOneSucceeds(t *testing.T) {
 }
 
 func TestAccessTokenExpiresNaturally(t *testing.T) {
-	store, err := openStore(filepath.Join(t.TempDir(), "auth.db"), time.Second, time.Hour)
+	store, err := openStore(testDSN(t), time.Second, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +110,7 @@ func TestAccessTokenExpiresNaturally(t *testing.T) {
 }
 
 func TestDownstreamScopesRemainReadOnly(t *testing.T) {
-	store, err := openStore(filepath.Join(t.TempDir(), "auth.db"), time.Minute, time.Hour)
+	store, err := openStore(testDSN(t), time.Minute, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"clientapi/internal/platform"
 	"encoding/json"
 	"fmt"
 	"github.com/gin-gonic/gin"
@@ -67,7 +68,7 @@ func (a *api) listNotices(c *gin.Context) {
 	switch state {
 	case "", "open", "all", "pending", "assessment_unavailable", "resolved":
 	default:
-		c.JSON(400, gin.H{"error": "invalid notice state"})
+		c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid notice state")})
 		return
 	}
 	endpoint := joinURL(a.cfg.AggregatorURL, "/internal/notices")
@@ -82,7 +83,7 @@ func (a *api) listNotices(c *gin.Context) {
 	}
 	status, err := a.call(c, "aggregator", http.MethodGet, endpoint, nil, false, &list)
 	if err != nil || status != 200 || list.Data == nil || list.AsOf == "" || list.Count != len(list.Data) {
-		c.JSON(503, gin.H{"error": "aggregator unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "aggregator unavailable")})
 		return
 	}
 	var data any = list.Data
@@ -102,7 +103,7 @@ func (a *api) getNotice(c *gin.Context) {
 	}
 	id := c.Param("id")
 	if _, err := uuid.Parse(id); err != nil {
-		c.JSON(400, gin.H{"error": "invalid notice ID"})
+		c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid notice ID")})
 		return
 	}
 	var item struct {
@@ -113,11 +114,11 @@ func (a *api) getNotice(c *gin.Context) {
 	}
 	status, err := a.call(c, "aggregator", http.MethodGet, joinURL(a.cfg.AggregatorURL, "/internal/notices/"+id), nil, false, &item)
 	if status == 404 {
-		c.JSON(404, gin.H{"error": "notice not found"})
+		c.JSON(404, gin.H{"error": platform.ProblemStatus(404, "notice not found")})
 		return
 	}
 	if err != nil || status != 200 || item.Data.NoticeID == "" || item.History == nil || item.AsOf == "" {
-		c.JSON(503, gin.H{"error": "aggregator unavailable"})
+		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "aggregator unavailable")})
 		return
 	}
 	var data any = item.Data

@@ -71,7 +71,18 @@ async function hazards(type) {
     session = result.body;
     expiresAt = Date.now() + session.expires_in * 750;
   }
-  return request(`${base}/hazards${type ? `?hazard_type=${type}` : ''}`, { Authorization: `Bearer ${session.access_token}` });
+  const target = new URL(`${base}/hazards${type ? `?hazard_type=${type}` : ''}`);
+  const headers = { Authorization: `Bearer ${session.access_token}` };
+  const result = await request(target, headers), seen = new Set();
+  if (result.code !== 200) return result;
+  while (result.body.next_cursor) {
+    if (seen.has(result.body.next_cursor)) throw new Error('Pagination cursor repeated');
+    seen.add(result.body.next_cursor); target.searchParams.set('cursor', result.body.next_cursor);
+    const page = await request(target, headers); if (page.code !== 200) throw new Error(`Next hazard page HTTP ${page.code}`);
+    result.body.data.push(...page.body.data); result.body.metadata = { ...result.body.metadata, ...page.body.metadata };
+    result.body.partial ||= page.body.partial; result.body.next_cursor = page.body.next_cursor; result.ms += page.ms;
+  }
+  result.body.count = result.body.data.length; return result;
 }
 async function until(fn, label, seconds = 120) {
   const end = Date.now() + seconds * 1000;

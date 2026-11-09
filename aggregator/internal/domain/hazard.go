@@ -39,3 +39,11 @@ type HazardEvent struct {
 }
 
 func Now() time.Time { return time.Now().UTC() }
+
+// Empty values represent an omitted filter. Each service owns its contract checks.
+func ValidHazardType(v string) bool {
+	return v == "" || v == string(HazardSeismic) || v == string(HazardVolcanic)
+}
+func ValidSeverity(v string) bool {
+	return v == "" || v == string(SeverityNormal) || v == string(SeverityWaspada) || v == string(SeveritySiaga) || v == string(SeverityAwas)
+}

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"aggregator/internal/domain"
 	"aggregator/internal/middleware"
+	"aggregator/internal/platform"
 	"aggregator/internal/timeutil"
 )
 
@@ -30,8 +32,12 @@ func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, 
 	}
 	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("invalid DATABASE_URL")
 	}
+	cfg.MaxConns = int32(platform.Int("DB_MAX_OPEN_CONNS", 16))
+	cfg.MinConns = 0
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(platform.Duration("DB_STATEMENT_TIMEOUT", 5*time.Second).Milliseconds(), 10)
+	cfg.ConnConfig.RuntimeParams["lock_timeout"] = strconv.FormatInt(platform.Duration("DB_LOCK_TIMEOUT", 2*time.Second).Milliseconds(), 10)
 	cfg.ConnConfig.Tracer = &sqlTracer{logger: logger}
 	pool, err := pgxpool.NewWithConfig(middleware.EnsureCorrelationID(ctx), cfg)
 	if err != nil {
@@ -52,12 +58,9 @@ func (s *Store) Ping(ctx context.Context) error {
 	return err
 }
 
-// CheckSchema applies idempotent lifecycle migrations before validating the canonical tables.
+// CheckSchema validates the canonical tables without changing the schema.
 func (s *Store) CheckSchema(ctx context.Context) error {
 	ctx = middleware.EnsureCorrelationID(ctx)
-	if err := s.Migrate(ctx); err != nil {
-		return err
-	}
 	for _, query := range []string{
 		`SELECT hazard_id, source, source_ref_id, attributes FROM hazard_events LIMIT 0`,
 		`SELECT volcano_id, area_name, latitude, longitude FROM volcano_reference LIMIT 0`,
@@ -108,14 +111,14 @@ func (s *Store) DeliverNext(ctx context.Context, publish func(context.Context, O
 
 	var hazardID string
 	var payload []byte
-	var correlationID string
+	var correlationID, traceparent, tracestate string
 	err = tx.QueryRow(ctx, `
-		SELECT hazard_id::text, event_payload, correlation_id
+		SELECT hazard_id::text, event_payload, correlation_id,traceparent,tracestate
 		FROM hazard_outbox
 		ORDER BY queued_at, hazard_id
 		LIMIT 1
 		FOR UPDATE SKIP LOCKED
-	`).Scan(&hazardID, &payload, &correlationID)
+	`).Scan(&hazardID, &payload, &correlationID, &traceparent, &tracestate)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -123,7 +126,7 @@ func (s *Store) DeliverNext(ctx context.Context, publish func(context.Context, O
 		return false, err
 	}
 
-	ctx = middleware.WithCorrelationID(ctx, correlationID)
+	ctx = middleware.WithCorrelationID(platform.Extract(ctx, http.Header{"Traceparent": []string{traceparent}, "Tracestate": []string{tracestate}}), correlationID)
 	var hazard domain.HazardEvent
 	if err := json.Unmarshal(payload, &hazard); err != nil {
 		return true, err
@@ -199,6 +202,9 @@ func (s *Store) GetByIDWithMetadata(ctx context.Context, hazardID string) (domai
 }
 
 type Filters struct {
+	BeforeTime *time.Time
+	BeforeID   string
+	Limit      int
 	Since      time.Time
 	HazardType string
 	Severity   string
@@ -235,7 +241,15 @@ func (s *Store) QueryWithMetadata(ctx context.Context, f Filters) ([]domain.Haza
 		sql += ` AND area_name ILIKE ` + next()
 		args = append(args, "%"+f.AreaName+"%")
 	}
-	sql += ` ORDER BY occurred_at DESC`
+	if f.BeforeTime != nil {
+		sql += ` AND (occurred_at,hazard_id) < (` + next() + `,` + next() + `::uuid)`
+		args = append(args, *f.BeforeTime, f.BeforeID)
+	}
+	sql += ` ORDER BY occurred_at DESC, hazard_id DESC`
+	if f.Limit > 0 {
+		sql += ` LIMIT ` + next()
+		args = append(args, f.Limit)
+	}
 
 	rows, err := s.Pool.Query(ctx, sql, args...)
 	if err != nil {
