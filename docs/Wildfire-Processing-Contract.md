@@ -2,7 +2,7 @@
 
 Lead: Distributed State & Stream Processing. Collaborator: Reliable Ingestion & Delivery for the durable satellite handoff; Platform, Coordination & Reliability for processor ownership, infrastructure, and takeover.
 
-Selected design: one active logical processor, durable session history and lineage, automatic late corrections, and transactional state/output preparation followed by idempotent canonical application. See [Decisions and Readiness](Decisions-and-Readiness.md) for selected decisions and validation gates.
+Selected design: one active logical processor, durable session history and lineage, automatic late corrections, and transactional state/output preparation followed by idempotent canonical application. The [M2 assignment](IF4031%20-%20Tugas%20Besar%20-%20M2.md) is authoritative. Implementation evidence and evaluator compatibility remain open as specified below.
 
 ## 1. Input Boundary
 
@@ -169,6 +169,6 @@ Retain complete session input and lineage durably. Retention after the evaluatio
 
 ## References
 
-Assignment authority: M2's Definisi Kebakaran, Aturan Pemetaan Tambahan, Problem 4, and Appendix A. M1 identity/storage paths are listed in [Decisions and Readiness](Decisions-and-Readiness.md#sources).
+Assignment authority: M2's Definisi Kebakaran, Aturan Pemetaan Tambahan, Problem 4, and Appendix A. See [Canonical and Storage Contract](Canonical-and-Storage-Contract.md) for identity, persistence, and storage boundaries.
 
 [GeographicLib geodesic definitions](https://geographiclib.sourceforge.io/html/python/geodesics.html) support the chosen ellipsoidal distance terminology; they do not establish what the evaluator uses.

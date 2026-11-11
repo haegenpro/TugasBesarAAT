@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: sensor-pantai, labels: {role: sensor}}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: sensor-pantai}}
+  template:
+    metadata: {labels: {app: sensor-pantai, role: sensor}}
+    spec:
+      containers:
+        - name: sensor
+          image: sustuna/sensor-pantai@sha256:51fbd90d3891ad6e9f5768ad330ffb65205644cb29e50da65c7538f2e0b4397d
+          env:
+            - {name: PANTAI_PROFILE, value: practice}      # demo: exam
+            - {name: PANTAI_SEED, value: "42"}
+            - {name: PANTAI_SPEED, value: "60"}
+            - name: PANTAI_AUTH_TOKEN
+              valueFrom: {secretKeyRef: {name: pantai-token, key: token}}
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: 8080}}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            # Hanya demo: Secret 'pantai-key' berisi berkas 'key' dari asisten.
+            # - {name: key, mountPath: /var/run/pantai, readOnly: true}
+      volumes:
+        - {name: data, emptyDir: {}}          # tanpa volume tetap jalan (mulai dari awal)
+        # - name: key
+        #   secret: {secretName: pantai-key}
