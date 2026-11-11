@@ -4,18 +4,20 @@
 
 Agree on the shared schemas, interfaces, and correctness rules that allow the three areas of responsibility to implement independently. This checklist records both documented design decisions and the agreements still needed for integration. It does not imply that the implementation already satisfies them.
 
-Use the M2 specification as the authority for prescribed endpoints, ordering, checksums, processing parameters, and acceptance thresholds. Confirm those details before freezing the corresponding agreements.
+Use the [M2 specification](IF4031%20-%20Tugas%20Besar%20-%20M2.md) as the authority for prescribed endpoints, ordering, checksums, processing parameters, and acceptance thresholds. Confirm those details before freezing the corresponding agreements.
 
 ## Current Status — 11 November 2026
 
-The Distributed State & Stream Processing preimplementation design is substantially documented. Its seven lead-owned agreements (**1, 2, 4, 7, 9, 12, and 13**) now have written core decisions. Shared-interface review, concrete integration fixtures, and the explicitly listed compatibility decisions remain open; no joint sign-off or runtime validation is recorded.
+Core designs are documented for Distributed State & Stream Processing (**1, 2, 4, 7, 9, 12, 13**) and Reliable Ingestion & Delivery (**3, 6, 8, 10, 11, 14**). Platform-led agreements (**5, 15, 16**) have contributions but still need their shared contracts completed. Concrete wire schemas/configuration, integration fixtures, cross-component review, and the compatibility questions listed below remain open. Documented design does not imply joint sign-off or runtime validation.
 
 | Document | Existing contract coverage |
 | --- | --- |
-| [Decisions and Readiness](Decisions-and-Readiness.md) | Selected architecture, decision register, ownership boundaries, resource implications, and validation gates. |
 | [Canonical and Storage Contract](Canonical-and-Storage-Contract.md) | Items 1, 2, 4, and 7; storage-side requirements for items 5 and 6. |
 | [Wildfire Processing Contract](Wildfire-Processing-Contract.md) | Item 9; processor-side requirements for items 3, 6, and 8. |
 | [Audit, Analytics, and Validation](Audit-Analytics-and-Validation.md) | Items 12 and 13; analytics behavior and acceptance scenarios contributing to item 16. |
+| [Ingestion and Messaging Contract](Ingestion-and-Messaging-Contract.md) | Items 3, 6, 8, and 10; report idempotency, input durability, capacity, and ownership context. |
+| [Validation and Replay Contract](Validation-and-Replay-Contract.md) | Item 11; schema policy, failed-input preservation, ordered replay, authorization, and `/unprocessed` contributions to item 12. |
+| [Coastal Delivery and Validation](Coastal-Delivery-and-Validation.md) | Item 14; sensor resilience, durable recipient receipt, scheduling, and acceptance evidence contributing to item 16. |
 
 The selected storage baseline is **four separate-kernel Kubernetes nodes, Citus with Patroni, three copies per worker group, and durable acknowledgement from two copies per participating group**. Audit snapshots are initiated only by explicit sessions; ordinary reads remain live. These decisions supersede generic alternatives in the earlier checklist and responsibility plan. Deployment feasibility and guarantees still require implementation evidence.
 
@@ -47,7 +49,7 @@ The checked documentation milestones below refer to the linked contracts, includ
 
 - [x] **Core design documented** — [Canonical and Storage Contract, §1](Canonical-and-Storage-Contract.md#1-preserve-the-existing-canonical-shape) defines canonical fields, types, enums, UTC timestamps, source identity, and structured attributes.
 - [ ] **Agreement finalized**
-  - **Remaining before finalization:** Review source-specific mappings, schema versioning, and representative source/canonical JSON examples with ingestion. Align the older wire-format document with M2 arrays and source/type additions.
+  - **Remaining before finalization:** Review source-specific mappings, canonical schema versioning, and representative source/canonical JSON examples against the [external-schema acceptance policy](Validation-and-Replay-Contract.md#1-schema-acceptance-policy). Align the older wire-format document with M2 arrays and source/type additions.
   - **Lead:** Distributed State & Stream Processing.
   - **Collaborator:** Reliable Ingestion & Delivery.
   - **Description:** Define the canonical representation stored and returned by the system. Distinguish raw source observations from derived HazardEvents.
@@ -58,7 +60,7 @@ The checked documentation milestones below refer to the linked contracts, includ
 
 - [x] **Core design documented** — [Canonical and Storage Contract, §2](Canonical-and-Storage-Contract.md#2-identity-revisions-and-tombstones) defines UUID preservation, duplicate/stale outcomes, revisions, and tombstones; [Wildfire Processing Contract, §5](Wildfire-Processing-Contract.md#5-fire-identity-and-lineage) defines birth, merge, split, and restoration identity.
 - [ ] **Agreement finalized**
-  - **Remaining before finalization:** Resolve ambiguous historical-restoration precedence and inactive audit membership. Agree source-operation ordering and add concrete lifecycle fixtures with expected state.
+  - **Remaining before finalization:** Resolve ambiguous historical-restoration precedence and inactive audit membership. Align source-operation ordering and report/operation identity with [report idempotency](Ingestion-and-Messaging-Contract.md#2-report-idempotency) and [ordered replay](Validation-and-Replay-Contract.md#5-ordered-replay); add concrete lifecycle fixtures with expected state.
   - **Lead:** Distributed State & Stream Processing.
   - **Collaborator:** Reliable Ingestion & Delivery.
   - **Description:** Ensure independent components recognize the same observation or event and apply updates consistently.
@@ -67,9 +69,9 @@ The checked documentation milestones below refer to the linked contracts, includ
 
 ### 3. Common Input Message Envelope
 
-- [x] **Contribution documented** — [Wildfire Processing Contract, §1](Wildfire-Processing-Contract.md#1-input-boundary) lists the processor-required namespace, original offset/payload, operation, clock, receipt, trace, and ownership context.
+- [x] **Core design documented** — [Ingestion and Messaging Contract, §3](Ingestion-and-Messaging-Contract.md#3-raw-envelope) defines a separate registry-framed Avro raw envelope with exact payload bytes, stable operation/source identity, namespace/position, time, feed-clock, trace, and ownership context.
 - [ ] **Agreement finalized**
-  - **Remaining before finalization:** Ingestion must specify the versioned common envelope for all sources, mandatory fields, operation examples, and transport encoding. The satellite field requirements are not a complete common envelope.
+  - **Remaining before finalization:** Freeze the Avro field names/types, per-source mandatory/optional rules, schema version, and representative create/update/retract/control frames. Verify compatibility with existing codecs and cached-schema startup behavior.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborator:** Distributed State & Stream Processing.
   - **Description:** Establish one transport envelope for inputs entering validation and processing.
@@ -80,7 +82,7 @@ The checked documentation milestones below refer to the linked contracts, includ
 
 - [x] **Core design documented** — [Canonical and Storage Contract, §§4, 7–8](Canonical-and-Storage-Contract.md#4-selected-durability-and-failover-semantics) and [Wildfire Processing Contract, §7](Wildfire-Processing-Contract.md#7-durable-state-progress-and-output) define two-copy success, logical write outcomes, idempotent correction batches, atomic publication intent, and write admission.
 - [ ] **Agreement finalized**
-  - **Remaining before finalization:** Freeze the concrete adapter request/response or message schema, operation identity, revision and fencing-token fields, error mapping, and representative success/failure examples with ingestion and platform owners.
+  - **Remaining before finalization:** Freeze the concrete canonical adapter schema, operation identity, revision/token fields, error mapping, and success/failure examples against [acceptance boundaries](Ingestion-and-Messaging-Contract.md#1-acceptance-and-completion-boundaries) and [replay completion](Validation-and-Replay-Contract.md#5-ordered-replay).
   - **Lead:** Distributed State & Stream Processing.
   - **Collaborators:** Platform, Coordination & Reliability and Reliable Ingestion & Delivery.
   - **Description:** Define how ingestion and processing safely change canonical state.
@@ -101,9 +103,9 @@ The checked documentation milestones below refer to the linked contracts, includ
 
 ### 6. Durability and Acknowledgement Rules
 
-- [x] **Contribution documented** — [Canonical and Storage Contract, §4](Canonical-and-Storage-Contract.md#4-selected-durability-and-failover-semantics) defines canonical acknowledgement; [Wildfire Processing Contract, §7](Wildfire-Processing-Contract.md#7-durable-state-progress-and-output) separates durably received, prepared, and canonically applied positions.
+- [x] **Core design documented** — [Ingestion and Messaging Contract, §§1–2 and 4–5](Ingestion-and-Messaging-Contract.md#1-acceptance-and-completion-boundaries) defines broker-first 202 acceptance, scoped durable report identity, reject-new capacity behavior, and commit-before-handoff acknowledgement. [Coastal Delivery and Validation, §3](Coastal-Delivery-and-Validation.md#3-durable-critical-path) defines durable warning intent and recipient commit before acknowledgement.
 - [ ] **Agreement finalized**
-  - **Remaining before finalization:** Complete the end-to-end acceptance table for HTTP 202, acquisition persistence, broker acknowledgements, downstream delivery, and crash recovery. Canonical durability alone does not finalize input or notification acceptance.
+  - **Remaining before finalization:** Freeze report receipt/error examples and the admission-ledger/publication recovery sequence. Verify evaluator support for mandatory client report IDs; agree acceptance tables and crash fixtures across input, processor, canonical, and recipient boundaries. Pinned broker disk-flush/replication behavior still needs proof.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborators:** Distributed State & Stream Processing and Platform, Coordination & Reliability.
   - **Description:** Define the persistent state required before any component claims that work has succeeded.
@@ -127,9 +129,9 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 
 ### 8. Satellite Acquisition-to-Processing Contract
 
-- [x] **Contribution documented** — [Wildfire Processing Contract, §§1 and 7](Wildfire-Processing-Contract.md#1-input-boundary) defines required feed fidelity, gap/duplicate handling, and separate receipt/prepared/applied progress.
+- [x] **Core design documented** — [Ingestion and Messaging Contract, §5](Ingestion-and-Messaging-Contract.md#5-satellite-handoff-and-retention) defines original namespace/offset/payload preservation, gap detection, persistence-before-receipt-progress, and deletion only after durable processor handoff. [Wildfire Processing Contract, §7](Wildfire-Processing-Contract.md#7-durable-state-progress-and-output) separates prepared and applied progress.
 - [ ] **Agreement finalized**
-  - **Remaining before finalization:** Ingestion must verify actual feed namespace, reconnect inclusion/exclusion, update/retract references, confidence and clock behavior, then supply payload examples and a reconnect/replay sequence with expected positions.
+  - **Remaining before finalization:** Verify actual feed reconnect inclusion/exclusion, namespace, confidence, update/retract, and clock semantics. Freeze the durable handoff acknowledgement and authorized history-replay interface; supply reconnect/duplicate/update/retract fixtures before enabling transport deletion.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborator:** Distributed State & Stream Processing.
   - **Description:** Define the durable, replayable satellite input supplied to wildfire processing.
@@ -149,10 +151,9 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 
 ### 10. Broker Topology and Consumer Configuration
 
-**Current coverage:** The new contracts specify required delivery behavior, but do not freeze an M2 stream/consumer configuration. [Existing Cross-Team Contracts](Contracts.md) remains the M1 messaging baseline.
-
+- [x] **Core design documented** — [Ingestion and Messaging Contract, §4](Ingestion-and-Messaging-Contract.md#4-streams-replication-and-capacity) separates satellite, coastal, and report raw streams, requires disk flushing plus replication, bounded consumption and reject-new capacity behavior. [Coastal Delivery and Validation, §3](Coastal-Delivery-and-Validation.md#3-durable-critical-path) specifies a dedicated durable recipient consumer.
 - [ ] **Agreement finalized**
-  - **Remaining before finalization:** Ingestion and platform must define M2 streams, subjects, consumer identities, retention/replication, acknowledgement/retry limits, capacity, and restart behavior against the durability agreement.
+  - **Remaining before finalization:** Freeze subjects, stream and consumer names, retention/deletion mode, replica placement, acknowledgement timeout, retry/backoff and in-flight/resource limits with platform. Three input replicas are a proposed topology; verify pinned broker publish-ack durability and restart/fault behavior. M1 messaging remains the baseline, not the completed M2 configuration.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborator:** Platform, Coordination & Reliability.
   - **Description:** Align application messaging guarantees with the deployed broker's persistence and resource configuration.
@@ -162,9 +163,9 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 
 ### 11. Failure, Quarantine, and Replay Contract
 
-- [x] **Contribution documented** — [Canonical and Storage Contract, §7](Canonical-and-Storage-Contract.md#7-read-and-write-outcomes) distinguishes invalid, stale, temporary, and ambiguous outcomes; [Wildfire Processing Contract, §§1–2](Wildfire-Processing-Contract.md#1-input-boundary) requires preservation of invalid raw input.
+- [x] **Core design documented** — [Validation and Replay Contract](Validation-and-Replay-Contract.md) defines compatible additions/lossless promotions, parking for incompatible changes, complete original-byte failure records, automatic transient retries, Ops-only replay, source-entity ordering, and repeated-failure handling.
 - [ ] **Agreement finalized**
-  - **Remaining before finalization:** Ingestion must finalize the M2 schema policy, quarantine representation, retry classification, replay authorization/identity/order, and poison-message examples. Existing M1 behavior is background, not M2 sign-off.
+  - **Remaining before finalization:** Add concrete malformed/incompatible/transient/replay fixtures and record/API schemas. Resolve ordering for unparseable identities, oversized-input preservation, failure-store durability, and replay/live-operation serialization. Agree operational payload access separately from audit metadata access.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborator:** Distributed State & Stream Processing.
   - **Description:** Preserve failed input and recover it without blocking unrelated work or creating duplicate effects.
@@ -175,7 +176,7 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 
 - [x] **Core design documented** — [Audit, Analytics, and Validation, §§1–5](Audit-Analytics-and-Validation.md#1-prescribed-audit-contract) defines endpoint parameters, ordering, filtering, pagination, checksum serialization, current location reporting, and explicit-session snapshot semantics.
 - [ ] **Agreement finalized**
-  - **Remaining before finalization:** Finalize the optional snapshot API shape, inactive audit population, cursor/error details, concrete responses and fixed checksum dataset. Ingestion must finalize the `/unprocessed` response contract; its ownership and required behavior are documented.
+  - **Remaining before finalization:** Finalize the optional snapshot API shape, inactive audit population, cursor/error details, concrete responses and fixed checksum dataset. The [Validation and Replay Contract, §4](Validation-and-Replay-Contract.md#4-inspection-and-unprocessed) now defines failed states, recovery removal, and audit-versus-Ops access; add concrete Appendix A response/pagination/error fixtures and freeze the service interface.
   - **Lead:** Distributed State & Stream Processing.
   - **Collaborator:** Reliable Ingestion & Delivery.
   - **Description:** Define externally observable reads and audit evidence consistently across services.
@@ -196,10 +197,9 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 
 ### 14. Critical Notification Contract
 
-**Current coverage:** The new storage/processing documents preserve publication intents and prioritize critical warning work, but do not define the coastal notification contract.
-
+- [x] **Core design documented** — [Coastal Delivery and Validation](Coastal-Delivery-and-Validation.md) defines sensor validation/isolation, critical warning delivery after durable raw acceptance independently of canonical writes, dedicated recipient consumption, transactional receipt/deduplication, fresh/backlog scheduling, and zero-loss/p95 ≤5-second measurement requirements.
 - [ ] **Agreement finalized**
-  - **Remaining before finalization:** Ingestion/delivery must specify critical criteria, recipient payload/routing, durable handoff, delivery identity, acknowledgements, retries, and latency/loss/error-budget measurement with storage and platform owners.
+  - **Remaining before finalization:** Verify sensor critical/quality/correction and cursor/retention semantics. Freeze warning identity/payload, recipient routing/receipt schema, retry configuration, scheduling rule, and evaluator-compatible latency denominator/origin/window and error-budget accounting. Supply critical/retry examples and prove recipient durability.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborators:** Distributed State & Stream Processing and Platform, Coordination & Reliability.
   - **Description:** Define the critical coastal-warning path and how delivery reliability is measured.
@@ -208,7 +208,7 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 
 ### 15. Service and Deployment Boundaries
 
-- [x] **Contribution documented** — [Canonical and Storage Contract, §5](Canonical-and-Storage-Contract.md#5-placement-on-four-kubernetes-nodes) provides a four-node placement example, worker resource implications, and service-owned storage isolation requirements.
+- [x] **Contribution documented** — [Canonical and Storage Contract, §5](Canonical-and-Storage-Contract.md#5-placement-on-four-kubernetes-nodes) provides canonical placement and resource requirements. [Ingestion and Messaging Contract, §4](Ingestion-and-Messaging-Contract.md#4-streams-replication-and-capacity) and [Coastal Delivery and Validation, §3](Coastal-Delivery-and-Validation.md#3-durable-critical-path) add broker isolation and recipient-storage needs.
 - [ ] **Agreement finalized**
   - **Remaining before finalization:** Platform must complete the service inventory, capacity and HA plan, ports/configuration/Secrets, probes, placement, shutdown/rollout and admission conventions, required images, and reproducible startup procedure.
   - **Lead:** Platform, Coordination & Reliability.
@@ -219,7 +219,7 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 
 ### 16. Observability and Acceptance Evidence
 
-- [x] **Contribution documented** — [Audit, Analytics, and Validation, §§7–8](Audit-Analytics-and-Validation.md#7-remaining-validation-gates) and [Wildfire Processing Contract, §8](Wildfire-Processing-Contract.md#8-required-evidence) list storage/audit/processing acceptance scenarios and evidence needs.
+- [x] **Contribution documented** — [Audit, Analytics, and Validation, §§7–8](Audit-Analytics-and-Validation.md#7-remaining-validation-gates) and [Wildfire Processing Contract, §8](Wildfire-Processing-Contract.md#8-required-evidence) list storage/audit/processing scenarios. [Validation and Replay Contract, §6](Validation-and-Replay-Contract.md#6-evidence) and [Coastal Delivery and Validation, §§5–7](Coastal-Delivery-and-Validation.md#5-delivery-evidence-and-reliability-target) add byte preservation, replay/auth, acceptance, recipient receipt, latency, and loss-reconciliation evidence.
 - [ ] **Agreement finalized**
   - **Remaining before finalization:** Platform must assemble the shared metric/evidence matrix, names/labels, log/trace conventions, harness ownership, and integrated scenarios with ingestion/delivery. Listed scenarios are not executed results.
   - **Lead:** Platform, Coordination & Reliability.
@@ -229,29 +229,12 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
   - **Ownership boundary:** Platform, Coordination & Reliability owns shared observability infrastructure and the end-to-end test harness. Each component owner supplies service instrumentation, scenarios, assertions, and interpretation for its area.
   - **Completion evidence:** Metric/evidence matrix assigning each acceptance criterion to a measurement, scenario, and responsible owner.
 
-## Recommended Agreement Order
+## Remaining Shared Work
 
-- [x] Document the core canonical schema and identity/revision decisions: items **1–2**. Remaining compatibility and lifecycle ambiguities are listed above.
-- [ ] Finalize the common input envelope: item **3**.
-- [x] Document canonical write behavior and storage/processor durability boundaries: contributions to items **4 and 6**.
-- [ ] Finalize concrete canonical-write and end-to-end acknowledgement interfaces: items **4 and 6**.
-- [x] Select storage topology and document fencing requirements: contributions to items **5 and 7**.
-- [ ] Finalize platform ownership/fencing and review placement feasibility: items **5 and 7**.
-- [x] Document core wildfire, read/audit, completeness, and analytics semantics: items **9, 12, and 13**.
-- [ ] Finalize P1 agreements before the corresponding shared-boundary implementation begins: items **8–16**.
-- [ ] Run one shared contract review to resolve inconsistent identifiers, ordering rules, acknowledgement points, and error behavior across documents.
+- [ ] Freeze concrete schemas, request/response examples, broker configuration, and cross-service fixtures for the documented designs.
+- [ ] Complete platform ownership/fencing, deployment, and observability agreements: **5, 15, and 16**.
+- [ ] Resolve the compatibility questions listed per item, including report identity, feed/sensor behavior, wildfire lineage, and audit inclusion/extensions.
+- [ ] Review the shared contracts with their producers and consumers; check **Agreement finalized** only when the completion rule is met.
+- [ ] Make the first integration path reproducible: **one source → durable input → canonical storage → read or notification**, with owners, fixtures, assertions, and traceable evidence.
 
-## Implementation Readiness
-
-- [x] Distributed State & Stream Processing architectural decisions and core contracts are written and linked from this checklist.
-- [x] Storage, wildfire, audit, and analytics validation gates and acceptance scenarios are recorded separately from completed design work.
-- [ ] All P0 agreements have been reviewed by their leads and collaborators.
-- [ ] Each planned feature has its relevant P1 agreements finalized.
-- [ ] Concrete shared fixtures are available to producers and consumers; current behavior tables still need executable input/output datasets.
-- [ ] Each component owner can implement against finalized shared interfaces without waiting for another owner's complete subsystem.
-- [x] The first integration path is identified: **one source → durable input → canonical storage → read or notification**.
-- [ ] Choose that path's source, owners, fixtures, assertions, and evidence so its exit condition is reproducible.
-- [x] Contract-change review rule is recorded: the proposing owner documents the change, affected component owners review it, and shared fixtures are updated before integration.
-- [ ] Confirm that all affected owners have adopted that review rule and completed the initial shared review.
-
-Implementation readiness means agreements and examples exist. Full distributed storage, connectors, deployment automation, and failure-test results are later implementation deliverables. The linked documents retain their unchecked implementation/compatibility gates; this checklist does not mark those results as achieved.
+For contract changes, the proposing owner updates the affected contract; affected component owners review it and update shared fixtures before integration. Runtime, load, and fault results belong in the retained contracts' validation/evidence checklists and must remain unchecked until demonstrated.

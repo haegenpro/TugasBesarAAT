@@ -4,7 +4,7 @@ Lead: Distributed State & Stream Processing. Collaborators: Platform, Coordinati
 
 Selected design: immutable materialized snapshots for explicit audit sessions only, a short write barrier to pin read views, copying after writes resume, globally ordered pause-and-retry session pagination, shared session listing/checksum, sliding retention with a hard maximum, live authoritative-primary ordinary reads, and on-request canonical analytics.
 
-See [Decisions and Readiness](Decisions-and-Readiness.md) for authority, the decision record, and final four-node/three-copy topology with two-copy acknowledgement.
+The [M2 assignment](IF4031%20-%20Tugas%20Besar%20-%20M2.md) is authoritative. The four-node/three-copy topology and two-copy acknowledgement are defined in [Canonical and Storage Contract](Canonical-and-Storage-Contract.md). Implementation and compatibility checks remain below.
 
 ## 1. Prescribed Audit Contract
 
@@ -132,7 +132,7 @@ Use exact counts, common filters, and the same active/inactive membership rule a
 
 Dashboard figures match audit when computed from the same snapshot or a proven stable processing point. On-request live queries during concurrent updates need not equal an earlier audit snapshot; display their data boundary rather than claiming they do. Exact cross-panel consistency requires a common read boundary as well.
 
-During unavailable partitions, show available aggregates with a visible incomplete indicator and unavailable-unit context. Do not fill missing partitions with zero or add primary and replica totals. Apply bounded queries and resource/concurrency limits so analytics cannot starve critical ingestion or notifications. Add caching or derived counters only if measurements justify revisiting decision 25.
+During unavailable partitions, show available aggregates with a visible incomplete indicator and unavailable-unit context. Do not fill missing partitions with zero or add primary and replica totals. Apply bounded queries and resource/concurrency limits so analytics cannot starve critical ingestion or notifications. Add caching or derived counters only if measurements justify changing on-request aggregation.
 
 ## 7. Remaining Validation Gates
 

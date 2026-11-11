@@ -2,7 +2,7 @@
 
 Lead: Distributed State & Stream Processing. Collaborators: Platform, Coordination & Reliability for placement/coordination and Reliable Ingestion & Delivery for ingestion/replay.
 
-Status and decision authority are defined in [Decisions and Readiness](Decisions-and-Readiness.md). This is a behavioral contract and implementation guide, not executable DDL or a proven deployment.
+This contract records the selected canonical storage design. The [M2 assignment](IF4031%20-%20Tugas%20Besar%20-%20M2.md) is authoritative; proposed implementation details and unverified guarantees are identified below. Deployment and evaluator compatibility remain to be demonstrated.
 
 ## 1. Preserve the Existing Canonical Shape
 
@@ -72,7 +72,7 @@ Database primary ownership and Aggregator/processor ownership are distinct. Data
 
 ## 5. Placement on Four Kubernetes Nodes
 
-Final review A2/A3 restored four nodes, three copies, and two-copy durable acknowledgement. The following is a derived minimum-size example. `P` means initial primary, `R` standby, and `absent` no copy. Failover may change primary roles without changing copy placement.
+The selected topology uses four nodes, three copies, and two-copy durable acknowledgement. The following is a derived minimum-size example. `P` means initial primary, `R` standby, and `absent` no copy. Failover may change primary roles without changing copy placement.
 
 | Worker group | Node A | Node B | Node C | Node D |
 | --- | --- | --- | --- | --- |
@@ -130,7 +130,7 @@ Only the storage-owning service uses database credentials. An authorized distrib
 - [Patroni replication modes](https://patroni.readthedocs.io/en/latest/replication_modes.html)
 - [PostgreSQL WAL/durable acknowledgement](https://www.postgresql.org/docs/16/runtime-config-wal.html)
 
-Project requirements and M1 archive paths are identified in [Decisions and Readiness](Decisions-and-Readiness.md#sources). No deployment benchmark has been run for this document.
+Project authority: [M2 assignment](IF4031%20-%20Tugas%20Besar%20-%20M2.md). Existing identity/storage behavior is defined in [HazardEvent Representation](HazardEvent%20Representation.md), `aggregator/internal/domain/hazard.go`, `aggregator/internal/store/`, and `store/init.sql`. No deployment benchmark has been run for this document.
 
 ## 8. Consistency Boundaries and Audit Write Admission
 
