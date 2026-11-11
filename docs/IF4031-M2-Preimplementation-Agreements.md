@@ -8,7 +8,7 @@ Use the [M2 specification](IF4031%20-%20Tugas%20Besar%20-%20M2.md) as the author
 
 ## Current Status — 11 November 2026
 
-Core designs are documented for Distributed State & Stream Processing (**1, 2, 4, 7, 9, 12, 13**) and Reliable Ingestion & Delivery (**3, 6, 8, 10, 11, 14**). Platform-led agreements (**5, 15, 16**) have contributions but still need their shared contracts completed. Concrete wire schemas/configuration, integration fixtures, cross-component review, and the compatibility questions listed below remain open. Documented design does not imply joint sign-off or runtime validation.
+Core designs are documented for Distributed State & Stream Processing (**1, 2, 4, 7, 9, 12, 13**) and Reliable Ingestion & Delivery (**3, 6, 8, 10, 11, 14**). Platform-led agreements (**5, 15, 16**) have contributions but still need their shared contracts completed. The 13 storage/processing and ingestion/delivery written agreements are finalized as the implementation baseline in this session: concrete interfaces, two Avro schemas, broker defaults, and expected-output fixtures are specified and checked for consistency. The user selected historical-restoration precedence, a separate field-report workflow, and active-only audit membership. Platform-led agreements **5, 15, and 16** remain open. External resources are not set up locally; deployment, source characterization, reference compatibility, and runtime evidence are implementation/integration gates, not claimed results or implied sign-off by absent teammates.
 
 | Document | Existing contract coverage |
 | --- | --- |
@@ -33,23 +33,23 @@ The lead drafts each agreement. Collaborators review the parts their components 
 
 ## Completion Rule
 
-Each item tracks two separate milestones: a checked **Core design documented** or **Contribution documented** records existing written work; **Agreement finalized** remains unchecked until the lead and collaborators have reviewed a written decision containing:
+Each item tracks documented coverage and the written implementation baseline separately. **Agreement finalized** means the application-side contract has concrete decisions, examples and a consistency review in this session, including the user’s answers where a policy choice was needed. It does not certify deployment, external compatibility, runtime correctness, or another teammate’s review. The baseline contains:
 
 - Concrete schema, interface, or behavioral rules.
 - At least one valid example or representative configuration.
 - Relevant duplicate, stale-update, ordering, and failure behavior.
 - Expected results that can become shared fixtures or integration assertions.
-- No unresolved decision that blocks another component owner's implementation.
+- No unresolved application-side interface or policy decision that blocks independent storage/processing or ingestion/delivery implementation. Required platform capabilities are explicit dependencies.
 
-The checked documentation milestones below refer to the linked contracts, including their stated qualifications. Runtime acceptance checklists remain in those contracts and are separate from agreement sign-off.
+The checked documentation milestones below refer to the linked contracts, including their stated qualifications. [Shared fixtures](fixtures/m2-contract-examples.json) and the [raw Avro schema](fixtures/raw-input-v1.avsc) make those interfaces inspectable. Platform-led agreements remain unchecked until their shared mechanism/deployment/observability decisions are supplied. Runtime acceptance checklists are separate and do not need to pass before design work is recorded.
 
 ## P0 — Agree Before Implementing Shared Boundaries
 
 ### 1. Canonical HazardEvent Schema
 
 - [x] **Core design documented** — [Canonical and Storage Contract, §1](Canonical-and-Storage-Contract.md#1-preserve-the-existing-canonical-shape) defines canonical fields, types, enums, UTC timestamps, source identity, and structured attributes.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Review source-specific mappings, canonical schema versioning, and representative source/canonical JSON examples against the [external-schema acceptance policy](Validation-and-Replay-Contract.md#1-schema-acceptance-policy). Align the older wire-format document with M2 arrays and source/type additions.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Use the M2 wire format and shared examples. Production coastal validation and province assignment require actual sensor behavior and the immutable production reference table; synthetic fixture geography is for tests only.
   - **Lead:** Distributed State & Stream Processing.
   - **Collaborator:** Reliable Ingestion & Delivery.
   - **Description:** Define the canonical representation stored and returned by the system. Distinguish raw source observations from derived HazardEvents.
@@ -59,8 +59,8 @@ The checked documentation milestones below refer to the linked contracts, includ
 ### 2. Identity and Revision Rules
 
 - [x] **Core design documented** — [Canonical and Storage Contract, §2](Canonical-and-Storage-Contract.md#2-identity-revisions-and-tombstones) defines UUID preservation, duplicate/stale outcomes, revisions, and tombstones; [Wildfire Processing Contract, §5](Wildfire-Processing-Contract.md#5-fire-identity-and-lineage) defines birth, merge, split, and restoration identity.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Resolve ambiguous historical-restoration precedence and inactive audit membership. Align source-operation ordering and report/operation identity with [report idempotency](Ingestion-and-Messaging-Contract.md#2-report-idempotency) and [ordered replay](Validation-and-Replay-Contract.md#5-ordered-replay); add concrete lifecycle fixtures with expected state.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Implement restoration-first matching with deterministic multiple-match ties and unmatched-child assignment. Audit active records only; retain tombstones internally. The shared lifecycle fixtures cover merge, split, restoration collisions, duplicates, stale updates, and retractions.
   - **Lead:** Distributed State & Stream Processing.
   - **Collaborator:** Reliable Ingestion & Delivery.
   - **Description:** Ensure independent components recognize the same observation or event and apply updates consistently.
@@ -70,8 +70,8 @@ The checked documentation milestones below refer to the linked contracts, includ
 ### 3. Common Input Message Envelope
 
 - [x] **Core design documented** — [Ingestion and Messaging Contract, §3](Ingestion-and-Messaging-Contract.md#3-raw-envelope) defines a separate registry-framed Avro raw envelope with exact payload bytes, stable operation/source identity, namespace/position, time, feed-clock, trace, and ownership context.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Freeze the Avro field names/types, per-source mandatory/optional rules, schema version, and representative create/update/retract/control frames. Verify compatibility with existing codecs and cached-schema startup behavior.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Implement the exact Raw Input v1 Avro schema, per-source rules, framing, byte/reference preservation, and identity algorithm. Validate codec integration and durable cached-schema cold starts; no field names/types remain undecided.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborator:** Distributed State & Stream Processing.
   - **Description:** Establish one transport envelope for inputs entering validation and processing.
@@ -81,8 +81,8 @@ The checked documentation milestones below refer to the linked contracts, includ
 ### 4. Canonical Write Contract
 
 - [x] **Core design documented** — [Canonical and Storage Contract, §§4, 7–8](Canonical-and-Storage-Contract.md#4-selected-durability-and-failover-semantics) and [Wildfire Processing Contract, §7](Wildfire-Processing-Contract.md#7-durable-state-progress-and-output) define two-copy success, logical write outcomes, idempotent correction batches, atomic publication intent, and write admission.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Freeze the concrete canonical adapter schema, operation identity, revision/token fields, error mapping, and success/failure examples against [acceptance boundaries](Ingestion-and-Messaging-Contract.md#1-acceptance-and-completion-boundaries) and [replay completion](Validation-and-Replay-Contract.md#5-ordered-replay).
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Implement Canonical Adapter v1, reconciliation reads, atomic large-batch references, and the shared write outcomes. Platform supplies current ownership validation at the protected commit boundary; no stale-token preflight-only workaround is permitted.
   - **Lead:** Distributed State & Stream Processing.
   - **Collaborators:** Platform, Coordination & Reliability and Reliable Ingestion & Delivery.
   - **Description:** Define how ingestion and processing safely change canonical state.
@@ -104,8 +104,8 @@ The checked documentation milestones below refer to the linked contracts, includ
 ### 6. Durability and Acknowledgement Rules
 
 - [x] **Core design documented** — [Ingestion and Messaging Contract, §§1–2 and 4–5](Ingestion-and-Messaging-Contract.md#1-acceptance-and-completion-boundaries) defines broker-first 202 acceptance, scoped durable report identity, reject-new capacity behavior, and commit-before-handoff acknowledgement. [Coastal Delivery and Validation, §3](Coastal-Delivery-and-Validation.md#3-durable-critical-path) defines durable warning intent and recipient commit before acknowledgement.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Freeze report receipt/error examples and the admission-ledger/publication recovery sequence. Verify evaluator support for mandatory client report IDs; agree acceptance tables and crash fixtures across input, processor, canonical, and recipient boundaries. Pinned broker disk-flush/replication behavior still needs proof.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Implement the specified broker-first admission/ledger recovery, stable field-report key/receipt, separate report projection, crash table and service-owned durability. Verify client integration and actual persistence boundaries in implementation tests.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborators:** Distributed State & Stream Processing and Platform, Coordination & Reliability.
   - **Description:** Define the persistent state required before any component claims that work has succeeded.
@@ -115,8 +115,8 @@ The checked documentation milestones below refer to the linked contracts, includ
 ### 7. Storage Topology and Failure Model
 
 - [x] **Core design documented** — [Canonical and Storage Contract, §§3–6](Canonical-and-Storage-Contract.md#3-distribution-and-constraints) selects source-key hash distribution, Citus/Patroni, four nodes, three copies, two-copy acknowledgement, placement, single-loss behavior, and replacement/rebalancing rules.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Platform must confirm capacity, coordinator/control-plane/DCS availability, version compatibility, and concrete placement/configuration. Add a joint read/write failure matrix; keep deployment and fault demonstrations as later validation gates.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Implement the four-node, three-copy, two-copy-acknowledgement contract and v1 source-pair distribution key. Platform must supply feasible resources, coordinator/control-plane/DCS availability, version/placement configuration and recovery orchestration under item 15. Do not describe that platform work as complete.
   - **Lead:** Distributed State & Stream Processing.
   - **Collaborator:** Platform, Coordination & Reliability.
   - **Description:** Choose a deployment and data-distribution design capable of meeting the required storage and recovery constraints.
@@ -130,8 +130,8 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 ### 8. Satellite Acquisition-to-Processing Contract
 
 - [x] **Core design documented** — [Ingestion and Messaging Contract, §5](Ingestion-and-Messaging-Contract.md#5-satellite-handoff-and-retention) defines original namespace/offset/payload preservation, gap detection, persistence-before-receipt-progress, and deletion only after durable processor handoff. [Wildfire Processing Contract, §7](Wildfire-Processing-Contract.md#7-durable-state-progress-and-output) separates prepared and applied progress.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Verify actual feed reconnect inclusion/exclusion, namespace, confidence, update/retract, and clock semantics. Freeze the durable handoff acknowledgement and authorized history-replay interface; supply reconnect/duplicate/update/retract fixtures before enabling transport deletion.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Implement the specified history append/replay/receipt interface and contiguous progress. No feed credential/session/reference setup exists locally: characterize actual reconnect/start-offset/update/confidence/clock semantics before enabling retirement or claiming live compatibility.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborator:** Distributed State & Stream Processing.
   - **Description:** Define the durable, replayable satellite input supplied to wildfire processing.
@@ -141,8 +141,8 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 ### 9. Wildfire Processing Semantics
 
 - [x] **Core design documented** — [Wildfire Processing Contract](Wildfire-Processing-Contract.md) defines event time, transitive 1 km/360-minute connectivity, qualification, canonical mapping, stable identities, lineage, watermark policy, late corrections, and transactional state/output preparation.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Resolve restoration collisions and reference-compatible geography/identity rules. Select lateness from measurements, freeze feed-clock behavior, and turn the logical sequence table into concrete input/output fixtures. Restart/load evidence remains an implementation gate.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Implement the deterministic graph/identity/numeric/lifecycle rules and golden fixtures. Configure and record allowed lateness per run; obtain the real province/reference artifacts and feed evidence. Reference, accelerated-playback, restart and live-feed proof remain implementation acceptance work.
   - **Lead:** Distributed State & Stream Processing.
   - **Collaborator:** Reliable Ingestion & Delivery.
   - **Description:** Make derived wildfire results deterministic across normal execution, replay, and restart.
@@ -152,8 +152,8 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 ### 10. Broker Topology and Consumer Configuration
 
 - [x] **Core design documented** — [Ingestion and Messaging Contract, §4](Ingestion-and-Messaging-Contract.md#4-streams-replication-and-capacity) separates satellite, coastal, and report raw streams, requires disk flushing plus replication, bounded consumption and reject-new capacity behavior. [Coastal Delivery and Validation, §3](Coastal-Delivery-and-Validation.md#3-durable-critical-path) specifies a dedicated durable recipient consumer.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Freeze subjects, stream and consumer names, retention/deletion mode, replica placement, acknowledgement timeout, retry/backoff and in-flight/resource limits with platform. Three input replicas are a proposed topology; verify pinned broker publish-ack durability and restart/fault behavior. M1 messaging remains the baseline, not the completed M2 configuration.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Apply the fixed stream/subject/consumer, retention, fsync, replication, acknowledgement and retry contract. Platform allocates capacity and pins broker configuration. Validate initial numeric limits and fault recovery rather than treating defaults as benchmark results.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborator:** Platform, Coordination & Reliability.
   - **Description:** Align application messaging guarantees with the deployed broker's persistence and resource configuration.
@@ -164,8 +164,8 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 ### 11. Failure, Quarantine, and Replay Contract
 
 - [x] **Core design documented** — [Validation and Replay Contract](Validation-and-Replay-Contract.md) defines compatible additions/lossless promotions, parking for incompatible changes, complete original-byte failure records, automatic transient retries, Ops-only replay, source-entity ordering, and repeated-failure handling.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Add concrete malformed/incompatible/transient/replay fixtures and record/API schemas. Resolve ordering for unparseable identities, oversized-input preservation, failure-store durability, and replay/live-operation serialization. Agree operational payload access separately from audit metadata access.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Implement the failure database/attempt records, Ops APIs, source/namespace fallback gate, entity ordering, durable oversized references, and replay fixtures. Validate quotas, byte preservation, auth, crash recovery and replay/live serialization.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborator:** Distributed State & Stream Processing.
   - **Description:** Preserve failed input and recover it without blocking unrelated work or creating duplicate effects.
@@ -175,8 +175,8 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 ### 12. Read and Audit API Contract
 
 - [x] **Core design documented** — [Audit, Analytics, and Validation, §§1–5](Audit-Analytics-and-Validation.md#1-prescribed-audit-contract) defines endpoint parameters, ordering, filtering, pagination, checksum serialization, current location reporting, and explicit-session snapshot semantics.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Finalize the optional snapshot API shape, inactive audit population, cursor/error details, concrete responses and fixed checksum dataset. The [Validation and Replay Contract, §4](Validation-and-Replay-Contract.md#4-inspection-and-unprocessed) now defines failed states, recovery removal, and audit-versus-Ops access; add concrete Appendix A response/pagination/error fixtures and freeze the service interface.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Implement the prescribed endpoint schemas plus the optional explicit-session interface, signed cursors and active-only inclusion rule. Use the fixed ordering/checksum/unprocessed fixtures. Verify optional evaluator compatibility during integration without changing default requests.
   - **Lead:** Distributed State & Stream Processing.
   - **Collaborator:** Reliable Ingestion & Delivery.
   - **Description:** Define externally observable reads and audit evidence consistently across services.
@@ -187,8 +187,8 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 ### 13. Partial-Result and Completeness Contract
 
 - [x] **Core design documented** — [Audit, Analytics, and Validation, §§2–3 and 6](Audit-Analytics-and-Validation.md#2-immutable-materialized-snapshot) defines bounded partial reads, safe ordered-prefix continuation, snapshot-copy fallback, and visible dashboard incompleteness.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Agree logical versus physical unavailable-unit identifiers and exact response examples with platform. Set measured request deadlines and snapshot lifetimes; validate per-unit fallback and capture cleanup during implementation.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Implement physical unavailable-unit reporting, safe-prefix continuation, snapshot-copy fallback and initial budgets. Platform supplies authoritative expiry/fencing. Prove cleanup, fallback and timing budgets under faults.
   - **Lead:** Distributed State & Stream Processing.
   - **Collaborator:** Platform, Coordination & Reliability.
   - **Description:** Expose incomplete reads clearly when storage units are unavailable.
@@ -198,8 +198,8 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 ### 14. Critical Notification Contract
 
 - [x] **Core design documented** — [Coastal Delivery and Validation](Coastal-Delivery-and-Validation.md) defines sensor validation/isolation, critical warning delivery after durable raw acceptance independently of canonical writes, dedicated recipient consumption, transactional receipt/deduplication, fresh/backlog scheduling, and zero-loss/p95 ≤5-second measurement requirements.
-- [ ] **Agreement finalized**
-  - **Remaining before finalization:** Verify sensor critical/quality/correction and cursor/retention semantics. Freeze warning identity/payload, recipient routing/receipt schema, retry configuration, scheduling rule, and evaluator-compatible latency denominator/origin/window and error-budget accounting. Supply critical/retry examples and prove recipient durability.
+- [x] **Agreement finalized**
+  - **Implementation / integration follow-up:** Implement the typed warning schema, stable notification identity, separate canonical/warning intents, transactional recipient receipt, fair scheduling and loss/latency accounting. The manifest is present, but no local sensor is configured; characterize the prescribed image before claiming its quality/cursor/critical behavior verified.
   - **Lead:** Reliable Ingestion & Delivery.
   - **Collaborators:** Distributed State & Stream Processing and Platform, Coordination & Reliability.
   - **Description:** Define the critical coastal-warning path and how delivery reliability is measured.
@@ -229,12 +229,14 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
   - **Ownership boundary:** Platform, Coordination & Reliability owns shared observability infrastructure and the end-to-end test harness. Each component owner supplies service instrumentation, scenarios, assertions, and interpretation for its area.
   - **Completion evidence:** Metric/evidence matrix assigning each acceptance criterion to a measurement, scenario, and responsible owner.
 
-## Remaining Shared Work
+## Implementation Baseline and Remaining Dependencies
 
-- [ ] Freeze concrete schemas, request/response examples, broker configuration, and cross-service fixtures for the documented designs.
-- [ ] Complete platform ownership/fencing, deployment, and observability agreements: **5, 15, and 16**.
-- [ ] Resolve the compatibility questions listed per item, including report identity, feed/sensor behavior, wildfire lineage, and audit inclusion/extensions.
-- [ ] Review the shared contracts with their producers and consumers; check **Agreement finalized** only when the completion rule is met.
-- [ ] Make the first integration path reproducible: **one source → durable input → canonical storage → read or notification**, with owners, fixtures, assertions, and traceable evidence.
+- [x] Storage/processing and ingestion/delivery contracts **1–4, 6–14** are written with concrete interfaces, errors, identity/order rules and shared fixtures.
+- [x] Shared HazardEvent documentation includes M2 enums, structured attributes and canonical versioning; raw-input and coastal-warning Avro schemas are available in `docs/fixtures/`.
+- [x] Historical restoration wins before ordinary identity survival; field reports stay in a separate durable workflow; audit listing/count/checksum include active HazardEvents only.
+- [x] Documentation/schema/fixture consistency is reviewed in this session. No runtime or absent-teammate approval is implied.
+- [ ] Platform must finalize **5, 15, and 16**: authoritative ownership/fencing/expiry, viable deployment and capacity, and shared observability/evidence conventions. Their application-side requirements are already specified.
+- [ ] Obtain/configure the satellite group token, actual feed/session behavior, reference wildfire results, province table, and local Sensor Pantai environment. The user confirmed these are not set up locally. Keep credentials in Secrets; no tokens belong in fixtures or docs.
+- [ ] During implementation, validate versions, tune starting limits, prove byte/durability/atomicity guarantees, run the reference/restart/failure scenarios, and demonstrate the first traced source-to-canonical/read path plus the independent critical-warning path.
 
-For contract changes, the proposing owner updates the affected contract; affected component owners review it and update shared fixtures before integration. Runtime, load, and fault results belong in the retained contracts' validation/evidence checklists and must remain unchecked until demonstrated.
+Contract changes update the relevant retained document and shared fixtures before integration. Source/reference evidence that conflicts with this selected baseline reopens the affected rule explicitly. Pending platform work is not silently assigned to storage/ingestion, and later validation must not be reported as already passed.
