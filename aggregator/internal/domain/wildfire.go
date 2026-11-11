@@ -33,7 +33,7 @@ func ValidateWildfire(attrs map[string]any) error {
 		}
 		return true
 	}
-	if a.DetectionCount < 2 || int64(len(a.DetectionKeys)) != a.DetectionCount || len(a.Satellites) < 2 || !unique(a.Satellites) || !unique(a.DetectionKeys) || (a.MaxConfidence != "h" && a.MaxConfidence != "n") || a.TotalFRPMW < 0 || math.IsNaN(a.TotalFRPMW) || math.IsInf(a.TotalFRPMW, 0) {
+	if a.DetectionCount < 2 || int64(len(a.DetectionKeys)) != a.DetectionCount || len(a.Satellites) < 1 || !unique(a.Satellites) || !unique(a.DetectionKeys) || (a.MaxConfidence != "h" && a.MaxConfidence != "n") || a.TotalFRPMW < 0 || math.IsNaN(a.TotalFRPMW) || math.IsInf(a.TotalFRPMW, 0) {
 		return fmt.Errorf("invalid wildfire count, membership, confidence or FRP")
 	}
 	return nil

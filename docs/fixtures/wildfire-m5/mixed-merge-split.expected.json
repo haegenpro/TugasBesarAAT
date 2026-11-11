@@ -1,0 +1,11 @@
+{
+  "notes": [
+    "Synthetic reproduction of unspecified simultaneous split and merge precedence.",
+    "At offset 7: ABCDE and FG are active. Offset 8 moves C: successors AB and DECFG. The related output is blocked, never assigned by random ID order."
+  ],
+  "blocked_offset": 8,
+  "diagnostic": "ambiguous_merge_split",
+  "new_intents": 0,
+  "settled_fire_state": "unchanged from offset 7",
+  "input_frontier": 8
+}

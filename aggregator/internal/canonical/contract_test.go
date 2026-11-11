@@ -178,3 +178,12 @@ func TestHTTPDeadlineBoundsUnknownOutcome(t *testing.T) {
 	require.Equal(t, 503, w.Code)
 	require.Less(t, time.Since(start), 2250*time.Millisecond)
 }
+
+func TestM5SingleSatelliteCanonicalValidation(t *testing.T) {
+	b := fixtureBatch()
+	m := &b.Mutations[0]
+	m.Source = domain.SourceSatelit
+	m.Event.HazardType = domain.HazardWildfire
+	m.Event.Attributes = map[string]any{"detection_count": 2, "satellites": []string{"N20"}, "max_confidence": "n", "total_frp_mw": 20, "detection_keys": []string{"a", "b"}}
+	require.NoError(t, Validate(b))
+}

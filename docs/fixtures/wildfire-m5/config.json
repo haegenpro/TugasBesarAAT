@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "namespace": "fixture-satellite-session",
+  "initial_offset": 1,
+  "allowed_lateness_seconds": 1800,
+  "province_file": "provinces.json",
+  "province_sha256": "e54f343525a296ebe49de9156ceef3edea61bb288f46c7744e55b5caf6cc5f75"
+}
