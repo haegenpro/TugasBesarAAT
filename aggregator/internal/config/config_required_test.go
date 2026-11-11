@@ -6,6 +6,8 @@ import (
 )
 
 func TestConfigurationRequiresExplicitValues(t *testing.T) {
+	t.Setenv("CANONICAL_ADAPTER_ENABLED", "false")
+	t.Setenv("CANONICAL_SERVICE_TOKEN", "")
 	values := map[string]string{
 		"AGGREGATOR_ADMIN_TOKEN":     "test-aggregator-admin-token",
 		"BMKG_SEISMIC_READER_SCHEMA": "schemas/seismic.avsc",
@@ -34,6 +36,21 @@ func TestConfigurationRequiresExplicitValues(t *testing.T) {
 	if _, err := Load(); err != nil {
 		t.Fatalf("explicit configuration rejected: %v", err)
 	}
+	t.Run("canonical adapter opt in", func(t *testing.T) {
+		t.Setenv("CANONICAL_ADAPTER_ENABLED", "true")
+		if _, err := Load(); err == nil {
+			t.Fatal("enabled without dedicated credential")
+		}
+		t.Setenv("CANONICAL_SERVICE_TOKEN", "dedicated-canonical-service")
+		cfg, err := Load()
+		if err != nil || !cfg.CanonicalEnabled {
+			t.Fatal(err)
+		}
+		t.Setenv("CANONICAL_SERVICE_TOKEN", values["AGGREGATOR_ADMIN_TOKEN"])
+		if _, err = Load(); err == nil {
+			t.Fatal("accepted admin credential for canonical writes")
+		}
+	})
 	for key := range values {
 		for _, missing := range []string{"", "   "} {
 			t.Run(key+"/"+missing, func(t *testing.T) {

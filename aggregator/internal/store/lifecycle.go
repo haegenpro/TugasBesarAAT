@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"time"
 
@@ -30,20 +31,32 @@ func queueLifecycle(ctx context.Context, tx pgx.Tx, e domain.LifecycleEvent) err
 	if err != nil {
 		return err
 	}
+	if e.EventType == "hazard_corrected" || e.EventType == "hazard_retracted" {
+		return queueCanonicalLifecycle(ctx, tx, e, b)
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO report_lifecycle_events(event_id,record_id,revision,event_payload) VALUES ($1,$2,$3,$4)`, e.EventID, e.RecordID, e.Revision, b); err != nil {
 		return err
 	}
 	headers := http.Header{}
 	platform.Inject(ctx, headers)
-	_, err = tx.Exec(ctx, `INSERT INTO report_lifecycle_outbox(event_id,traceparent,tracestate) VALUES ($1,$2,$3)`, e.EventID, headers.Get("traceparent"), headers.Get("tracestate"))
+	_, err = tx.Exec(ctx, `INSERT INTO report_lifecycle_outbox(event_id,traceparent,tracestate,attempt_id) VALUES ($1,$2,$3,$4)`, e.EventID, headers.Get("traceparent"), headers.Get("tracestate"), attemptID(tx))
 	return err
 }
 
 func (s *Store) saveHazardTx(ctx context.Context, tx pgx.Tx, e domain.HazardEvent, cid string, live bool) (domain.HazardEvent, bool, error) {
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(e.Source)+":"+e.SourceRefID); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,726104))`, "entity:"+mustRoute(e.Source, e.SourceRefID)); err != nil {
 		return e, false, err
 	}
-	old, err := scanRow(tx.QueryRow(ctx, `SELECT `+selectColumns+` FROM hazard_events WHERE source=$1 AND source_ref_id=$2 FOR UPDATE`, e.Source, e.SourceRefID))
+	route := mustRoute(e.Source, e.SourceRefID)
+	var namespace *string
+	err := tx.QueryRow(ctx, "SELECT source_namespace FROM canonical_entities WHERE route_key=$1 AND source=$2 AND source_ref_id=$3 FOR UPDATE", route, e.Source, e.SourceRefID).Scan(&namespace)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return e, false, err
+	}
+	if namespace != nil {
+		return e, false, fmt.Errorf("ordered canonical identity requires Canonical Adapter v1")
+	}
+	old, err := scanRow(tx.QueryRow(ctx, `SELECT `+selectColumns+` FROM hazard_events WHERE route_key=$1 AND source=$2 AND source_ref_id=$3 FOR UPDATE`, route, e.Source, e.SourceRefID))
 	inserted := errors.Is(err, pgx.ErrNoRows)
 	if err != nil && !inserted {
 		return e, false, err
@@ -56,13 +69,11 @@ func (s *Store) saveHazardTx(ctx context.Context, tx pgx.Tx, e domain.HazardEven
 		if err = tx.QueryRow(ctx, `SELECT revision FROM hazard_events WHERE hazard_id=$1`, e.HazardID).Scan(&revision); err != nil {
 			return e, false, err
 		}
-		// Compare canonical JSON: normalize time zones and source numeric representation.
-		a, _ := json.Marshal(e)
-		b, _ := json.Marshal(old)
-		var av, bv any
-		json.Unmarshal(a, &av)
-		json.Unmarshal(b, &bv)
-		changed = !reflect.DeepEqual(av, bv)
+		var compareErr error
+		changed, compareErr = materialChange(e, old)
+		if compareErr != nil {
+			return e, false, compareErr
+		}
 		if changed {
 			revision++
 		}
@@ -75,9 +86,13 @@ func (s *Store) saveHazardTx(ctx context.Context, tx pgx.Tx, e domain.HazardEven
 	if live {
 		seen = domain.Now()
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO hazard_events(hazard_id,source,source_ref_id,hazard_type,severity,area_name,latitude,longitude,occurred_at,ingested_at,attributes,revision,last_seen_at)
- VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
- ON CONFLICT(source,source_ref_id) DO UPDATE SET severity=excluded.severity,area_name=excluded.area_name,latitude=excluded.latitude,longitude=excluded.longitude,occurred_at=excluded.occurred_at,attributes=excluded.attributes,revision=excluded.revision,last_seen_at=COALESCE(excluded.last_seen_at,hazard_events.last_seen_at)`, e.HazardID, e.Source, e.SourceRefID, e.HazardType, e.Severity, e.AreaName, e.Latitude, e.Longitude, e.OccurredAt.Time, e.IngestedAt.Time, attrs, revision, seen)
+	_, err = tx.Exec(ctx, "INSERT INTO canonical_entities(route_key,hazard_id,source,source_ref_id,revision,active,ingested_at) VALUES($1,$2,$3,$4,$5,true,$6) ON CONFLICT(route_key,source,source_ref_id) DO UPDATE SET revision=excluded.revision WHERE canonical_entities.source_namespace IS NULL", route, e.HazardID, e.Source, e.SourceRefID, revision, e.IngestedAt.Time)
+	if err != nil {
+		return e, false, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO hazard_events(route_key,hazard_id,source,source_ref_id,hazard_type,severity,area_name,latitude,longitude,occurred_at,ingested_at,attributes,revision,last_seen_at)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+ ON CONFLICT(route_key,source,source_ref_id) DO UPDATE SET severity=excluded.severity,area_name=excluded.area_name,latitude=excluded.latitude,longitude=excluded.longitude,occurred_at=excluded.occurred_at,attributes=excluded.attributes,revision=excluded.revision,last_seen_at=COALESCE(excluded.last_seen_at,hazard_events.last_seen_at)`, route, e.HazardID, e.Source, e.SourceRefID, e.HazardType, e.Severity, e.AreaName, e.Latitude, e.Longitude, e.OccurredAt.Time, e.IngestedAt.Time, attrs, revision, seen)
 	if err != nil {
 		return e, false, err
 	}
@@ -92,7 +107,7 @@ func (s *Store) saveHazardTx(ctx context.Context, tx pgx.Tx, e domain.HazardEven
 		}
 		headers := http.Header{}
 		platform.Inject(ctx, headers)
-		_, err = tx.Exec(ctx, `INSERT INTO hazard_outbox(hazard_id,event_payload,correlation_id,traceparent,tracestate) VALUES($1,$2,$3,$4,$5)`, e.HazardID, b, cid, headers.Get("traceparent"), headers.Get("tracestate"))
+		_, err = tx.Exec(ctx, `INSERT INTO hazard_outbox(route_key,hazard_id,event_payload,correlation_id,traceparent,tracestate,attempt_id) VALUES($1,$2,$3,$4,$5,$6,$7)`, route, e.HazardID, b, cid, headers.Get("traceparent"), headers.Get("tracestate"), attemptID(tx))
 		if err != nil {
 			return e, false, err
 		}
@@ -128,7 +143,7 @@ func observation(ctx context.Context, tx pgx.Tx, source, entity, id string, payl
 	return err
 }
 func (s *Store) sourceTx(ctx context.Context, source string) (pgx.Tx, error) {
-	tx, err := s.Pool.Begin(ctx)
+	tx, err := s.beginMutation(ctx)
 	if err != nil {
 		return nil, err
 	}

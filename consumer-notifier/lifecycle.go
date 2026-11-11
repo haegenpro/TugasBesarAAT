@@ -61,6 +61,10 @@ func decodeLifecycle(outer map[string]any, cid string) (envelope, error) {
 		if e.Hazard == nil || e.Hazard.HazardID != e.RecordID || e.HazardRevision != e.Revision {
 			return envelope{}, fmt.Errorf("%w: correction identity", errCorruptPayload)
 		}
+	case "hazard_retracted":
+		if e.Hazard != nil || e.HazardRevision != e.Revision {
+			return envelope{}, fmt.Errorf("%w: retraction identity", errCorruptPayload)
+		}
 	case "source_status_changed":
 		if e.Status == nil || e.Status["endpoint"] != e.RecordID {
 			return envelope{}, fmt.Errorf("%w: source status identity", errCorruptPayload)
@@ -105,6 +109,9 @@ func (a *projectionStore) saveLifecycle(ctx context.Context, meta *jetstream.Msg
 	}
 	defer tx.Rollback()
 	keys := []string{"message:" + meta.Stream + ":" + strconv.FormatUint(meta.Sequence.Stream, 10), "event:" + e.EventID}
+	if e.EventType == "hazard_retracted" {
+		keys = append(keys, "hazard:"+e.RecordID)
+	}
 	if e.Hazard != nil {
 		keys = append(keys, "hazard:"+e.Hazard.HazardID)
 	}
@@ -157,6 +164,22 @@ func (a *projectionStore) saveLifecycle(ctx context.Context, meta *jetstream.Msg
 		return tx.Commit()
 	}
 	material := false
+	if e.EventType == "hazard_retracted" {
+		key := "hazard:" + e.RecordID
+		v, err := currentVersion(ctx, tx, key)
+		if err != nil {
+			return err
+		}
+		if e.Revision > v {
+			if _, err = tx.ExecContext(ctx, "DELETE FROM records WHERE hazard_id=$1", e.RecordID); err != nil {
+				return err
+			}
+			if err = setVersion(ctx, tx, key, e.Revision); err != nil {
+				return err
+			}
+			material = true
+		}
+	}
 	if e.Hazard != nil {
 		key := "hazard:" + e.Hazard.HazardID
 		v, err := currentVersion(ctx, tx, key)

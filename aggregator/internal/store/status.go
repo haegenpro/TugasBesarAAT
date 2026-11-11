@@ -3,12 +3,10 @@ package store
 import (
 	"aggregator/internal/domain"
 	"aggregator/internal/middleware"
-	"aggregator/internal/platform"
 	"context"
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5"
-	"net/http"
 	"time"
 )
 
@@ -228,33 +226,4 @@ func (s *Store) Notice(ctx context.Context, id string) (domain.Notice, []domain.
 		out = append(out, e)
 	}
 	return n, out, rows.Err()
-}
-func (s *Store) DeliverLifecycle(ctx context.Context, publish func(context.Context, domain.LifecycleEvent) error) (bool, error) {
-	ctx = middleware.EnsureCorrelationID(ctx)
-	tx, err := s.Pool.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx)
-	var id, traceparent, tracestate string
-	var b []byte
-	err = tx.QueryRow(ctx, `SELECT o.event_id::text,e.event_payload,o.traceparent,o.tracestate FROM report_lifecycle_outbox o JOIN report_lifecycle_events e USING(event_id) ORDER BY o.queued_at,o.event_id LIMIT 1 FOR UPDATE OF o SKIP LOCKED`).Scan(&id, &b, &traceparent, &tracestate)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	var e domain.LifecycleEvent
-	if err = json.Unmarshal(b, &e); err != nil {
-		return true, err
-	}
-	ctx = middleware.WithCorrelationID(platform.Extract(ctx, http.Header{"Traceparent": []string{traceparent}, "Tracestate": []string{tracestate}}), e.CorrelationID)
-	if err = publish(ctx, e); err != nil {
-		return true, err
-	}
-	if _, err = tx.Exec(ctx, `DELETE FROM report_lifecycle_outbox WHERE event_id=$1`, id); err != nil {
-		return true, err
-	}
-	return true, tx.Commit(ctx)
 }

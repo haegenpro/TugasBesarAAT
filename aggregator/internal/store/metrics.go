@@ -20,7 +20,7 @@ func (s *Store) CollectMetrics(ctx context.Context) {
 			platform.Gauge("db_pool_wait_total", float64(st.EmptyAcquireCount()))
 			c, cancel := context.WithTimeout(ctx, 2*time.Second)
 			var n int64
-			if s.Pool.QueryRow(c, `SELECT (SELECT count(*) FROM hazard_outbox)+(SELECT count(*) FROM report_lifecycle_outbox)`).Scan(&n) == nil {
+			if s.Pool.QueryRow(c, `SELECT (SELECT count(*) FROM hazard_outbox)+(SELECT count(*) FROM report_lifecycle_outbox)+(SELECT count(*) FROM canonical_lifecycle_outbox)`).Scan(&n) == nil {
 				platform.Gauge("outbox_pending", float64(n))
 			}
 			cancel()

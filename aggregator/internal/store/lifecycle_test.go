@@ -53,7 +53,7 @@ func TestPreliminaryRecoveryAndCorrectionAreDurable(t *testing.T) {
 	h, err := s.GetByID(ctx, notice.HazardID)
 	require.NoError(t, err)
 	require.Equal(t, domain.SeveritySiaga, h.Severity)
-	require.Equal(t, 0.5, h.Attributes["confidence"])
+	require.Equal(t, json.Number("0.5"), h.Attributes["confidence"])
 	// A late warning corrects the stable hazard and queues an immutable full snapshot.
 	warning := clients.TsunamiWarning{WarningID: "warn-" + id, RelatedEventID: id, ThreatLevel: "Awas", AffectedZones: []string{"Coast"}, EstimatedArrival: time.Now().UTC().Add(time.Hour)}
 	require.NoError(t, s.CommitWarnings(ctx, []clients.TsunamiWarning{warning}, "test", 102, time.Now(), false))
@@ -64,7 +64,7 @@ func TestPreliminaryRecoveryAndCorrectionAreDurable(t *testing.T) {
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT revision FROM hazard_events WHERE hazard_id=$1`, h.HazardID).Scan(&revision))
 	require.EqualValues(t, 2, revision)
 	var payload []byte
-	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT event_payload FROM report_lifecycle_events WHERE record_id=$1 AND revision=2`, h.HazardID).Scan(&payload))
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT event_payload FROM canonical_lifecycle_events WHERE hazard_id=$1 AND (event_payload->>'revision')::bigint=2`, h.HazardID).Scan(&payload))
 	var correction domain.LifecycleEvent
 	require.NoError(t, json.Unmarshal(payload, &correction))
 	require.EqualValues(t, 2, correction.HazardRevision)
@@ -73,7 +73,7 @@ func TestPreliminaryRecoveryAndCorrectionAreDurable(t *testing.T) {
 	require.NoError(t, s.CommitWarnings(ctx, []clients.TsunamiWarning{warning}, "test", 0, time.Now(), true))
 	require.NoError(t, s.CommitWarnings(ctx, nil, "test", 0, time.Now(), true))
 	require.NoError(t, s.CommitSeismic(ctx, []clients.SeismicEvent{ev}, "test", 0))
-	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM report_lifecycle_events WHERE record_id=$1`, h.HazardID).Scan(&count))
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM canonical_lifecycle_events WHERE hazard_id=$1`, h.HazardID).Scan(&count))
 	require.Equal(t, 1, count)
 	cursor, err := s.HistoryCursor(ctx, "BMKG", "tsunami-warnings")
 	require.NoError(t, err)

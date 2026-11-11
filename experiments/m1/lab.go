@@ -123,7 +123,7 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 	}
 	// Three 1-GiB DB limits plus 128-MiB etcd members and 256 MiB VM headroom.
 	need := uint64(3456 << 20)
-	if suite != "core" {
+	if suite != "core" && suite != "m2" {
 		need = 3712 << 20
 	}
 	if info.MemTotal < need {
@@ -148,7 +148,7 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 	}
 	defer os.RemoveAll(tmp)
 	for _, s := range []string{"core", "ha"} {
-		if suite != "all" && suite != s {
+		if suite != "all" && suite != s && !(suite == "m2" && s == "core") {
 			continue
 		}
 		lab := newLab(root, "doctor", s, "doctor-only", "role1-m1-doctor", nil)
@@ -248,7 +248,7 @@ func (l *Lab) start(ctx context.Context) error {
 				return err
 			}
 		}
-		if l.Suite == "core" {
+		if l.Suite != "ha" {
 			c, err := l.connect(ready, "coord")
 			if err != nil {
 				return err
@@ -429,6 +429,17 @@ func (l *Lab) stop(ctx context.Context) error {
 			return errors.New("refusing cleanup of unowned resource")
 		}
 	}
+	for _, id := range strings.Fields(string(b)) {
+		state, e := l.cmd(ctx, "docker", "inspect", "--format", "{{json .State.Paused}}", id)
+		if e != nil {
+			return e
+		}
+		if strings.TrimSpace(string(state)) == "true" {
+			if _, e = l.cmd(ctx, "docker", "unpause", id); e != nil {
+				return e
+			}
+		}
+	}
 	_, err = l.compose(ctx, "down", "--timeout", "5")
 	return err // Deliberately no --volumes.
 }
@@ -508,6 +519,8 @@ func runLab(ctx context.Context, root, suite string) error {
 		err = lab.start(ctx)
 		if err != nil {
 			report.Results = append(report.Results, Result{Name: s + "_startup", Status: "blocked", Error: errString(err)})
+		} else if s == "m2" {
+			lab.result(ctx, "m2_write_core", lab.m2)
 		} else if s == "core" {
 			lab.runCore(ctx)
 		} else {
@@ -537,7 +550,7 @@ func downRun(ctx context.Context, root, id string) error {
 	if !runPattern.MatchString(id) {
 		return errors.New("down requires the exact --run ID printed by run")
 	}
-	for _, suite := range []string{"core", "ha"} {
+	for _, suite := range []string{"core", "ha", "m2"} {
 		l := newLab(root, id, suite, "", "", nil)
 		data, err := os.ReadFile(filepath.Join(l.Dir, "compose.json"))
 		if os.IsNotExist(err) {

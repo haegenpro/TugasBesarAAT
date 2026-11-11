@@ -5,16 +5,16 @@ This independent Go module runs destructive **faults against its own disposable 
 From the repository root:
 
 ```powershell
-rtk proxy go -C experiments/role1-m1 test -mod=readonly -count=1 -timeout=60s ./...
-rtk proxy go -C experiments/role1-m1 vet ./...
-rtk proxy go -C experiments/role1-m1 test -race -mod=readonly -count=1 -timeout=60s ./...
-rtk proxy go -C experiments/role1-m1 run . doctor
-rtk proxy go -C experiments/role1-m1 run . run --suite all
+rtk proxy go -C experiments/m1 test -mod=readonly -count=1 -timeout=60s ./...
+rtk proxy go -C experiments/m1 vet ./...
+rtk proxy go -C experiments/m1 test -race -mod=readonly -count=1 -timeout=60s ./...
+rtk proxy go -C experiments/m1 run . doctor
+rtk proxy go -C experiments/m1 run . run --suite all
 ```
 
 `run` defaults to `--suite all`; `core` and `ha` can also be selected independently. Requested failures or blocked execution return a nonzero exit. A counterexample is retained as a failed architectural proof even if reproducing it worked as intended. Other independent cases continue. Full deployment integration gates remain separate from the local result.
 
-Prerequisites: Go 1.27.1 (automatic toolchain selection works), Docker Linux containers, Compose, network access for the first build/pull, and at least 3,712 MiB exposed to Docker for `all`/`ha` or 3,456 MiB for `core`. The lab checks capacity without changing Docker settings. Native `python3`, `psql`, and application `.env` files are unnecessary.
+Prerequisites: Go 1.27.1 (automatic toolchain selection works), Docker Linux containers, Compose, network access for the first build/pull, and at least 3,712 MiB exposed to Docker for `all`/`ha` or 3,456 MiB for `core`/`m2`. The lab checks capacity without changing Docker settings. Native `python3`, `psql`, and application `.env` files are unnecessary.
 
 The immutable Citus base contains PostgreSQL 16.14/Citus 14.2.0. The derived image installs Patroni 4.1.5 and the complete Python runtime dependency pins in `requirements.lock`. etcd 3.5.21 is pinned by Linux/amd64 manifest digest. Image identity and actual software versions are captured before accepting experiments. OS package versions resolved during image construction are not a promise of a byte-identical future rebuild; retain the recorded derived image ID when reproducing a specific run.
 
@@ -32,7 +32,7 @@ Every run creates an isolated project, generated credentials, random loopback po
 The runner stops containers/networks on exit but retains volumes and evidence. Cleanup after an interrupted run is explicit:
 
 ```powershell
-rtk proxy go -C experiments/role1-m1 run . down --run <printed-run-id>
+rtk proxy go -C experiments/m1 run . down --run <printed-run-id>
 ```
 
 `down` validates the run ID and resource ownership labels. It does not remove volumes. No command resets other Compose projects or the application stack.
@@ -42,3 +42,10 @@ The snapshot gate is an experiment-only shared/exclusive PostgreSQL advisory loc
 The correction experiment separates stable transaction recovery from read consistency. Its deterministic two-unit reader reads the loser before a committed correction and the survivor afterward. A mixed result blocks that unversioned read strategy. This is **not** evidence that a single coordinator SQL statement fractured; no production publication/read protocol is silently substituted to make the result pass.
 
 For the observed results, blockers and downstream handoff, see [Role 1 M1 feasibility](../../docs/Role1-M1-Feasibility.md).
+
+## M2 application proofs
+
+`rtk proxy go -C experiments/m1 run . doctor --suite m2` checks the core profile.
+`rtk proxy go -C experiments/m1 run . run --suite m2` starts its own core formation and runs the actual Aggregator migration/write/read tests plus both consumers' PostgreSQL retraction tests. Credentials travel through child environment variables. Fault requests use recorded handshakes; the controller validates resource ownership before pause/unpause/termination-related actions. Tests never use the application environment files or database.
+
+`all` retains its original M1 meaning (`core`, then `ha`). Select `m2` explicitly. M1's original visibility counterexample remains failed historical evidence; M2 tests its application protocol separately. The same `down --run` command handles M2 projects and retains volumes. See [M2 write-core report](../../docs/Role1-M2-Write-Core.md) for the acceptance boundary and migration commands.

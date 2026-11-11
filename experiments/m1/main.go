@@ -26,7 +26,7 @@ func main() {
 
 func dispatch(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("use doctor, run --suite core|ha|all, or down --run RUN_ID")
+		return errors.New("use doctor, run --suite core|ha|m2|all, or down --run RUN_ID")
 	}
 	if args[0] == "_hold-gate" {
 		return holdGate(ctx)
@@ -37,10 +37,10 @@ func dispatch(ctx context.Context, args []string) error {
 	}
 	mod, err := os.ReadFile(filepath.Join(root, "go.mod"))
 	if err != nil || !strings.HasPrefix(string(mod), "module role1-m1\n") {
-		return errors.New("run from experiments/role1-m1 (go -C experiments/role1-m1 run . ...)")
+		return errors.New("run from experiments/m1 (go -C experiments/m1 run . ...)")
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	suite := fs.String("suite", "all", "core, ha, or all; suites run sequentially")
+	suite := fs.String("suite", "all", "core, ha, m2, or all; suites run sequentially")
 	runID := fs.String("run", "", "run ID for down; volumes are retained")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -66,7 +66,7 @@ func dispatch(ctx context.Context, args []string) error {
 	}
 }
 
-func validSuite(s string) bool { return s == "all" || s == "core" || s == "ha" }
+func validSuite(s string) bool { return s == "all" || s == "core" || s == "ha" || s == "m2" }
 
 func holdGate(ctx context.Context) error {
 	c, err := pgx.Connect(ctx, os.Getenv("M1_HOLD_DSN"))

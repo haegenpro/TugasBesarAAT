@@ -86,6 +86,9 @@ func TestReadAPICombinedQueries(t *testing.T) {
 		if output != nil {
 			require.NoError(t, json.Unmarshal(response.Body.Bytes(), output))
 		}
+		if strings.HasPrefix(path, "/hazards") && status != http.StatusBadRequest {
+			queries += 2
+		}
 		require.Equal(t, queries, logs.selects(t, cid), path)
 	}
 	type sourceState struct {
@@ -146,7 +149,7 @@ func TestReadAPICombinedQueries(t *testing.T) {
 		require.Len(t, response.Data, 2)
 		require.Equal(t, newer.HazardID, response.Data[0].HazardID)
 		require.Equal(t, older.HazardID, response.Data[1].HazardID)
-		require.Equal(t, newer.Attributes, response.Data[0].Attributes)
+		assertReadAttributes(t, newer.Attributes, response.Data[0].Attributes)
 		require.NotEmpty(t, response.AsOf)
 		m := response.Metadata[newer.HazardID]
 		require.EqualValues(t, 2, m.Revision)
@@ -183,7 +186,7 @@ func TestReadAPICombinedQueries(t *testing.T) {
 		var response listResponse
 		request(t, "/hazards?hazard_type=VOLCANIC&area_name="+area, http.StatusOK, 2, &response)
 		require.Equal(t, volcanic.HazardID, response.Data[0].HazardID)
-		require.Equal(t, volcanic.Attributes, response.Data[0].Attributes)
+		assertReadAttributes(t, volcanic.Attributes, response.Data[0].Attributes)
 		require.Equal(t, "stale", response.SourceStatus["PVMBG"].State)
 		require.NotEmpty(t, response.SourceStatus["PVMBG"].StaleSince)
 		require.Equal(t, "stale", response.Metadata[volcanic.HazardID].State)
@@ -232,7 +235,7 @@ func TestReadAPICombinedQueries(t *testing.T) {
 				require.NoError(t, got.err)
 				require.Equal(t, http.StatusOK, got.status)
 				require.Equal(t, 3, got.count)
-				require.Equal(t, 2, logs.selects(t, got.cid))
+				require.Equal(t, 4, logs.selects(t, got.cid))
 			case <-time.After(10 * time.Second):
 				t.Fatal("concurrent read timed out")
 			}
@@ -247,4 +250,13 @@ func TestReadAPICombinedQueries(t *testing.T) {
 		}()
 		request(t, fmt.Sprintf("/hazards?area_name=%s", area), http.StatusServiceUnavailable, 2, nil)
 	})
+}
+
+func assertReadAttributes(t *testing.T, a, b map[string]any) {
+	t.Helper()
+	x, e := json.Marshal(a)
+	require.NoError(t, e)
+	y, e := json.Marshal(b)
+	require.NoError(t, e)
+	require.JSONEq(t, string(x), string(y))
 }

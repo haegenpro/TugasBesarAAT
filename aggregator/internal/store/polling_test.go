@@ -229,7 +229,7 @@ func TestPollingNewReportPreservesHistoricRecord(t *testing.T) {
 	newPoller().PollPVMBGOnce(ctx)
 	h, err := s.GetByID(ctx, hazardID)
 	require.NoError(t, err)
-	require.Equal(t, float64(500), h.Attributes["ash_column_height_m"])
+	require.Equal(t, json.Number("500"), h.Attributes["ash_column_height_m"])
 	var height float64
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT (attributes->>'ash_column_height_m')::float FROM hazard_events WHERE source_ref_id=$1`, row["report_id"]).Scan(&height))
 	require.Equal(t, float64(900), height)

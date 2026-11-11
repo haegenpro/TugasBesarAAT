@@ -13,6 +13,7 @@ import (
 
 	"aggregator/internal/api"
 	"aggregator/internal/avrowire"
+	"aggregator/internal/canonical"
 	"aggregator/internal/clients"
 	"aggregator/internal/config"
 	"aggregator/internal/middleware"
@@ -98,6 +99,9 @@ func main() {
 
 	a := api.New(st, status, deps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
 	router := server.New(logger, a)
+	if cfg.CanonicalEnabled {
+		canonical.HTTP{Repository: st, Token: cfg.CanonicalToken}.Register(router)
+	}
 	server.RegisterSchemaAdmin(router, volcanicReaders, cfg.AdminToken)
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("aggregator", router)}
 	var workers sync.WaitGroup
@@ -136,8 +140,14 @@ func monitorStore(ctx context.Context, st *store.Store, deps *api.Dependencies, 
 	for {
 		checkCtx, cancel := context.WithTimeout(middleware.EnsureCorrelationID(ctx), 5*time.Second)
 		err := st.Ping(checkCtx)
+		if err == nil && schemaReady {
+			err = st.RecoverAttempts(checkCtx)
+		}
 		if err == nil && !schemaReady {
 			err = st.CheckSchema(checkCtx)
+			if err == nil {
+				err = st.RecoverAttempts(checkCtx)
+			}
 			if err == nil {
 				schemaReady = true
 			}

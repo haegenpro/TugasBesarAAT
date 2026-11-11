@@ -4,11 +4,11 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"net/http"
 	"strconv"
 	"time"
 
@@ -22,8 +22,10 @@ import (
 )
 
 type Store struct {
-	Pool   *pgxpool.Pool
-	logger *slog.Logger
+	Pool      *pgxpool.Pool
+	logger    *slog.Logger
+	control   *pgxpool.Pool
+	Canonical CanonicalOptions
 }
 
 func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, error) {
@@ -43,11 +45,19 @@ func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, 
 	if err != nil {
 		return nil, err
 	}
-	return &Store{Pool: pool, logger: logger}, nil
+	controlConfig := cfg.Copy()
+	controlConfig.MaxConns = 4
+	control, err := pgxpool.NewWithConfig(ctx, controlConfig)
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return &Store{Pool: pool, control: control, logger: logger}, nil
 }
 
 func (s *Store) Close() {
 	s.Pool.Close()
+	s.control.Close()
 }
 
 func (s *Store) Ping(ctx context.Context) error {
@@ -62,7 +72,9 @@ func (s *Store) Ping(ctx context.Context) error {
 func (s *Store) CheckSchema(ctx context.Context) error {
 	ctx = middleware.EnsureCorrelationID(ctx)
 	for _, query := range []string{
-		`SELECT hazard_id, source, source_ref_id, attributes FROM hazard_events LIMIT 0`,
+		`SELECT route_key, hazard_id, source, source_ref_id, attributes, active FROM hazard_events LIMIT 0`,
+		`SELECT generation FROM canonical_visibility LIMIT 0`,
+		`SELECT attempt_id,state FROM canonical_attempts LIMIT 0`,
 		`SELECT volcano_id, area_name, latitude, longitude FROM volcano_reference LIMIT 0`,
 		`SELECT hazard_id, event_payload, correlation_id, queued_at FROM hazard_outbox LIMIT 0`,
 	} {
@@ -82,7 +94,7 @@ func (s *Store) CheckSchema(ctx context.Context) error {
 // remain revision 1 in the original outbox.
 func (s *Store) SaveDedup(ctx context.Context, e domain.HazardEvent, correlationID string) (inserted bool, err error) {
 	ctx = middleware.WithCorrelationID(ctx, correlationID)
-	tx, err := s.Pool.Begin(ctx)
+	tx, err := s.beginMutation(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -101,47 +113,6 @@ type OutboxEvent struct {
 
 // DeliverNext holds a row lock until publish is acknowledged. A failed publish
 // or interrupted transaction leaves the row pending for the next attempt.
-func (s *Store) DeliverNext(ctx context.Context, publish func(context.Context, OutboxEvent) error) (bool, error) {
-	ctx = middleware.EnsureCorrelationID(ctx)
-	tx, err := s.Pool.Begin(ctx)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback(ctx)
-
-	var hazardID string
-	var payload []byte
-	var correlationID, traceparent, tracestate string
-	err = tx.QueryRow(ctx, `
-		SELECT hazard_id::text, event_payload, correlation_id,traceparent,tracestate
-		FROM hazard_outbox
-		ORDER BY queued_at, hazard_id
-		LIMIT 1
-		FOR UPDATE SKIP LOCKED
-	`).Scan(&hazardID, &payload, &correlationID, &traceparent, &tracestate)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
-	ctx = middleware.WithCorrelationID(platform.Extract(ctx, http.Header{"Traceparent": []string{traceparent}, "Tracestate": []string{tracestate}}), correlationID)
-	var hazard domain.HazardEvent
-	if err := json.Unmarshal(payload, &hazard); err != nil {
-		return true, err
-	}
-	if err := publish(ctx, OutboxEvent{Hazard: hazard, CorrelationID: correlationID}); err != nil {
-		return true, err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM hazard_outbox WHERE hazard_id = $1`, hazardID); err != nil {
-		return true, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return true, err
-	}
-	return true, nil
-}
 
 func scanRow(row pgx.Row) (domain.HazardEvent, error) {
 	return scanHazard(row, nil)
@@ -172,7 +143,9 @@ func scanHazard(row pgx.Row, metadata *domain.RecordMetadata) (domain.HazardEven
 	}
 	e.Attributes = map[string]interface{}{}
 	if len(attrsJSON) > 0 {
-		if err := json.Unmarshal(attrsJSON, &e.Attributes); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(attrsJSON))
+		decoder.UseNumber()
+		if err := decoder.Decode(&e.Attributes); err != nil {
 			return e, err
 		}
 	}
@@ -190,9 +163,9 @@ func (s *Store) GetByID(ctx context.Context, hazardID string) (domain.HazardEven
 }
 
 // GetByIDWithMetadata reads the canonical record and its revision metadata from the same row.
-func (s *Store) GetByIDWithMetadata(ctx context.Context, hazardID string) (domain.HazardEvent, domain.RecordMetadata, error) {
+func (s *Store) getByIDWithMetadata(ctx context.Context, hazardID string) (domain.HazardEvent, domain.RecordMetadata, error) {
 	ctx = middleware.EnsureCorrelationID(ctx)
-	row := s.Pool.QueryRow(ctx, `SELECT `+selectColumnsWithMetadata+` FROM hazard_events WHERE hazard_id = $1`, hazardID)
+	row := s.Pool.QueryRow(ctx, `SELECT `+selectColumnsWithMetadata+` FROM hazard_events WHERE hazard_id = $1 AND active`, hazardID)
 	var metadata domain.RecordMetadata
 	e, err := scanHazard(row, &metadata)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -218,9 +191,9 @@ func (s *Store) Query(ctx context.Context, f Filters) ([]domain.HazardEvent, err
 }
 
 // QueryWithMetadata preserves the list filters and ordering while reading metadata in the same query.
-func (s *Store) QueryWithMetadata(ctx context.Context, f Filters) ([]domain.HazardEvent, map[string]domain.RecordMetadata, error) {
+func (s *Store) queryWithMetadata(ctx context.Context, f Filters) ([]domain.HazardEvent, map[string]domain.RecordMetadata, error) {
 	ctx = middleware.EnsureCorrelationID(ctx)
-	sql := `SELECT ` + selectColumnsWithMetadata + ` FROM hazard_events WHERE 1=1`
+	sql := `SELECT ` + selectColumnsWithMetadata + ` FROM hazard_events WHERE active`
 	args := []interface{}{}
 	n := 0
 	next := func() string { n++; return "$" + strconv.Itoa(n) }
@@ -275,4 +248,17 @@ func (s *Store) QueryWithMetadata(ctx context.Context, f Filters) ([]domain.Haza
 // used as the outage fallback when PVMBG is unreachable.
 func (s *Store) LastKnownVolcanic(ctx context.Context) ([]domain.HazardEvent, error) {
 	return s.Query(ctx, Filters{HazardType: string(domain.HazardVolcanic)})
+}
+
+func (s *Store) GetByIDWithMetadata(ctx context.Context, id string) (e domain.HazardEvent, m domain.RecordMetadata, err error) {
+	err = s.validatedRead(ctx, func(ctx context.Context) error { var e2 error; e, m, e2 = s.getByIDWithMetadata(ctx, id); return e2 })
+	return
+}
+func (s *Store) QueryWithMetadata(ctx context.Context, f Filters) (events []domain.HazardEvent, metadata map[string]domain.RecordMetadata, err error) {
+	err = s.validatedRead(ctx, func(ctx context.Context) error {
+		var e error
+		events, metadata, e = s.queryWithMetadata(ctx, f)
+		return e
+	})
+	return
 }

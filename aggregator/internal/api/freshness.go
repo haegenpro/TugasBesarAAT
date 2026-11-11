@@ -36,6 +36,12 @@ func (a *API) recordMetadata(events []domain.HazardEvent, status map[string]sour
 	now := domain.Now()
 	for _, e := range events {
 		m := out[e.HazardID]
+		if e.Source != domain.SourceBMKG && e.Source != domain.SourcePVMBG {
+			m.State = "unavailable"
+			m.AssessmentState = "unavailable"
+			out[e.HazardID] = m
+			continue
+		}
 		ttl := a.BMKGFreshness
 		if e.Source == domain.SourcePVMBG {
 			ttl = a.PVMBGFreshness
