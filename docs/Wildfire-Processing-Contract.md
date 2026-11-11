@@ -70,7 +70,7 @@ Updates can add or remove edges; retractions can shrink, split, or eliminate a c
 
 For the selected center, convert latitude/longitude to unit vectors, sum them with equal weights, and convert the mean direction back to latitude/longitude. This is a representative spherical center, not an ellipsoidal centroid. FRP is not a weight. If the mean vector is degenerate, do not fabricate a center: make the case explicit and resolve a reference-compatible rule before supporting it.
 
-Use deterministic detection-key ordering for aggregation and array output. Preserve numeric source precision and define a stable FRP summation method; round only for presentation, not severity decisions. Pin the province reference data and numerical implementation versions for reference comparisons. Center formula and distance-model compatibility remain validation gates because the assignment does not prescribe their detailed algorithms in the uploaded text.
+Use deterministic detection-key ordering for aggregation and array output. Preserve numeric source precision and use the stable FRP summation rule in §9; round only for presentation, not severity decisions. Pin the province reference data and numerical implementation versions for reference comparisons. Center formula and distance-model compatibility remain validation gates because the assignment does not prescribe their detailed algorithms in the uploaded text.
 
 ## 5. Fire Identity and Lineage
 
@@ -82,7 +82,7 @@ Derivation inputs are:
 2. The earliest qualifying member detection key at identity creation, with detection-key ordering breaking equal-time ties.
 3. The original feed offset of the operation that creates that identity.
 
-Encode the tuple unambiguously. Its opaque serialization and optional digest algorithm are implementation details to document and version; no particular prefix, digest length, or UUID variant was approved for `source_ref_id`. The representation must not allow delimiter ambiguity or silently conflate different tuples.
+Identity encoding v1 is `fire-v1:` plus lowercase SHA-256 of the UTF-8 compact JSON array `[session_namespace,earliest_detection_key,birth_offset]`. Preserve original detection-key text, encode the offset as an integer, use standard JSON escaping without Unicode normalization, and persist the full derivation tuple alongside the digest for collision/integrity checks. This is the concrete encoding of the selected identity inputs, not a new UUID policy. The canonical UUID remains independently assigned once.
 
 Freeze the identity after creation. An earlier late detection or changed member set does not recompute it. Replaying the same ordered, namespaced operations with the same algorithm and recorded clock decisions reproduces fire source identities. This does not promise the same identities for an arbitrarily reordered final set or differently segmented source sessions.
 
@@ -94,17 +94,17 @@ The predecessor fire containing the earliest detection retains its identity. Equ
 
 ### Split
 
-For a split without historical restoration, the qualifying child containing the earliest remaining detection retains the current identity. Only children of size at least two qualify. Other qualifying children receive new identities using the split operation's original offset and their own earliest keys. Singletons are counted without inventing active fires.
+Resolve exact historical restorations first. If the current identity has not already been assigned to a restored child, the earliest remaining unmatched qualifying child retains it. Remaining unmatched qualifying children receive new identities from the split operation's original offset and their own earliest keys. If restoration consumes every qualifying child, the superseded parent becomes inactive. Only children with at least two included detections qualify; singletons receive no active fire identity.
 
 ### Exact historical restoration
 
 Before allocating a new child identity, check retained inactive lineage. Exact restoration means equality of the full detection-key membership set, not equal centroid, equal count, or approximate geographic overlap. If that set uniquely restores a historical fire in the relevant lineage, reactivate its existing source identity and UUID. Recompute attributes from the latest accepted observation values; equal membership does not imply equal FRP or severity.
 
-Historical restoration takes precedence over creating a new identity. If a historical match conflicts with the ordinary surviving identity or more than one historical identity matches the same set, the precise precedence is unresolved: record a fixture and bring back the ambiguity rather than silently choosing by UUID. The selected policies do not authorize arbitrary identity reassignment. These collision cases must be resolved before declaring lifecycle semantics complete.
+Historical restoration takes precedence over the ordinary surviving-identity rule and over allocating a new identity. Match only within the same retained lineage and namespace. If several inactive historical identities have exactly the same membership, select the one most recently deactivated by original source position; break equal-position ties by earlier birth offset, then the original identity-derivation tuple in UTF-8 byte order. Assign each identity to at most one child. Persist the chosen match in the correction batch so retry/restart cannot choose differently. Current active predecessor identities are not candidates for reassignment to multiple children.
 
 ### Elimination
 
-When no qualifying child remains, retain a tombstone and lineage. Exclude the fire from active client/analytics results. Preserve ordering information so older operations cannot resurrect it. Audit membership of inactive fires must be validated against the evaluator.
+When no qualifying child remains, retain a tombstone and lineage. Exclude the fire from active client/analytics results. Preserve ordering information so older operations cannot resurrect it. Audit events/count/checksum exclude inactive fires; tombstones and lineage remain internal. A later conflicting evaluator rule requires a contract revision, not silent population changes.
 
 ### Shared fixtures
 
@@ -146,7 +146,7 @@ The output delivery stage applies deterministic operation identities and monoton
 
 For duplicate output delivery, return the committed batch result without another revision or notification effect. A commit timeout is ambiguous and must be resolved by replaying the same batch identity. Publication to a broker may occur more than once after an acknowledgement/commit race; downstream deduplication remains necessary.
 
-On processor failure, Platform, Coordination & Reliability's ownership mechanism allows one successor. The successor restores durable state, resumes from committed prepared progress, and drains pending outputs. Protected state commits must reject stale owners. Already committed output intents are durable work, not automatically invalid merely because the preparing owner later lost its lease; define delivery authorization accordingly.
+On processor failure, Platform, Coordination & Reliability's ownership mechanism allows one successor. The successor restores durable state, resumes from committed prepared progress, and drains pending outputs. Protected state commits must reject stale owners. Already committed output intents are durable work, not automatically invalid merely because the preparing owner later lost its lease; the successor uses current delivery authority under Canonical Adapter v1 while retaining original acquisition provenance and batch identity.
 
 During an explicit audit capture, the canonical output applier honors the shared admission gate. Preparation and durable input receipt may continue within resource limits; neither is reported as applied canonical progress while commits are gated. Resume output application after the capture views are pinned and the barrier is released.
 
@@ -156,7 +156,7 @@ Retain complete session input and lineage durably. Retention after the evaluatio
 
 - [ ] Baseline/reference graph agrees on identity-independent membership and aggregate values.
 - [ ] Identity fixtures cover late older anchors, merge, split, exact restoration, and tombstones.
-- [ ] Ambiguous historical-restoration precedence is resolved explicitly.
+- [x] Exact historical restoration precedes ordinary survival; multiple-match ties and unmatched-child assignment are specified.
 - [ ] Crash before preparation commit leaves no advanced prepared position.
 - [ ] Crash after preparation commit preserves state and pending outputs.
 - [ ] Crash after canonical commit but before delivery acknowledgement causes no duplicate effect.
@@ -172,3 +172,15 @@ Retain complete session input and lineage durably. Retention after the evaluatio
 Assignment authority: M2's Definisi Kebakaran, Aturan Pemetaan Tambahan, Problem 4, and Appendix A. See [Canonical and Storage Contract](Canonical-and-Storage-Contract.md) for identity, persistence, and storage boundaries.
 
 [GeographicLib geodesic definitions](https://geographiclib.sourceforge.io/html/python/geodesics.html) support the chosen ellipsoidal distance terminology; they do not establish what the evaluator uses.
+
+## 9. Deterministic Implementation Rules
+
+Use UTF-8 byte order for detection-key ties and array order, sorted unique satellite names, and sequential compensated (Kahan) FRP summation in detection-key order using finite float64 source values. Severity compares the unrounded sum. Geodesic/center choices remain those above. Equal nearest-province distances break by UTF-8 province name then stable reference-row ID. Pin and distribute one immutable province table with a content digest; absence of that table prevents assigning production `area_name`. Synthetic fixtures use an explicitly synthetic province table and never replace the required production reference.
+
+A degenerate spherical mean has no well-defined center; retain input and park that affected output as `undefined_center` with diagnostics instead of publishing fabricated coordinates. Other components can progress. Graph connectivity must still be calculated correctly before classifying this condition. Compare centers/FRP to reference with declared numerical tolerances; do not use output tolerance to change graph membership thresholds.
+
+`allowed_lateness_seconds` is a required nonnegative deployment parameter, with no guessed production default. Record it with the observed lateness distribution, chosen margin, and feed/session namespace before a run. Initial replay fixtures set it explicitly; changing it requires a new recorded run configuration. Late input is retained and queued for automatic correction regardless of the configured allowance. Namespace and initial offset are explicit connector session configuration until the actual feed identity/reset protocol is observed; reconnect never invents a namespace. Recorded clock samples travel with raw history and processing decisions.
+
+Durable handoff and replay use [Ingestion and Messaging Contract, §8](Ingestion-and-Messaging-Contract.md#8-satellite-history-handoff-v1). Canonical writes use [Canonical Adapter v1](Canonical-and-Storage-Contract.md#9-canonical-adapter-v1). A received frontier advances only after durable raw history; prepared advances only with state/lineage/output intent; applied advances only through contiguous successful canonical batches. No-output operations still receive durable prepared/applied completion markers. On restart, restore the identity registry and prior frontier; replay later history and drain original batch identities rather than creating replacements.
+
+The selected lifecycle policy restores exact historical membership first, then assigns unmatched components by the rules in §5. The shared fixture includes a restoration that overrides ordinary earliest-component survival.

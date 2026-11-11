@@ -1,0 +1,794 @@
+{
+  "contract_version": 1,
+  "notes": [
+    "Synthetic deterministic fixtures; no production geography or observed feed encoding is claimed.",
+    "Fixed UUID registry and first-ingestion clock are injected for the expected examples.",
+    "Cursors are symbolic runtime-issued opaque strings; no HMAC Secret is embedded.",
+    "Raw payload JSON examples use base64 for Avro bytes."
+  ],
+  "canonical_records": [
+    {
+      "hazard_id": "00000000-0000-4000-8000-000000000001",
+      "source": "PVMBG",
+      "source_ref_id": "a",
+      "hazard_type": "VOLCANIC",
+      "severity": "WASPADA",
+      "area_name": "Fixture Province",
+      "latitude": 0.0,
+      "longitude": 0.0,
+      "occurred_at": "2026-11-12T00:00:00.000Z",
+      "ingested_at": "2026-11-12T00:00:01.000Z",
+      "attributes": {
+        "level": 2
+      }
+    },
+    {
+      "hazard_id": "00000000-0000-4000-8000-000000000002",
+      "source": "PVMBG",
+      "source_ref_id": "b",
+      "hazard_type": "VOLCANIC",
+      "severity": "WASPADA",
+      "area_name": "Fixture Province",
+      "latitude": 0.0,
+      "longitude": 0.0,
+      "occurred_at": "2026-11-12T00:00:00.000Z",
+      "ingested_at": "2026-11-12T00:00:01.000Z",
+      "attributes": {
+        "level": 2
+      }
+    }
+  ],
+  "distribution_key_examples": [
+    {
+      "source": "PVMBG",
+      "source_ref_id": "a",
+      "expected": "[\"PVMBG\",\"a\"]"
+    },
+    {
+      "source": "BMKG",
+      "source_ref_id": "a|b",
+      "expected": "[\"BMKG\",\"a|b\"]"
+    }
+  ],
+  "raw_input_examples": [
+    {
+      "envelope_version": 1,
+      "source": "PVMBG",
+      "message_id": "raw-v1:e02bab523fe7aa4f60b97cbef709a2e698de05fa3943b15e086d11c69d368fa8",
+      "source_namespace": "fixture-pvmbg-v1",
+      "source_ref_id": "a",
+      "operation": "create",
+      "source_position": 1,
+      "source_cursor": null,
+      "event_time": "2026-11-12T00:00:00.000Z",
+      "received_at": "2026-11-12T00:00:00.500Z",
+      "payload": "eyJpZCI6ImEiLCJsZXZlbCI6Mn0=",
+      "payload_sha256": "e74d21835aba5225281cad6c35dc058e2fd13d7942b08a8fd0340fa28c6813e1",
+      "content_type": "application/json",
+      "source_schema_id": null,
+      "virtual_now": null,
+      "correlation_id": "fixture-trace-1",
+      "traceparent": null,
+      "ownership_scope": "poll:PVMBG",
+      "ownership_epoch": 1,
+      "ownership_holder": "fixture-owner",
+      "payload_ref": null,
+      "payload_size": 20
+    },
+    {
+      "envelope_version": 1,
+      "source": "PVMBG",
+      "message_id": "raw-v1:474a7585a644b8aff57c3356202a84b1874292349a435de9ff2ac70b85190196",
+      "source_namespace": "fixture-pvmbg-v1",
+      "source_ref_id": null,
+      "operation": "create",
+      "source_position": 2,
+      "source_cursor": null,
+      "event_time": "2026-11-12T00:00:00.000Z",
+      "received_at": "2026-11-12T00:00:00.500Z",
+      "payload": "eyJpZCI6",
+      "payload_sha256": "082027641f4532cec3b8585e1d86e6a9adf1dfb9cd2333de1aca7b1b35cc4ece",
+      "content_type": "application/json",
+      "source_schema_id": null,
+      "virtual_now": null,
+      "correlation_id": "fixture-trace-1",
+      "traceparent": null,
+      "ownership_scope": "poll:PVMBG",
+      "ownership_epoch": 1,
+      "ownership_holder": "fixture-owner",
+      "payload_ref": null,
+      "payload_size": 6
+    }
+  ],
+  "canonical_batch": {
+    "request": {
+      "contract_version": 1,
+      "batch_id": "fixture-batch-1",
+      "ownership": {
+        "scope": "poll:PVMBG",
+        "epoch": 1,
+        "holder": "fixture-owner"
+      },
+      "mutations": [
+        {
+          "operation_id": "raw-v1:e02bab523fe7aa4f60b97cbef709a2e698de05fa3943b15e086d11c69d368fa8",
+          "source": "PVMBG",
+          "source_ref_id": "a",
+          "operation": "upsert",
+          "source_order": {
+            "namespace": "fixture-pvmbg-v1",
+            "position": 1
+          },
+          "expected_revision": 0,
+          "event": {
+            "hazard_type": "VOLCANIC",
+            "severity": "WASPADA",
+            "area_name": "Fixture Province",
+            "latitude": 0.0,
+            "longitude": 0.0,
+            "occurred_at": "2026-11-12T00:00:00.000Z",
+            "attributes": {
+              "level": 2
+            }
+          }
+        }
+      ]
+    },
+    "expected_http_status": 200,
+    "expected_response": {
+      "batch_id": "fixture-batch-1",
+      "outcome": "applied",
+      "items": [
+        {
+          "source": "PVMBG",
+          "source_ref_id": "a",
+          "hazard_id": "00000000-0000-4000-8000-000000000001",
+          "revision": 1,
+          "outcome": "applied"
+        }
+      ]
+    }
+  },
+  "write_sequences": [
+    {
+      "name": "duplicate",
+      "input": "exact retry of fixture-batch-1",
+      "expected_http_status": 200,
+      "expected_outcome": "duplicate",
+      "expected_revision": 1,
+      "expected_publication_intents": 1
+    },
+    {
+      "name": "newer_update",
+      "input": {
+        "new_batch_id": "fixture-batch-2",
+        "position": 2,
+        "expected_revision": 1,
+        "severity": "SIAGA"
+      },
+      "expected_http_status": 200,
+      "expected_revision": 2,
+      "expected_identity": "00000000-0000-4000-8000-000000000001"
+    },
+    {
+      "name": "stale_update",
+      "input": {
+        "new_batch_id": "fixture-stale",
+        "position": 1,
+        "expected_revision": 2
+      },
+      "expected_http_status": 409,
+      "expected_code": "stale_operation",
+      "expected_revision": 2
+    },
+    {
+      "name": "stale_owner",
+      "input": {
+        "registered_epoch": 2,
+        "new_request_epoch": 1
+      },
+      "expected_http_status": 403,
+      "expected_code": "stale_owner",
+      "expected_new_mutations": 0
+    },
+    {
+      "name": "temporary_storage_failure",
+      "input": {
+        "eligible_durable_copies": 1
+      },
+      "expected_http_status": 503,
+      "expected_code": "temporarily_unavailable",
+      "expected_acknowledgement": false
+    },
+    {
+      "name": "retract",
+      "input": {
+        "position": 3,
+        "expected_revision": 2,
+        "operation": "retract"
+      },
+      "expected_identity": "00000000-0000-4000-8000-000000000001",
+      "expected_revision": 3,
+      "expected_active": false,
+      "expected_internal_tombstone": true
+    },
+    {
+      "name": "timeout_after_commit",
+      "input": "repeat the same committed batch identity",
+      "expected_outcome": "duplicate",
+      "expected_extra_revision": 0
+    },
+    {
+      "name": "conflict_in_multi_entity_batch",
+      "input": "one new operation has a stale expected revision",
+      "expected_http_status": 409,
+      "expected_code": "revision_conflict",
+      "expected_new_mutations": 0
+    }
+  ],
+  "audit_examples": {
+    "first_page": {
+      "request": {
+        "source": "PVMBG",
+        "since": "2026-11-12T00:00:01.000Z",
+        "limit": 1
+      },
+      "response": {
+        "items": [
+          {
+            "hazard_id": "00000000-0000-4000-8000-000000000001",
+            "source": "PVMBG",
+            "source_ref_id": "a",
+            "hazard_type": "VOLCANIC",
+            "severity": "WASPADA",
+            "area_name": "Fixture Province",
+            "latitude": 0.0,
+            "longitude": 0.0,
+            "occurred_at": "2026-11-12T00:00:00.000Z",
+            "ingested_at": "2026-11-12T00:00:01.000Z",
+            "attributes": {
+              "level": 2
+            }
+          }
+        ],
+        "next_cursor": "OPAQUE_PAGE_2",
+        "partial": false,
+        "unavailable_units": []
+      }
+    },
+    "last_page": {
+      "request": {
+        "source": "PVMBG",
+        "since": "2026-11-12T00:00:01.000Z",
+        "limit": 1,
+        "cursor": "OPAQUE_PAGE_2"
+      },
+      "response": {
+        "items": [
+          {
+            "hazard_id": "00000000-0000-4000-8000-000000000002",
+            "source": "PVMBG",
+            "source_ref_id": "b",
+            "hazard_type": "VOLCANIC",
+            "severity": "WASPADA",
+            "area_name": "Fixture Province",
+            "latitude": 0.0,
+            "longitude": 0.0,
+            "occurred_at": "2026-11-12T00:00:00.000Z",
+            "ingested_at": "2026-11-12T00:00:01.000Z",
+            "attributes": {
+              "level": 2
+            }
+          }
+        ],
+        "next_cursor": null,
+        "partial": false,
+        "unavailable_units": []
+      }
+    },
+    "checksum": {
+      "source": "PVMBG",
+      "count": 2,
+      "checksum": "7e18f737311b2dc3b2f269dd78396b0351f14fb66efa879f768cb23181883c78",
+      "algorithm": "sha256",
+      "as_of": "2026-11-12T00:00:02.000Z",
+      "partial": false,
+      "unavailable_units": []
+    },
+    "checksum_empty": {
+      "count": 0,
+      "checksum": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "checksum_cross_source_same_ref": {
+      "source_ref_ids": [
+        "a",
+        "a"
+      ],
+      "count": 2,
+      "serialized_utf8": "a\na",
+      "checksum": "99b4ae0e261695ce9cb3912cdb821b687ad3ee28746333d2c49c9a141576d800"
+    },
+    "blocked_page": {
+      "items": [],
+      "next_cursor": "OPAQUE_SAME_POSITION",
+      "partial": true,
+      "unavailable_units": [
+        "g2-primary",
+        "g2-replica-1",
+        "g2-replica-2"
+      ]
+    },
+    "location": {
+      "hazard_id": "00000000-0000-4000-8000-000000000001",
+      "locations": [
+        {
+          "node": "node-b",
+          "unit": "g1-primary",
+          "role": "primary"
+        },
+        {
+          "node": "node-c",
+          "unit": "g1-replica-1",
+          "role": "replica"
+        },
+        {
+          "node": "node-d",
+          "unit": "g1-replica-2",
+          "role": "replica"
+        }
+      ],
+      "partial": false
+    },
+    "unprocessed": {
+      "items": [
+        {
+          "message_id": "fixture-invalid-1",
+          "source": "PVMBG",
+          "received_at": "2026-11-12T00:00:03.000Z",
+          "reason": "schema_incompatible: required level missing",
+          "retryable": false,
+          "attempts": 1,
+          "status": "parked"
+        }
+      ],
+      "next_cursor": null,
+      "partial": false,
+      "unavailable_units": []
+    },
+    "recovered_unprocessed": {
+      "items": [],
+      "next_cursor": null,
+      "partial": false,
+      "unavailable_units": []
+    },
+    "after_retract_a": {
+      "items": [
+        {
+          "hazard_id": "00000000-0000-4000-8000-000000000002",
+          "source": "PVMBG",
+          "source_ref_id": "b",
+          "hazard_type": "VOLCANIC",
+          "severity": "WASPADA",
+          "area_name": "Fixture Province",
+          "latitude": 0.0,
+          "longitude": 0.0,
+          "occurred_at": "2026-11-12T00:00:00.000Z",
+          "ingested_at": "2026-11-12T00:00:01.000Z",
+          "attributes": {
+            "level": 2
+          }
+        }
+      ],
+      "count": 1,
+      "checksum": "3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d",
+      "internal_tombstone_a": true,
+      "audit_includes_a": false
+    }
+  },
+  "wildfire_examples": {
+    "namespace": "fixture-satellite-session",
+    "province_reference": [
+      {
+        "name": "Fixture Province",
+        "latitude": 0,
+        "longitude": 0
+      }
+    ],
+    "operations": [
+      {
+        "offset": 1,
+        "operation": "detection",
+        "key": "N20|2026-11-12|0000|0|0",
+        "event_time": "2026-11-12T00:00:00Z",
+        "latitude": 0,
+        "longitude": 0,
+        "confidence": "h",
+        "frp_mw": 10
+      },
+      {
+        "offset": 2,
+        "operation": "detection",
+        "key": "N21|2026-11-12|0001|0|0.001",
+        "event_time": "2026-11-12T00:01:00Z",
+        "latitude": 0,
+        "longitude": 0.001,
+        "confidence": "n",
+        "frp_mw": 10
+      }
+    ],
+    "after_offset_1": {
+      "active_fire_count": 0,
+      "singletons": 1
+    },
+    "after_offset_2": {
+      "active_fire_count": 1,
+      "singletons": 0,
+      "detection_keys": [
+        "N20|2026-11-12|0000|0|0",
+        "N21|2026-11-12|0001|0|0.001"
+      ],
+      "detection_count": 2,
+      "satellites": [
+        "N20",
+        "N21"
+      ],
+      "max_confidence": "h",
+      "total_frp_mw": 20,
+      "severity": "WASPADA",
+      "latitude": 0,
+      "longitude": 0.0005,
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "source_ref_id": "fire-v1:9556f0c47d0542a72f1e0c2f3c75703519460eda1f130dda9de84e9106590f95"
+    },
+    "duplicate_offset_2": {
+      "new_observations": 0,
+      "new_canonical_revisions": 0
+    },
+    "retract_offset_3": {
+      "operation": "retract",
+      "target_key": "N21|2026-11-12|0001|0|0.001",
+      "active_fire_count": 0,
+      "singletons": 1,
+      "retain_tombstone": true
+    },
+    "restart_after_prepared_offset_2": {
+      "prepared_through": 2,
+      "raw_replay_after": 2,
+      "expected_active_fire_count_after_pending_outputs_drain": 1,
+      "same_retained_uuid": true
+    },
+    "late_input": {
+      "watermark": "2026-11-12T01:00:00Z",
+      "input_event_time": "2026-11-12T00:00:00Z",
+      "expected_retained": true,
+      "expected_late_count_increment": 1,
+      "expected_correction_queued": true
+    },
+    "run_config": {
+      "allowed_lateness_seconds": 1800,
+      "note": "synthetic test configuration, not a measured production allowance"
+    }
+  },
+  "failure_replay_sequences": [
+    {
+      "input": "required level removed",
+      "expected_status": "parked",
+      "retryable": false,
+      "expected_original_preserved": true
+    },
+    {
+      "input": "registry unavailable for unknown frame",
+      "expected_status": "retrying",
+      "retryable": true,
+      "expected_original_preserved": true
+    },
+    {
+      "input": "truncated JSON with unknown entity",
+      "expected_status": "parked",
+      "expected_gate": "source namespace until entity is known",
+      "expected_other_sources_progress": true
+    },
+    {
+      "input": "Ops fixes adapter and replays same selected identity twice",
+      "expected_logical_canonical_effects": 1,
+      "expected_unprocessed_after_recovery": 0
+    },
+    {
+      "input": "earlier parked operation followed by newer mutation of same entity",
+      "expected_later_mutation": "waits",
+      "expected_other_identified_entities": "continue unless behind an unidentified source-scoped predecessor"
+    }
+  ],
+  "critical_delivery_sequence": {
+    "steps": [
+      "persist raw",
+      "validate",
+      "persist canonical and warning intents",
+      "publish warning",
+      "recipient transaction commits unique receipt and inbox effect",
+      "ack warning"
+    ],
+    "crash_after_recipient_commit": {
+      "recipient_effect_count": 1,
+      "redelivery": "repeat acknowledgement"
+    },
+    "canonical_unavailable": {
+      "warning_delivery": "continues",
+      "canonical_intent": "pending"
+    },
+    "latency_retry_rule": "first acquisition timestamp never resets"
+  },
+  "wildfire_lifecycle_cases": [
+    {
+      "name": "bridge_merge_then_retract",
+      "nodes": [
+        {
+          "key": "A",
+          "longitude": 0,
+          "minute": 0
+        },
+        {
+          "key": "B",
+          "longitude": 0.002,
+          "minute": 1
+        },
+        {
+          "key": "C",
+          "longitude": 0.018,
+          "minute": 2
+        },
+        {
+          "key": "D",
+          "longitude": 0.02,
+          "minute": 3
+        },
+        {
+          "key": "E",
+          "longitude": 0.01,
+          "minute": 4
+        }
+      ],
+      "shared_latitude": 0,
+      "operations": [
+        {
+          "offset": 1,
+          "insert": "A"
+        },
+        {
+          "offset": 2,
+          "insert": "B"
+        },
+        {
+          "offset": 3,
+          "insert": "C"
+        },
+        {
+          "offset": 4,
+          "insert": "D"
+        },
+        {
+          "offset": 5,
+          "insert": "E"
+        },
+        {
+          "offset": 6,
+          "retract": "E"
+        }
+      ],
+      "expected_before_bridge": {
+        "AB": "identity-AB",
+        "CD": "identity-CD"
+      },
+      "expected_after_bridge": {
+        "ABCDE": "identity-AB",
+        "inactive": [
+          "identity-CD"
+        ]
+      },
+      "expected_after_retract": {
+        "AB": "identity-AB",
+        "CD": "identity-CD",
+        "extra_active_parent": false
+      },
+      "identity_registry": "Persisted fixture identities; real source IDs use the derivation rule."
+    },
+    {
+      "name": "restoration_overrides_ordinary_survivor",
+      "before": {
+        "active_parent": "X",
+        "membership": [
+          "A",
+          "B",
+          "C",
+          "D"
+        ],
+        "earliest_key": "A",
+        "inactive_history": [
+          {
+            "identity": "H",
+            "membership": [
+              "A",
+              "B"
+            ],
+            "deactivated_position": 5
+          }
+        ]
+      },
+      "split_children": [
+        [
+          "A",
+          "B"
+        ],
+        [
+          "C",
+          "D"
+        ]
+      ],
+      "expected": {
+        "AB": "H",
+        "CD": "X"
+      },
+      "rule": "Restore H first, then the earliest unmatched qualifying child retains X."
+    },
+    {
+      "name": "all_children_historically_restored",
+      "before": {
+        "active_parent": "X",
+        "inactive_history": [
+          {
+            "identity": "H",
+            "membership": [
+              "A",
+              "B"
+            ],
+            "deactivated_position": 5
+          },
+          {
+            "identity": "J",
+            "membership": [
+              "C",
+              "D"
+            ],
+            "deactivated_position": 6
+          }
+        ]
+      },
+      "split_children": [
+        [
+          "A",
+          "B"
+        ],
+        [
+          "C",
+          "D"
+        ]
+      ],
+      "expected": {
+        "AB": "H",
+        "CD": "J",
+        "inactive": [
+          "X"
+        ]
+      }
+    },
+    {
+      "name": "multiple_exact_historical_matches",
+      "inactive_history": [
+        {
+          "identity": "H1",
+          "membership": [
+            "A",
+            "B"
+          ],
+          "deactivated_position": 5,
+          "birth_offset": 2
+        },
+        {
+          "identity": "H2",
+          "membership": [
+            "A",
+            "B"
+          ],
+          "deactivated_position": 7,
+          "birth_offset": 4
+        }
+      ],
+      "restored_membership": [
+        "A",
+        "B"
+      ],
+      "expected_identity": "H2"
+    },
+    {
+      "name": "singleton_does_not_keep_active_identity",
+      "split_children": [
+        [
+          "A"
+        ],
+        [
+          "C",
+          "D"
+        ]
+      ],
+      "historical_matches": [],
+      "expected": {
+        "CD": "current-parent",
+        "singletons": 1,
+        "active_fire_count": 1
+      }
+    }
+  ],
+  "field_report_example": {
+    "headers": {
+      "Idempotency-Key": "report-fixture-1"
+    },
+    "body": {
+      "report_type": "field_observation",
+      "occurred_at": "2026-11-12T00:00:00.000Z",
+      "latitude": -6.9,
+      "longitude": 107.6,
+      "description": "Synthetic report for contract verification",
+      "attributes": {}
+    },
+    "expected_http_status": 202,
+    "expected_receipt": {
+      "report_id": "report-fixture-1",
+      "receipt_id": "00000000-0000-4000-8000-000000000101",
+      "status": "accepted",
+      "received_at": "2026-11-12T00:00:01.000Z"
+    },
+    "duplicate_same_body": "same receipt; one report projection",
+    "changed_body_same_key": "409 identity_conflict",
+    "canonical_hazard_events_created": 0
+  },
+  "canonical_wildfire_example": {
+    "hazard_id": "00000000-0000-4000-8000-000000000201",
+    "source": "SATELIT",
+    "source_ref_id": "fire-v1:9556f0c47d0542a72f1e0c2f3c75703519460eda1f130dda9de84e9106590f95",
+    "hazard_type": "WILDFIRE",
+    "severity": "WASPADA",
+    "area_name": "Fixture Province",
+    "latitude": 0,
+    "longitude": 0.0005,
+    "occurred_at": "2026-11-12T00:00:00Z",
+    "ingested_at": "2026-11-12T00:01:01.000Z",
+    "attributes": {
+      "detection_count": 2,
+      "satellites": [
+        "N20",
+        "N21"
+      ],
+      "max_confidence": "h",
+      "total_frp_mw": 20,
+      "detection_keys": [
+        "N20|2026-11-12|0000|0|0",
+        "N21|2026-11-12|0001|0|0.001"
+      ]
+    }
+  },
+  "critical_warning_example": {
+    "warning_version": 1,
+    "notification_id": "warning-v1:eee2720c2dcb3d739e5f541fb61405dec26652262360df9bc41cbd013dba858f",
+    "recipient": "TIM_LAPANGAN",
+    "source": "SENSOR_PANTAI",
+    "source_namespace": "fixture-coastal-session",
+    "observation_id": "fixture-obs-1",
+    "operation_id": "fixture-op-1",
+    "operation_position": 1,
+    "operation": "create",
+    "observed_at": "2026-11-12T00:00:00Z",
+    "first_received_at": "2026-11-12T00:00:01Z",
+    "critical": true,
+    "station_id": "fixture-station",
+    "province": "Fixture Province",
+    "latitude": 0.0,
+    "longitude": 0.0,
+    "sea_level_anomaly_m": 1.0,
+    "wave_height_m": 2.0,
+    "quality": "ok",
+    "payload_sha256": "e904ea9eed18a3643fd8c897db976a0de1b080d4847f931374d5bcc8df3309f5",
+    "correlation_id": "fixture-coastal-trace",
+    "traceparent": null,
+    "hazard_id": null
+  }
+}

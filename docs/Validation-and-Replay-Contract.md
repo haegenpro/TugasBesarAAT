@@ -86,3 +86,28 @@ If replay fails again, retain the original and new attempt evidence. Transient o
 - [ ] Replay preserves same-entity order while unrelated identities remain active.
 - [ ] Repeated replay and crash-after-commit create no duplicate canonical or notification effects.
 - [ ] Transient dependency outages recover automatically with bounded traffic/concurrency.
+
+## 7. Failure and Replay Interfaces v1
+
+The ingestion-owned database stores original payload as binary data with `message_id` unique within source namespace. Schema: `message_id`, `source`, `source_namespace`, nullable `source_ref_id`, nullable original `source_position`, original `received_at`, `payload` bytes, `payload_sha256`, `content_type`, nullable `source_schema_id`, `adapter_version`, `reason`, `classification`, `status`, `attempts`, `last_attempt_at`, nullable `next_attempt_at`, correlation/trace fields, and nullable `replay_job_id`/`recovered_at`. Attempts are durable attempt records, not just a counter overwritten on every retry. The digest verifies complete original bytes on storage and retrieval.
+
+`classification` is `transient` or `incompatible`; status is `retrying`, `parked`, or internal `recovered`. Ownership loss is an execution-control result, not a reason to discard accepted input. An unknown commit outcome remains retrying until operation reconciliation establishes completion. Initial transient retry uses the ingestion backoff policy. A repeated incompatible replay returns to parked while preserving previous attempt evidence. Failed-input records and deduplication history have no automatic expiry during the evaluation session.
+
+Private Ops endpoints use existing authenticated BNPB Internal Ops identity checks:
+
+| Endpoint | Request / response |
+| --- | --- |
+| `GET /internal/ingestion/failures` | Optional source/status, limit/cursor; safe metadata only. |
+| `GET /internal/ingestion/failures/{message_id}/payload` | Complete `application/octet-stream` body plus digest; bounded streaming, no general dashboard access. Namespace is a required query parameter. |
+| `POST /internal/ingestion/replays` | `{request_id, source, namespace, message_ids, adapter_version}`. Freeze the selected list in a durable job; return `202 {job_id,status:"pending"}` after job persistence. |
+| `GET /internal/ingestion/replays/{job_id}` | Job status, selected/recovered/retrying/parked counts and safe per-message results. |
+
+Replay request IDs are scoped to authenticated Ops identity. Same request/content returns the original job; changed scope under the same ID is a conflict. Replay 202 confirms job acceptance, not recovered canonical effects. The public Client API does not expose these endpoints to Media or Tim Lapangan. Audit credentials grant metadata access only.
+
+Use Appendix A-shaped errors. Validation/authentication errors are 400/401/403; unknown authorized record/job is 404; replay ID conflict is 409; overload is 429 and unavailable persistence is 503. Private API 409 uses the same error envelope structure. Pagination order is `(received_at,message_id,source_namespace)` ascending; bind filters and continuation to the same authorized query. Payload access checks occur before lookup results can reveal existence.
+
+`GET /internal/audit/unprocessed` is served through Aggregator under the prescribed audit bearer token. Return exactly the Appendix A item fields: `message_id`, `source`, `received_at`, `reason`, `retryable`, `attempts`, `status`. `retryable` is true exactly for `retrying`. Include `next_cursor` and common completeness metadata when units are unavailable. Defaults are 100 rows, maximum 1,000, source optional; use the same safe ascending metadata order. Recovered records disappear. Normal accepted work awaiting healthy asynchronous processing is not a failure record. Internal field-report failures remain in the Ops workflow; audit source filters stay within canonical source values unless evaluator instructions extend them.
+
+Replay and live mutations share a durable per-entity sequence gate keyed by `(source, namespace, source_ref_id)`. Reserve order when accepted, not when a retry becomes runnable. A parked predecessor blocks later mutations for that identity; workers release capacity while waiting, and other identities continue. Records without a trustworthy identity use a source/namespace acquisition-order gate until the adapter can identify them; do not guess an entity or claim unrelated operations behind an unknown predecessor are provably independent. Successful identification transfers the pending operation into the entity gate without changing its original source order. Operator replay commands select work; they never bypass revision/fencing checks.
+
+Source input larger than the 1 MiB broker-message limit is streamed into ingestion-owned binary payload storage with a digest before a small durable reference envelope is published. Ack/delete the acquired delivery only after the referenced object and its durable reference are committed. A referenced payload remains pinned until handoff/replay obligations finish. Use 64 KiB streaming chunks and depth-limited parsing (initial maximum depth 64), not an unbounded in-memory buffer. If disk quota is exhausted, stop acceptance/cursor advance and expose backpressure; never keep a truncated record and report preservation. HTTP requests rejected before 202 with `413 payload_too_large` have not been accepted and are distinct from acquired malformed source input. The supported input/storage quota must be stated in deployment configuration and tested with the supplied oversized case.

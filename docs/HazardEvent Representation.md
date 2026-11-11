@@ -1,12 +1,12 @@
 # HazardEvent Wire Format Spec
 
-2026-09-20 · @Someone
+M1 wire format, extended for M2 preimplementation.
 
 ## Overview
 
 This document fixes the JSON representation of `HazardEvent` used by the Canonical Store, Aggregator read API, and Client API. The Aggregator publishes the equivalent logical fields to NATS as registry-framed Avro; see `Contracts.md` for that wire boundary.
 
-**Applies to:** anyone writing code that produces, stores, or reads a `HazardEvent` — the Aggregator (Person A), the Canonical Store / Client-Facing API (Person B), and Auth-filtered responses / consumers (Person C).
+**Applies to:** Aggregator mapping, canonical storage, Client API projection, and broker consumers. M2 adds source/type values and structured wildfire attributes; these documentation changes do not imply that the existing M1 code supports them yet.
 
 **Target languages:** examples are given in Go and Python. JSON clients use the field table below; broker consumers first decode Avro with the registry schema ID.
 
@@ -19,7 +19,7 @@ This document fixes the JSON representation of `HazardEvent` used by the Canonic
 | Timestamps | ISO 8601, UTC, millisecond precision, `Z` suffix: `"2026-09-20T14:32:07.123Z"`. Always convert to UTC before serializing regardless of source timezone |
 | Floats | Plain JSON numbers (`-6.302`, not strings) |
 | Missing/unknown fields | Omit the key entirely rather than sending `null`, unless a field is explicitly nullable per the spec |
-| `attributes` | A flat JSON object (`map<string, any>`), values may be string/number/bool — no nested objects unless the source field itself is structured |
+| `attributes` | A typed JSON object (`map<string, any>`). Source-specific arrays and structured values are permitted; M2 requires `satellites` and `detection_keys` arrays. Preserve numeric/boolean types and do not encode arrays as strings |
 
 **Why this matters cross-language:** Go's `encoding/json` and Python's `json`/`pydantic` both round-trip this shape without custom hooks, as long as everyone commits to the same casing and timestamp format up front. The failure mode we're avoiding is one language guessing `datetime.now()` local time and the other assuming UTC, which silently corrupts `occurred_at` comparisons in P1's severity mapping.
 
@@ -36,16 +36,16 @@ Why not a deterministic hash of `source` + `source_ref_id`: it's tempting (avoid
 - **Idempotency/dedup** is handled separately by keying on `(source, source_ref_id)` internally in the Canonical Store (a unique index), not by deriving `hazard_id` from them.
 - Both Go (`github.com/google/uuid`) and Python (`uuid.uuid4()`, stdlib) generate RFC 4122 UUIDv4 with zero extra dependencies.
 
-This only needs to be implemented once, in the Aggregator (Person A) — no other service generates a `hazard_id`.
+Canonical identity allocation belongs to the Aggregator/storage boundary. Persist the UUID once; ingestion retries and corrections reuse the stored identity. See [Canonical and Storage Contract](Canonical-and-Storage-Contract.md#2-identity-revisions-and-tombstones).
 
 ## HazardEvent field table
 
 | Field | JSON type | Example | Classification |
 | --- | --- | --- | --- |
 | `hazard_id` | string (UUIDv4) | `"a1b2c3d4-..."` | Ringkasan |
-| `source` | string enum: `BMKG`, `PVMBG` | `"BMKG"` | Ringkasan |
+| `source` | string enum: `BMKG`, `PVMBG`, `SATELIT`, `SENSOR_PANTAI` | `"BMKG"` | Ringkasan |
 | `source_ref_id` | string | `"evt-00231"` | Mentah |
-| `hazard_type` | string enum: `SEISMIC`, `VOLCANIC` | `"SEISMIC"` | Ringkasan |
+| `hazard_type` | string enum: `SEISMIC`, `VOLCANIC`, `WILDFIRE`, `COASTAL` | `"SEISMIC"` | Ringkasan |
 | `severity` | string enum: `NORMAL`, `WASPADA`, `SIAGA`, `AWAS` | `"SIAGA"` | Ringkasan |
 | `area_name` | string | `"Kab. Cianjur"` | Ringkasan |
 | `latitude` | number (float) | `-6.8168` | Mentah |
@@ -70,9 +70,13 @@ type Severity string
 const (
 	SourceBMKG  Source = "BMKG"
 	SourcePVMBG Source = "PVMBG"
+	SourceSatelit Source = "SATELIT"
+	SourceSensorPantai Source = "SENSOR_PANTAI"
 
 	HazardSeismic  HazardType = "SEISMIC"
 	HazardVolcanic HazardType = "VOLCANIC"
+	HazardWildfire HazardType = "WILDFIRE"
+	HazardCoastal HazardType = "COASTAL"
 
 	SeverityNormal  Severity = "NORMAL"
 	SeverityWaspada Severity = "WASPADA"
@@ -111,10 +115,14 @@ from pydantic import BaseModel, Field
 class Source(str, Enum):
     BMKG = "BMKG"
     PVMBG = "PVMBG"
+    SATELIT = "SATELIT"
+    SENSOR_PANTAI = "SENSOR_PANTAI"
 
 class HazardType(str, Enum):
     SEISMIC = "SEISMIC"
     VOLCANIC = "VOLCANIC"
+    WILDFIRE = "WILDFIRE"
+    COASTAL = "COASTAL"
 
 class Severity(str, Enum):
     NORMAL = "NORMAL"
@@ -188,3 +196,11 @@ registered lifecycle envelope; see [Reporting Lifecycle](Reporting%20Lifecycle.m
 Hazard IDs remain stable on corrections, with revisions in lifecycle/storage
 metadata. Initial canonical messages represent revision 1. Media projection rules
 also apply to canonical snapshots within notice transition history.
+
+## M2 field constraints
+
+All eleven canonical fields in the field table are required. `hazard_id` is a persisted UUIDv4; `(source, source_ref_id)` is the unique source identity. Coordinates must be finite WGS84 latitude/longitude numbers in [-90,90]/[-180,180]. Timestamps serialize in UTC with a `Z` suffix and millisecond precision; internal order comparisons retain the stored database precision. JSON rejects non-finite numbers. Missing required source fields are validation failures, not synthesized defaults.
+
+The canonical JSON format version is **2** for producer/consumer configuration; no `schema_version` field is added to HazardEvent. Registry schema IDs version Avro independently. Additive source attributes follow the declared compatibility policy; removing/changing canonical required fields requires a new contract review. Internal revision, lifecycle, fencing and freshness metadata remain outside the canonical object.
+
+SATELIT/WILDFIRE uses the exact mapping in [Wildfire Processing Contract, §4](Wildfire-Processing-Contract.md#4-canonical-wildfire-mapping). BMKG/PVMBG mappings remain unchanged. SENSOR_PANTAI/COASTAL uses the basic sensor contract and the coastal adapter mapping; unresolved sensor semantics must be settled before its mapping is called finalized.

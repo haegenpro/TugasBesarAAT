@@ -21,11 +21,11 @@ For paginated endpoints, default limit is 100, maximum 1,000. Omitted `source` m
 
 The M1 client query's descending `occurred_at` ordering and exclusive occurrence-time filter are not the audit contract. Implement a separate query path while preserving legitimate existing client behavior.
 
-The canonical event wire shape remains unchanged. Lifecycle/tombstone metadata stays internal unless a permitted response extension is explicitly reviewed. Whether inactive historical fire identities belong in the evaluator's audit population is still unresolved; keep that inclusion policy explicit and common to events, count, and checksum.
+The canonical event wire shape remains unchanged. Lifecycle/tombstone metadata stays internal unless a permitted response extension is explicitly reviewed. The selected audit population contains active canonical HazardEvents only; inactive historical identities and tombstones remain internal. Apply this same population to listing, count, and checksum. External evaluator compatibility remains to be tested.
 
 ## 2. Immutable Materialized Snapshot
 
-A snapshot is an immutable, distributed copy of the selected canonical state at one coordinated committed boundary. Include only canonically applied state, not prepared-but-undelivered processor output. State how other sources participate in that boundary; a satellite offset alone cannot define a snapshot covering BMKG, PVMBG, and coastal writes.
+A snapshot is an immutable, distributed copy of the selected canonical state at one coordinated committed boundary. Include only canonically applied state, not prepared-but-undelivered processor output. Every canonical source participates through the shared mutation gate and pinned primary read views. A satellite offset alone does not define the snapshot; prepared processor outputs and accepted report/raw backlogs are excluded until canonically applied.
 
 ### Explicit sessions and live requests
 
@@ -60,9 +60,9 @@ Snapshot rows are frozen, but metadata about unavailable units is request-time a
 
 ### Optional extension for shared checksum/listing
 
-Within explicit audit sessions, the user selected a shared snapshot reference. A proposed backwards-compatible extension returns a snapshot reference in a response header and accepts it as an optional request parameter/header for checksum and subsequent audit operations. Exact naming is not prescribed here. Required fields and existing valid requests must remain supported. Verify that the evaluator tolerates optional extensions before adopting them.
+Within explicit audit sessions, the user selected a shared snapshot reference. A proposed backwards-compatible extension returns a snapshot reference in a response header and accepts it as an optional request parameter/header for checksum and subsequent audit operations. Exact request/header names are fixed in §10. Required fields and existing valid requests must remain supported. Verify that the evaluator tolerates optional extensions before adopting them.
 
-The cursor internally binds snapshot identity, scope/filters, ordering position, and format version. Opaque does not mean trusted: validate it, bind it to authorized scope, and reject tampering or changed filters. Exact encoding and signing choices are implementation details with interoperability/security rationale, not design aesthetics.
+The cursor internally binds snapshot identity, scope/filters, ordering position, and format version. Opaque does not mean trusted: validate it, bind it to authorized scope, and reject tampering or changed filters. Encoding and signing are fixed in §10; the Secret and rotation procedure are deployment configuration.
 
 ### Retention
 
@@ -87,7 +87,7 @@ When a required logical unit is unavailable:
 
 Without a trustworthy lower bound for an unavailable unit's next key, the safe prefix may be empty. Metadata can permit progress only when it proves that hidden keys cannot precede emitted records. A partition timeout alone is not such proof.
 
-**Derived conservative default:** `partial` means required logical data is missing, rather than merely that an extra replica is down. Appendix A also asks for names of unreachable storage units. Agree whether names represent logical partitions or physical replica units and verify the evaluator's interpretation; do not hide physical failures in metrics or equate a healthy process with current data.
+`unavailable_units` contains the current physical storage-unit names, using the same `unit` values as location reporting. Set `partial: true` whenever a required physical unit cannot be reached, as Appendix A prescribes, even when a verified eligible copy supplies all logical rows. Read each logical row only once. Missing logical data additionally restricts the safe ordered prefix; a redundant-copy outage alone must not fabricate missing rows or duplicate counts. Dashboard metadata distinguishes data incompleteness from reduced replica availability.
 
 If all required units are unavailable, return a bounded partial result under the data endpoint contract rather than fabricating a complete empty dataset. Distinguish validation/authentication failures from storage incompleteness.
 
@@ -146,9 +146,9 @@ During unavailable partitions, show available aggregates with a visible incomple
 | Unfinished capture failure | Loss of a required view aborts capture; gate/view cleanup is bounded and fenced. Completed snapshots retain retry semantics. | Distributed State & Stream Processing + Platform, Coordination & Reliability |
 | Degraded read implementation | A normal Citus distributed query may fail as a whole; design an authorized per-unit fallback within the storage-owning service. | Distributed State & Stream Processing + Platform, Coordination & Reliability |
 | Snapshot API compatibility | Optional shared-snapshot extension must preserve the tester's contract. | Distributed State & Stream Processing |
-| Reference identity semantics | Validate stream-history-derived IDs and ambiguous historical restoration against reference expectations. | Distributed State & Stream Processing + Reliable Ingestion & Delivery |
+| Reference identity semantics | Validate stream-history-derived IDs and the selected restoration-first lifecycle policy against reference expectations. | Distributed State & Stream Processing + Reliable Ingestion & Delivery |
 | Geography/reference conventions | Check distance model, center formula, province data, and ties. | Distributed State & Stream Processing |
-| Inactive audit membership | Assignment does not explicitly settle tombstone inclusion in the uploaded audit examples. | Distributed State & Stream Processing |
+| Inactive audit membership | Project policy excludes inactive rows consistently; verify evaluator agreement before claiming acceptance. | Distributed State & Stream Processing |
 | Feed-clock and operation behavior | Confirm namespace, reconnect, confidence, updates/retractions, `virtual_now`, and recorded replay semantics. | Reliable Ingestion & Delivery + Distributed State & Stream Processing |
 | Measured tuning | Select lateness, snapshot lifetimes, deadlines, partition count, batch limits, and memory budgets from evidence. | Each owner, coordinated by Platform, Coordination & Reliability |
 
@@ -192,3 +192,19 @@ Do not describe these gates as completed or change selected policies silently wh
 7. Add exact on-request analytics, run integrated failure tests, and select measured configuration values.
 
 This sequence is implementation guidance, not evidence of completed work. Only documentation consistency and source review were performed while generating this document set; no runtime, load, or fault tests have been executed.
+
+## 10. Audit Interface Details v1
+
+Prescribed endpoints retain their existing parameter names and JSON shapes. Events return `items`, `next_cursor`, `partial`, `unavailable_units`; checksum returns `source`, `count`, `checksum`, `algorithm`, `as_of`, `partial`, `unavailable_units`; location returns `hazard_id`, `locations`, `partial` (and `unavailable_units` when needed to explain an outage). Unprocessed metadata is defined in [Validation and Replay Contract, §7](Validation-and-Replay-Contract.md#7-failure-and-replay-interfaces-v1). Omitted checksum source is serialized as JSON null to mean all sources, not a fabricated source enum.
+
+Cursor format v1 is opaque base64url-encoded payload plus HMAC-SHA256 signature under a service Secret. Payload binds version, endpoint, authorized scope, source/since filters, last full-precision ordering key, required-unit progress, and nullable snapshot ID. Client code must not construct or decode it. Filter changes, invalid signatures, unsupported cursor versions, malformed UTC timestamps, unknown source, and limits outside 1–1,000 return `400 bad_request` with Appendix A's error envelope. Missing/bad credentials use 401; valid credentials lacking scope use 403. Unknown established hazard uses 404. Overload uses 429 and unavailable authentication/coordination uses 503. An expired snapshot/cursor returns `400 cursor_expired`, requiring an explicit fresh traversal. Storage-unit loss produces bounded partial results, not 500/false 404.
+
+Compare UUID strings using lowercase canonical UUID text in byte order; use database precision in cursors even though output time strings use milliseconds. The cursor after a zero-row partial page preserves the same data position plus scope/availability context; `next_cursor` stays non-null while required data is unseen. For live queries, document that corrections can move the observed population between pages; deterministic key order is not frozen membership.
+
+Optional explicit sessions use private audit-authorized `POST /internal/audit/snapshots` with `{source:null|canonical-source}`. Return `202 {snapshot_id,status:"building"}` once the capture job is durable. `GET /internal/audit/snapshots/{snapshot_id}` returns `building`, `ready`, `aborted`, or `expired` with the capture scope/time and reason when applicable. Events/checksum accept an optional `snapshot_id` parameter; response header `X-Audit-Snapshot-ID` echoes it. The ordinary default request never starts a capture. A session ID used before publication returns `503 snapshot_not_ready`; failed/expired sessions return explicit 400 errors. A cursor binds its snapshot and cannot switch sessions. Preserve all required response body fields and default requests; these endpoints are project extensions, not claimed assignment requirements.
+
+Initial configurable limits: 2-second audit read deadline, 2-second write-gate acquisition/drain/view-establishment budget, one concurrent capture, 5-minute background copy deadline, 15-minute idle published-session expiry, and 1-hour absolute expiry. The coordinated timing authority is the platform's authoritative lease/expiry service; local worker wall clocks cannot extend leases. Missing authority aborts capture or refuses renewal safely. These are starting budgets to validate, not measured guarantees; an expired build cannot publish late. Aborted/expired rows are cleaned up idempotently without deleting another live session's records. Writes resume after views are pinned, independently of the five-minute copy budget.
+
+Failure behavior: one lost replica sets physical availability metadata while an eligible current copy can still supply rows; all copies of one logical group missing restricts ordered pagination to the proven prefix. Never label a reachable-subset checksum/count as a complete population. `partial` and the unavailable-unit list remain present even when cached or replica-served data lets the operation cover every logical row. `/location` lists actual current primary/replica placement, including unreachable known units, without declaring an unreachable copy up to date.
+
+Concrete complete, paginated, checksum, lifecycle, and failure examples are shared in [M2 contract examples](fixtures/m2-contract-examples.json). These are fixed input/expected-output contracts; runtime acceptance remains unproven until implementation tests consume them.

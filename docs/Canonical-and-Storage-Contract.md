@@ -22,7 +22,7 @@ This contract records the selected canonical storage design. The [M2 assignment]
 
 Retain `snake_case`, uppercase existing enum strings, and UTC `Z` timestamp serialization because these are existing interoperability contracts, not a new aesthetic preference. Retaining millisecond output precision is a compatibility default; internal comparisons must not silently lose precision needed for cursor ordering.
 
-The old scalar-only description of `attributes` must be corrected. M2 requires arrays such as `satellites` and `detection_keys`. Keep revision, tombstone, ownership, lineage, and freshness metadata in internal tables or existing lifecycle envelopes unless the public contract explicitly permits additions.
+The [wire-format specification](HazardEvent%20Representation.md#m2-field-constraints) includes M2 enum and structured-attribute extensions. M2 requires arrays such as `satellites` and `detection_keys`. Keep revision, tombstone, ownership, lineage, and freshness metadata in internal tables or existing lifecycle envelopes unless the public contract explicitly permits additions.
 
 Raw observation payloads are distinct from canonical attributes. A parsed JSON object or reserialized floating-point value is not a lossless substitute for original bytes or identity components.
 
@@ -39,7 +39,7 @@ Raw observation payloads are distinct from canonical attributes. A parsed JSON o
 
 Canonical revision is not the same as source offset, source revision, or polling ownership token. Document their separate meanings. Equality checks compare typed canonical content, not arbitrary JSON property order. Repeated input may update observation metadata without incrementing the logical event revision.
 
-Inactive rows are excluded from current client/analytics results. Whether the evaluator expects inactive identities in audit events/checksum remains a validation gate; do not silently implement either interpretation as an assignment fact.
+Inactive rows are excluded from current client/analytics results and from audit listing/count/checksum. Tombstones, revisions, and lineage remain internal. This is the selected project population rule; if evaluator evidence requires a different population, revise all three audit operations together.
 
 UUIDv4 is an opaque canonical identity choice, not a deduplication mechanism. Database constraints, stable routing, revision checks, and retry identities remain necessary.
 
@@ -49,7 +49,7 @@ Selected routing principle: hash of the composite source identity, stable logica
 
 Under Citus, use its hash distribution and shard placement catalogs as the authority. Do not maintain a competing application hash ring. Coordinate updates leave `(source, source_ref_id)` unchanged, so they leave routing unchanged.
 
-**Proposed implementation detail:** encode the source pair into a collision-free distribution value, distribute on that value, and retain the original pair for exact identity checks. An unambiguous structured or length-prefixed encoding avoids delimiter collisions. Specify and version the encoding before migration; do not choose an unexplained hash or identifier style.
+**Distribution-key encoding v1:** UTF-8 bytes of the compact JSON array `[source,source_ref_id]`, without insignificant whitespace; use standard JSON string escaping, preserve Unicode code points without normalization, and emit non-ASCII characters as UTF-8. Distribute its text value with Citus and retain the exact original pair. This unambiguous encoding separates source and identifier even when either contains delimiters; hash collisions never replace exact pair comparison.
 
 Citus distributed uniqueness constraints generally need the distribution column included. Therefore the M1 UUID-only primary key, `(source, source_ref_id)` unique index, outbox foreign keys, and related lifecycle constraints cannot simply be copied unchanged. Design and test constraints including the routing key, with a consistency check binding it to the source pair. Hash collisions must never cause two distinct source identities to be treated as one entity.
 
@@ -148,3 +148,44 @@ For explicit snapshot capture, every canonical mutation path must honor a shared
 Once each required primary has established and pinned its read view while no canonical mutations can commit, release the admission gate and materialize from those views. Reads during a barrier may use already committed live state; no new global-snapshot guarantee applies to ordinary reads. The gate has an acquisition/drain deadline and an owner-fenced cleanup path; failed or slow capture must not stop writes indefinitely. Abort the capture before releasing an incomplete boundary. Platform, Coordination & Reliability and Distributed State & Stream Processing must validate coordinator crash and stale-owner behavior of the gate.
 
 This application protocol and its Citus integration remain a validation gate. Read-view establishment must actually occur before barrier release; merely issuing BEGIN does not establish a lazy MVCC snapshot. Long-lived views can retain old versions and consume connections. Measure that cost and bound capture concurrency/duration.
+
+## 9. Canonical Adapter v1
+
+The Aggregator/storage boundary exposes `POST /internal/canonical/batches` to authorized ingestion and processing callers. This is a private service interface, not a new client API. Only its owning service accesses canonical database credentials. JSON uses the error envelope in Appendix A. The bearer credential is a service credential; the audit token grants no write permission. An in-process implementation must preserve the same request/outcome semantics.
+
+Required request fields:
+
+| Field | Contract |
+| --- | --- |
+| `contract_version` | Integer `1`. |
+| `batch_id` | Stable, caller-persisted operation identity; unchanged across retries or delivery-owner changes. |
+| `ownership` | `{scope, epoch, holder}`; scope string, positive int64 epoch, holder string. Platform supplies authoritative current ownership. |
+| `mutations` | Nonempty array of distinct `(source, source_ref_id)` entities. |
+| Mutation `operation_id` | Stable identity for this logical mutation, scoped by source; a correction has a new identity. |
+| Mutation `source`, `source_ref_id` | Canonical source and stable entity identity. |
+| Mutation `operation` | `upsert` or `retract`. |
+| Mutation `source_order` | `{namespace, position}`; nonnegative int64 position ordered within a stable namespace. |
+| Mutation `expected_revision` | Nonnegative canonical compare-and-set value, `0` for a new identity. |
+| Mutation `event` | Required for upsert: canonical mutable fields (`hazard_type`, `severity`, `area_name`, coordinates, `occurred_at`, `attributes`). Omitted for retract. |
+
+Storage assigns/persists `hazard_id` and first `ingested_at` on creation. Neither is a mutable caller field. Ingestion assigns a durable monotonic acquisition position for polling sources; satellite positions are original feed offsets. Processor output uses a durable output sequence in its namespace. Never compare offsets from different namespaces; an explicit serialized source-session transition is required before accepting a new namespace for an existing identity. A newer source position with equal typed content advances source ordering without incrementing the canonical revision. Retractions preserve the source-order high-water mark, identity, and tombstone.
+
+Check authorization first. Then resolve a previously committed batch/mutation identity before applying current revision checks: a legitimate retry must return its recorded outcome. Same identity with different mutation content is `409 identity_conflict`. Ownership/trace delivery metadata may change on a successor retry; logical mutation content may not. New work requires current fenced authority inside the protected commit boundary. No request may choose a weaker acknowledgement policy.
+
+| HTTP / code | Meaning and caller behavior |
+| --- | --- |
+| `200`, `outcome: applied` | All mutations, operation records, and outgoing intents committed atomically under two-copy durability. Return `batch_id` and per-entity `hazard_id`, `revision`, and outcome. |
+| `200`, `outcome: duplicate` | Batch already committed; return its recorded result without new effects. |
+| `200`, `outcome: no_change` | No canonical content changed; ordering/operation metadata still commits. |
+| `409 stale_operation` | At least one mutation precedes its entity's stored source order; none of this new batch commits. Preserve state; resolve/reconcile producer progress. |
+| `409 revision_conflict` | New operation used an outdated expected canonical revision; none commits. Re-read/reconcile rather than blindly incrementing a revision. |
+| `403 stale_owner` | Caller lacks current authority; stop protected work and acquire valid ownership. |
+| `400 invalid_request` | Unsupported version, malformed fields, invalid coordinates, duplicate target, or invalid mutation. Preserve failed acquired input through ingestion. |
+| `503 temporarily_unavailable` | Required storage, coordination, or audit-write admission unavailable by the request deadline. Retain input/output intent and retry with the same identity. |
+
+Authentication failures use `401 unauthorized` or `403 forbidden`. An ambiguous timeout/503 can follow a committed transaction; retry the original batch identity to discover the result. A multi-record merge/split is never partly acknowledged: any stale/conflicting member rejects the new batch as a whole. Already committed output intents may be delivered by a successor with current delivery authority; an expired acquisition token is provenance, not a reason to delete accepted work.
+
+The initial adapter request deadline is 2 seconds and inline request limit is 1 MiB. Larger corrections use the same endpoint with `mutations_ref` instead of inline `mutations`: an opaque reference to an immutable, fully prepared batch in the storage/processor-owned output-intent store, including mutation count and a SHA-256 digest. Only the owning service resolves it; no caller-provided filesystem path/URL or unrelated database credential is accepted. Both forms identify the same logical batch, follow the same validation rules, and commit all visible effects atomically. Bound the reader buffer and configure a measured total correction-size quota; if the batch cannot currently execute safely, keep it pending rather than exposing part of a split. These initial budgets require resource/load validation and are not measured performance claims.
+
+
+The private authenticated reconciliation read is `GET /internal/canonical/entities?source=...&source_ref_id=...`, returning `{source,source_ref_id,hazard_id,revision,active,source_order,event}` with `event` null for an inactive identity. Established absence returns 404; uncertain storage returns 503 rather than false absence. Its credentials are the same scoped producer/recovery identity as canonical writes, not Media or audit credentials. A revision-conflict response includes the conflicting source identities in safe error details so the caller can reconcile through this read. A repeated stale operation is not rewritten with a new identity or a guessed higher revision.

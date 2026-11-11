@@ -1,0 +1,128 @@
+{
+  "type": "record",
+  "name": "RawInput",
+  "namespace": "bnpb.m2",
+  "fields": [
+    {
+      "name": "envelope_version",
+      "type": "int",
+      "default": 1
+    },
+    {
+      "name": "source",
+      "type": "string"
+    },
+    {
+      "name": "message_id",
+      "type": "string"
+    },
+    {
+      "name": "source_namespace",
+      "type": "string"
+    },
+    {
+      "name": "source_ref_id",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null
+    },
+    {
+      "name": "operation",
+      "type": "string"
+    },
+    {
+      "name": "source_position",
+      "type": [
+        "null",
+        "long"
+      ],
+      "default": null
+    },
+    {
+      "name": "source_cursor",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null
+    },
+    {
+      "name": "event_time",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null
+    },
+    {
+      "name": "received_at",
+      "type": "string"
+    },
+    {
+      "name": "payload",
+      "type": "bytes"
+    },
+    {
+      "name": "payload_ref",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null
+    },
+    {
+      "name": "payload_size",
+      "type": "long"
+    },
+    {
+      "name": "payload_sha256",
+      "type": "string"
+    },
+    {
+      "name": "content_type",
+      "type": "string"
+    },
+    {
+      "name": "source_schema_id",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null
+    },
+    {
+      "name": "virtual_now",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null
+    },
+    {
+      "name": "correlation_id",
+      "type": "string"
+    },
+    {
+      "name": "traceparent",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null
+    },
+    {
+      "name": "ownership_scope",
+      "type": "string"
+    },
+    {
+      "name": "ownership_epoch",
+      "type": "long"
+    },
+    {
+      "name": "ownership_holder",
+      "type": "string"
+    }
+  ]
+}
