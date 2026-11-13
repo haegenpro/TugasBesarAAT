@@ -38,9 +38,15 @@ func (h HTTP) Register(r *gin.Engine) {
 	r.POST("/internal/canonical/batches", h.batch)
 	r.GET("/internal/canonical/entities", h.entity)
 	if h.Ownership != nil {
-		for _, action := range []string{"acquire", "renew", "release"} {
-			r.POST("/internal/ownership/"+action, func(c *gin.Context) { h.ownership(c, action) })
-		}
+		h.RegisterOwnership(r, "/internal/ownership")
+	}
+}
+
+// RegisterOwnership also supports separately authenticated processor authority
+// without exposing canonical mutation routes under a second credential.
+func (h HTTP) RegisterOwnership(r gin.IRoutes, prefix string) {
+	for _, action := range []string{"acquire", "renew", "release"} {
+		r.POST(prefix+"/"+action, func(c *gin.Context) { h.ownership(c, action) })
 	}
 }
 func (h HTTP) authorize(c *gin.Context) bool {

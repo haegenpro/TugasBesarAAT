@@ -369,6 +369,10 @@ func (r *replicatedDurability) ConfirmNamespace(ctx context.Context, route, name
 	return r.confirmRecord(ctx, "SELECT EXISTS(SELECT 1 FROM canonical_entities WHERE route_key=$1 AND source_namespace=$2)", route, namespace)
 }
 
+func (r *replicatedDurability) ConfirmCapture(ctx context.Context, id, state string) error {
+	return r.confirmRecord(ctx, "SELECT EXISTS(SELECT 1 FROM platform_audit_captures WHERE capture_id=$1 AND state=$2 AND ($2<>'ready' OR (idle_expires_at>clock_timestamp() AND absolute_expires_at>clock_timestamp())))", id, state)
+}
+
 func (r *replicatedDurability) ConfirmOwnership(ctx context.Context, owner canonical.Ownership, released bool) error {
 	if released {
 		return r.confirmRecord(ctx, "SELECT EXISTS(SELECT 1 FROM canonical_ownership WHERE scope=$1 AND epoch=$2 AND holder IS NULL AND expires_at IS NULL)", owner.Scope, owner.Epoch)

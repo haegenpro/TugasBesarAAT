@@ -146,6 +146,27 @@ func main() {
 		}
 		adapter.Register(router)
 	}
+	if platform.Bool("PLATFORM_COORDINATION_ENABLED", false) {
+		token := os.Getenv("PROCESSOR_SERVICE_TOKEN")
+		if token == "" || token == cfg.AdminToken || token == cfg.CanonicalToken || token == cfg.BMKGAPIKey || token == cfg.PVMBGToken || token == os.Getenv("AUDIT_TOKEN") {
+			logger.Error("platform coordination requires a dedicated PROCESSOR_SERVICE_TOKEN")
+			os.Exit(1)
+		}
+		authority, err := ownership.NewProcessor(st.Pool, 15*time.Second)
+		if err != nil {
+			logger.Error("invalid processor authority", "error", err)
+			os.Exit(1)
+		}
+		durability, ok := st.Canonical.Durability.(ownership.Durability)
+		if !ok {
+			logger.Error("platform coordination requires replicated durability")
+			os.Exit(1)
+		}
+		authority.Durability = durability
+		st.Processor = authority
+		processorAPI := canonical.HTTP{Ownership: authority, Token: token}
+		processorAPI.RegisterOwnership(router, "/internal/processor/ownership")
+	}
 	server.RegisterSchemaAdmin(router, volcanicReaders, cfg.AdminToken)
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("aggregator", router)}
 	var workers sync.WaitGroup

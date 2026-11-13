@@ -53,6 +53,9 @@ func NewAcquisition(pool *pgxpool.Pool, ttl, budget time.Duration) (*Authority, 
 }
 
 func (a *Authority) accepts(scope string) bool {
+	if a.prefix == "processor:" {
+		return scope == "processor:SATELIT"
+	}
 	if a.prefix == "acquisition:" {
 		return scope == "acquisition:BMKG" || scope == "acquisition:PVMBG"
 	}
@@ -265,6 +268,14 @@ func (a *Authority) Protect(ctx context.Context, tx pgx.Tx, o canonical.Ownershi
 }
 
 var _ canonical.OwnershipRepository = (*Authority)(nil)
+
+func NewProcessor(pool *pgxpool.Pool, ttl time.Duration) (*Authority, error) {
+	a, err := NewAcquisition(pool, ttl, canonical.Deadline)
+	if err == nil {
+		a.prefix = "processor:"
+	}
+	return a, err
+}
 
 // Validate preflights an outbound request. Effects still need Protect through
 // COMMIT; no database transaction is held across the HTTP request.

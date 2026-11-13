@@ -49,7 +49,7 @@ func Up(ctx context.Context, c *pgx.Conn, dir, target, runtimeRole string) error
 		return err
 	}
 	var unknown int
-	if err = tx.QueryRow(ctx, "SELECT count(*) FROM public.canonical_schema_migrations WHERE version NOT IN ('0001_m1.sql','0002_canonical.sql','0003_citus.sql','0004_ownership.sql','0005_replication_probe.sql','0006_acquisition.sql')").Scan(&unknown); err != nil {
+	if err = tx.QueryRow(ctx, "SELECT count(*) FROM public.canonical_schema_migrations WHERE version NOT IN ('0001_m1.sql','0002_canonical.sql','0003_citus.sql','0004_ownership.sql','0005_replication_probe.sql','0006_acquisition.sql','0007_platform_coordination.sql')").Scan(&unknown); err != nil {
 		return err
 	}
 	if unknown != 0 {
@@ -59,7 +59,7 @@ func Up(ctx context.Context, c *pgx.Conn, dir, target, runtimeRole string) error
 	if target == "citus" {
 		files = append(files, "0003_citus.sql")
 	}
-	files = append(files, "0004_ownership.sql", "0005_replication_probe.sql", "0006_acquisition.sql")
+	files = append(files, "0004_ownership.sql", "0005_replication_probe.sql", "0006_acquisition.sql", "0007_platform_coordination.sql")
 	if target == "postgres" {
 		var n int
 		if err = tx.QueryRow(ctx, "SELECT count(*) FROM public.canonical_schema_migrations WHERE version='0003_citus.sql'").Scan(&n); err != nil {

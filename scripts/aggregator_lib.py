@@ -30,7 +30,7 @@ def render(inventory, config, image, replicas=3):
         require(uri.scheme in allowed and uri.hostname and not uri.username and not uri.password and not uri.query and not uri.fragment,
                 "public service URLs must not include credentials, query strings or fragments")
     public.update({
-        "AGGREGATOR_PORT": "8080", "ACQUISITION_ENABLED": "true",
+        "AGGREGATOR_PORT": "8080", "ACQUISITION_ENABLED": "true", "PLATFORM_COORDINATION_ENABLED": "true",
         "CANONICAL_ADAPTER_ENABLED": "true", "CANONICAL_OWNERSHIP_ENABLED": "true",
         "CANONICAL_DURABILITY_CONFIG": "/etc/aat/durability.json",
         "AGGREGATOR_POLL_ENABLED": "true", "AGGREGATOR_REPLAY_ENABLED": "true", "AGGREGATOR_PUBLISH_ENABLED": "true",
@@ -49,7 +49,7 @@ def render(inventory, config, image, replicas=3):
                 "metadata": {"name": resource_name, "namespace": namespace, "labels": labels.copy()}, **fields}
 
     env = [{"name": key, "valueFrom": {"configMapKeyRef": {"name": name + "-config", "key": key}}} for key in sorted(public)]
-    for key in ("AGGREGATOR_ADMIN_TOKEN", "BMKG_API_KEY", "PVMBG_TOKEN", "CANONICAL_SERVICE_TOKEN"):
+    for key in ("AGGREGATOR_ADMIN_TOKEN", "BMKG_API_KEY", "PVMBG_TOKEN", "CANONICAL_SERVICE_TOKEN", "PROCESSOR_SERVICE_TOKEN"):
         env.append({"name": key, "valueFrom": {"secretKeyRef": {"name": config["runtime_secret"], "key": key}}})
     keys = ["DATABASE_URL"] + [f"STORAGE_GROUP_{i}_URL" for i in range(5 if config["storage_mode"] == "citus" else 1)]
     for key in keys:

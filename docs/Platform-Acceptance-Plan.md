@@ -43,7 +43,7 @@ report-ready summaries. Preserve failure counterexamples as failures.
 | Acknowledged-write durability | primary/disk loss, all surviving required WAL/decision state, checksum reconciliation | Storage + Platform | Pending |
 | Canonical progress after node loss | safe promotion/routing and commits on two copies before rebuilding | Storage + Platform | Pending |
 | Replacement node | join empty local disk, online rebuilding, restored three-copy placement; no full dataset on one node | Storage + Platform | Pending |
-| Snapshot ownership/expiry | capture crash/freeze, bounded writer pause, stale cleanup cannot release a successor gate or publish expired capture | Storage | Pending |
+| Snapshot ownership/expiry | capture crash/freeze, bounded writer pause, stale cleanup cannot release a successor gate or publish expired capture | Storage + Platform | [Platform gate/expiry/hooks drafted](Platform-Processor-and-Audit-Handoff.md); storage pin/copy/completeness integration and execution pending |
 | Partial read/analytics | bounded responses, truthful missing units and checksum scope during storage loss | Storage | Pending |
 | Service storage isolation | forbidden direct database/network connections fail; required HA and Tester Agent still work | All owners | Pending |
 | Broker/202/recipient durability | crash immediately around acknowledgements, accepted identity reconciliation, disk loss, queue capacity | Ingestion | Pending |

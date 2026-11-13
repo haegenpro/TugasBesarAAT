@@ -27,6 +27,7 @@ type Store struct {
 	control                *pgxpool.Pool
 	Canonical              CanonicalOptions
 	Acquisition            Fence
+	Processor              Fence
 	idleTransactionTimeout time.Duration
 }
 

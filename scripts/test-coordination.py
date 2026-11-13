@@ -79,7 +79,7 @@ def main():
             command.append("-race")
         base_command = list(command)
         command.extend(["./internal/store", "./internal/canonical", "./internal/config", "./internal/acquisition", "./internal/poller", "./internal/api", "-run",
-                        "^(TestPlatformOwnership|TestPlatformAcquisition|TestOwnership|TestAcquisition|TestReadyDraining)"])
+                        "^(TestPlatformOwnership|TestPlatformAcquisition|TestPlatformAudit|TestPlatformProcessor|TestOwnership|TestAcquisition|TestReadyDraining)"])
         print(f"Isolated ownership tests; evidence: {evidence.relative_to(ROOT)}", flush=True)
         tests = subprocess.run(command, cwd=ROOT / "aggregator", env=test_env,
                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=240)

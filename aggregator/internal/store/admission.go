@@ -50,6 +50,11 @@ func (s *Store) beginMutation(ctx context.Context) (pgx.Tx, error) {
 		release()
 		return nil, err
 	}
+	if err = checkAuditAdmission(ctx, reg); err != nil {
+		_ = reg.Rollback(context.Background())
+		release()
+		return nil, err
+	}
 	if s.Canonical.Durability != nil {
 		if err = s.Canonical.Durability.Prepare(ctx, reg); err != nil {
 			_ = reg.Rollback(context.Background())
