@@ -235,11 +235,8 @@ func (r *replicatedDurability) Prepare(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(ctx, "SET LOCAL synchronous_commit TO 'on'"); err != nil {
 		return canonical.Unavailable()
 	}
-	if r.cfg.Mode == "citus" {
-		if _, err := tx.Exec(ctx, "SET LOCAL citus.multi_shard_commit_protocol TO '2pc'"); err != nil {
-			return canonical.Unavailable()
-		}
-	}
+	// Citus 14.2 removed multi_shard_commit_protocol. Distributed writes use
+	// built-in 2PC; do not set the removed GUC on the pinned formation.
 	// Check the actual transaction's backend as well as the observer endpoints.
 	status, err := readReplication(ctx, tx)
 	if err != nil {
@@ -409,6 +406,13 @@ func (r *replicatedDurability) confirmRecord(ctx context.Context, query string, 
 		return canonical.Unavailable()
 	}
 	return nil
+}
+
+// ConfirmRecord is used by the storage owner's input/progress repositories.
+// Query text is internal code, never supplied by HTTP callers. Observe the
+// committed record on an anchored backend before confirming its WAL prefix.
+func (r *replicatedDurability) ConfirmRecord(ctx context.Context, query string, args ...any) error {
+	return r.confirmRecord(ctx, query, args...)
 }
 
 // ConfirmTransaction anchors publication/decision evidence to the backend that

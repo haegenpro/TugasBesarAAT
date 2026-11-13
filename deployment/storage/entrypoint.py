@@ -19,8 +19,8 @@ def main():
         "idle_in_transaction_session_timeout": "15s",
     }
     if os.environ["STORAGE_MODE"] == "citus":
-        parameters.update({"citus.shard_count": 4, "citus.recover_2pc_interval": 1000,
-                           "citus.multi_shard_commit_protocol": "2pc"})
+        # Citus 14.2 uses built-in 2PC; the former GUC is rejected.
+        parameters.update({"citus.shard_count": 4, "citus.recover_2pc_interval": 1000})
     config = {
         "scope": os.environ["FORMATION"], "namespace": "/aat-platform/", "name": name,
         "etcd3": {
