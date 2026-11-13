@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def read_plan(path, inventory):
     storage = json.loads(Path(path).read_text())
-    require(storage == plan(inventory, storage["mode"], storage["image"]), "storage plan does not match this inventory/renderer")
+    require(storage == plan(inventory, storage["mode"], storage["image"], storage.get("formation_suffix", "storage")), "storage plan does not match this inventory/renderer")
     return storage
 
 
@@ -85,8 +85,8 @@ def make_secrets(storage, output):
         dsn = f"postgresql://aggregator_app:{quote(credentials['APP_PASSWORD'], safe='')}@{formation}-g{group['id']}-primary.{namespace}.svc.cluster.local:5432/hazards?sslmode=disable"
         env.append(f"{group['dsn_env']}={dsn}")
         if group["id"] == 0:
-            env.append("DATABASE_URL=" + dsn)
-    env.append("CANONICAL_DURABILITY_CONFIG=/etc/aat/durability.json")
+            env.append(("INGESTION_DATABASE_URL=" if storage.get("formation_suffix")=="ingestion" else "DATABASE_URL=") + dsn)
+    env.append(("INGESTION_DURABILITY_CONFIG=" if storage.get("formation_suffix")=="ingestion" else "CANONICAL_DURABILITY_CONFIG=")+"/etc/aat/durability.json")
     (output / "application.env").write_text("\n".join(env) + "\n")
     for path in output.rglob("*"):
         path.chmod(0o700 if path.is_dir() else 0o600)
@@ -160,13 +160,14 @@ def main():
     parser.add_argument("--inventory", type=Path, default=ROOT / "deployment/platform/inventory.example.json")
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--mode", choices=["postgres", "citus"], default="postgres")
+    parser.add_argument("--formation-suffix", choices=["storage","ingestion"], default="storage")
     parser.add_argument("--image", help="built Patroni image repository@sha256:...")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     inventory = load(args.inventory)
     if args.command == "render":
         require(args.image and args.output, "render requires --image and --output")
-        storage = plan(inventory, args.mode, args.image)
+        storage = plan(inventory, args.mode, args.image,args.formation_suffix)
         output = private_directory(args.output)
         write_json(output / "plan.json", storage)
         write_json(output / "resources.json", manifests(storage))

@@ -13,14 +13,16 @@ def require(value, message):
         raise ValueError(message)
 
 
-def plan(inventory, mode, image):
+def plan(inventory, mode, image, formation_suffix="storage"):
+    require(formation_suffix in ("storage", "ingestion"), "supported formation is storage or ingestion")
+    require(formation_suffix != "ingestion" or mode == "postgres", "ingestion has its own PostgreSQL group")
     require(mode in ("postgres", "citus"), "mode must be postgres or citus")
     require(re.fullmatch(r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}", image), "supply the built Patroni image by immutable digest")
     nodes = [n["name"] for n in inventory["nodes"]]
     placement = {0: [0, 1, 2]}
     if mode == "citus":
         placement.update({1: [1, 2, 3], 2: [0, 2, 3], 3: [0, 1, 3], 4: [0, 1, 2]})
-    formation = inventory["cluster_id"] + "-storage"
+    formation = inventory["cluster_id"] + "-" + formation_suffix
     namespace = inventory["namespace"]
     groups = []
     for group, indexes in placement.items():
@@ -30,14 +32,15 @@ def plan(inventory, mode, image):
             name = workload + "-0"
             members.append({"name": name, "workload": workload, "node": nodes[i],
                             "host": f"{name}.{formation}-members.{namespace}.svc.cluster.local", "port": 5432})
-        groups.append({"id": group, "system_id": "RECORD_AFTER_BOOTSTRAP", "dsn_env": f"STORAGE_GROUP_{group}_URL", "members": members})
+        prefix = "INGESTION_GROUP" if formation_suffix == "ingestion" else "STORAGE_GROUP"
+        groups.append({"id": group, "system_id": "RECORD_AFTER_BOOTSTRAP", "dsn_env": f"{prefix}_{group}_URL", "members": members})
     per_node = {node: 0 for node in nodes}
     for group in groups:
         for member in group["members"]:
             per_node[member["node"]] += 512
     for node in nodes[:3]:
         per_node[node] += 128  # etcd
-    return {"version": 1, "formation": formation, "namespace": namespace,
+    return {**({"formation_suffix": formation_suffix} if formation_suffix != "storage" else {}), "version": 1, "formation": formation, "namespace": namespace,
             "mode": mode, "image": image, "groups": groups,
             "nodes": nodes, "pod_cidr": inventory["pod_cidr"], "cluster_id": inventory["cluster_id"],
             "requests_mib_before_routers": per_node, "router_requests_mib": 256,
