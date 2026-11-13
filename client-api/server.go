@@ -31,10 +31,17 @@ func (a *api) router() *gin.Engine {
 	})
 	r.GET("/ready", a.ready)
 	limited := r.Group("/", limitInFlight(a.cfg.MaxInFlight, a.log))
+	if a.cfg.PriorityEnabled {
+		limited = r.Group("/", limitInFlight(a.cfg.AuthMaxInFlight, a.log))
+		a.authSlots = make(chan struct{}, a.cfg.AuthMaxInFlight)
+	}
 	limited.POST("/auth/login", a.login)
 	limited.POST("/auth/refresh", a.refresh)
 	limited.POST("/auth/logout", a.logout)
 	protected := limited.Group("/", a.authenticate(), limitInFlightPerClient(a.cfg.MaxInFlightPerClient, a.log))
+	if a.cfg.PriorityEnabled {
+		protected = r.Group("/", a.authenticate(), limitInFlightPerClient(a.cfg.MaxInFlightPerClient, a.log), reserveFieldCapacity(a.cfg.MaxInFlight, a.cfg.FieldReserved, a.log))
+	}
 	protected.GET("/hazards", a.listHazards)
 	protected.GET("/hazards/:id", a.getHazard)
 	protected.GET("/notices", a.listNotices)
@@ -147,7 +154,20 @@ func (a *api) authenticate() gin.HandlerFunc {
 			return
 		}
 		var principal principal
-		status, err := a.call(c, "auth-service", http.MethodPost, joinURL(a.cfg.AuthURL, "/internal/introspect"), gin.H{"access_token": parts[1]}, true, &principal)
+		if a.authSlots != nil {
+			select {
+			case a.authSlots <- struct{}{}:
+			default:
+				rejectPriority(c, a.log, "authentication_capacity")
+				return
+			}
+		}
+		status, err := func() (int, error) {
+			if a.authSlots != nil {
+				defer func() { <-a.authSlots }()
+			}
+			return a.call(c, "auth-service", http.MethodPost, joinURL(a.cfg.AuthURL, "/internal/introspect"), gin.H{"access_token": parts[1]}, true, &principal)
+		}()
 		if err != nil || status >= 500 || status == 0 {
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "auth service unavailable")})
 			return

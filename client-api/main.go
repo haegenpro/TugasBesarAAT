@@ -3,6 +3,7 @@ package main
 import (
 	"clientapi/internal/platform"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +19,9 @@ type config struct {
 	AuthInternalKey      string
 	MaxInFlight          int
 	MaxInFlightPerClient int
+	PriorityEnabled      bool
+	FieldReserved        int
+	AuthMaxInFlight      int
 }
 
 func loadConfig() (config, error) {
@@ -41,7 +45,29 @@ func loadConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
-	return config{Port: v["CLIENT_API_PORT"], AuthURL: v["AUTH_BASE_URL"], AggregatorURL: v["AGGREGATOR_BASE_URL"], AuthInternalKey: v["AUTH_INTERNAL_KEY"], MaxInFlight: maxInFlight, MaxInFlightPerClient: perClient}, nil
+	cfg := config{Port: v["CLIENT_API_PORT"], AuthURL: v["AUTH_BASE_URL"], AggregatorURL: v["AGGREGATOR_BASE_URL"], AuthInternalKey: v["AUTH_INTERNAL_KEY"], MaxInFlight: maxInFlight, MaxInFlightPerClient: perClient}
+	if raw := os.Getenv("CLIENT_API_PRIORITY_ENABLED"); raw != "" && raw != "false" && raw != "true" {
+		return config{}, fmt.Errorf("CLIENT_API_PRIORITY_ENABLED must be true or false")
+	}
+	cfg.PriorityEnabled = os.Getenv("CLIENT_API_PRIORITY_ENABLED") == "true"
+	if cfg.PriorityEnabled {
+		settings, err := requiredEnv("CLIENT_API_FIELD_RESERVED", "CLIENT_API_AUTH_MAX_INFLIGHT")
+		if err != nil {
+			return config{}, err
+		}
+		if maxInFlight < 2 {
+			return config{}, fmt.Errorf("CLIENT_API_MAX_INFLIGHT must be >=2 with priority enabled")
+		}
+		cfg.FieldReserved, err = envInt(settings, "CLIENT_API_FIELD_RESERVED", 1, maxInFlight-1)
+		if err != nil {
+			return config{}, err
+		}
+		cfg.AuthMaxInFlight, err = envInt(settings, "CLIENT_API_AUTH_MAX_INFLIGHT", 1, 65536)
+		if err != nil {
+			return config{}, err
+		}
+	}
+	return cfg, nil
 }
 
 func main() {
