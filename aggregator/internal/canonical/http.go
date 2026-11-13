@@ -28,6 +28,7 @@ type PreparedResolver interface {
 }
 type HTTP struct {
 	Repository       Repository
+	Ownership        OwnershipRepository
 	Token            string
 	Resolver         PreparedResolver
 	MaxPreparedBytes int64
@@ -36,6 +37,11 @@ type HTTP struct {
 func (h HTTP) Register(r *gin.Engine) {
 	r.POST("/internal/canonical/batches", h.batch)
 	r.GET("/internal/canonical/entities", h.entity)
+	if h.Ownership != nil {
+		for _, action := range []string{"acquire", "renew", "release"} {
+			r.POST("/internal/ownership/"+action, func(c *gin.Context) { h.ownership(c, action) })
+		}
+	}
 }
 func (h HTTP) authorize(c *gin.Context) bool {
 	raw := c.GetHeader("Authorization")

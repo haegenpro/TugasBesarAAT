@@ -12,6 +12,8 @@ type Config struct {
 	AdminToken       string
 	CanonicalEnabled bool
 	CanonicalToken   string
+	OwnershipEnabled bool
+	OwnershipTTL     time.Duration
 
 	BMKGBaseURL  string
 	BMKGAPIKey   string
@@ -86,5 +88,9 @@ func Load() (Config, error) {
 	if enabled && (token == "" || token == v["AGGREGATOR_ADMIN_TOKEN"] || token == v["BMKG_API_KEY"] || token == v["PVMBG_TOKEN"] || token == os.Getenv("AUDIT_TOKEN")) {
 		return Config{}, errors.New("enabled canonical adapter requires a dedicated CANONICAL_SERVICE_TOKEN")
 	}
-	return Config{CanonicalEnabled: enabled, CanonicalToken: token, AdminToken: v["AGGREGATOR_ADMIN_TOKEN"], BMKGSeismicReaderSchema: v["BMKG_SEISMIC_READER_SCHEMA"], BMKGTsunamiReaderSchema: v["BMKG_TSUNAMI_READER_SCHEMA"], PVMBGReaderSchema: v["PVMBG_READER_SCHEMA"], Port: v["AGGREGATOR_PORT"], BMKGBaseURL: v["BMKG_BASE_URL"], BMKGAPIKey: v["BMKG_API_KEY"], PVMBGBaseURL: v["PVMBG_BASE_URL"], PVMBGToken: v["PVMBG_TOKEN"], PollInterval: durations["POLL_INTERVAL"], MaxBackoff: durations["SOURCE_RETRY_MAX_SEC"], BMKGFreshness: durations["BMKG_FRESHNESS_SEC"], PVMBGFreshness: durations["PVMBG_FRESHNESS_SEC"], DatabaseURL: v["DATABASE_URL"], NATSURL: v["NATS_URL"], NATSStream: v["NATS_STREAM"], NATSSubject: v["NATS_SUBJECT"], SchemaRegistryURL: v["SCHEMA_REGISTRY_URL"], LifecycleStream: v["NATS_LIFECYCLE_STREAM"], LifecycleSubject: v["NATS_LIFECYCLE_SUBJECT"]}, nil
+	ownership, err := ownershipSettings(enabled)
+	if err != nil {
+		return Config{}, err
+	}
+	return Config{OwnershipEnabled: ownership.enabled, OwnershipTTL: ownership.ttl, CanonicalEnabled: enabled, CanonicalToken: token, AdminToken: v["AGGREGATOR_ADMIN_TOKEN"], BMKGSeismicReaderSchema: v["BMKG_SEISMIC_READER_SCHEMA"], BMKGTsunamiReaderSchema: v["BMKG_TSUNAMI_READER_SCHEMA"], PVMBGReaderSchema: v["PVMBG_READER_SCHEMA"], Port: v["AGGREGATOR_PORT"], BMKGBaseURL: v["BMKG_BASE_URL"], BMKGAPIKey: v["BMKG_API_KEY"], PVMBGBaseURL: v["PVMBG_BASE_URL"], PVMBGToken: v["PVMBG_TOKEN"], PollInterval: durations["POLL_INTERVAL"], MaxBackoff: durations["SOURCE_RETRY_MAX_SEC"], BMKGFreshness: durations["BMKG_FRESHNESS_SEC"], PVMBGFreshness: durations["PVMBG_FRESHNESS_SEC"], DatabaseURL: v["DATABASE_URL"], NATSURL: v["NATS_URL"], NATSStream: v["NATS_STREAM"], NATSSubject: v["NATS_SUBJECT"], SchemaRegistryURL: v["SCHEMA_REGISTRY_URL"], LifecycleStream: v["NATS_LIFECYCLE_STREAM"], LifecycleSubject: v["NATS_LIFECYCLE_SUBJECT"]}, nil
 }

@@ -17,8 +17,7 @@ import (
 )
 
 // Fence must hold authoritative ownership protection through the transaction's
-// commit and validate authority over every target. A token preflight is insufficient. No production implementation is
-// invented here; tests inject a row-lock/epoch adapter.
+// commit and validate authority over every target. A token preflight is insufficient.
 type Fence interface {
 	Protect(context.Context, pgx.Tx, canonical.Ownership, []canonical.Mutation) error
 }
@@ -158,7 +157,7 @@ func (s *Store) ApplyBatch(ctx context.Context, b canonical.Batch) (canonical.Re
 		return canonical.Result{}, canonical.Unavailable()
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return canonical.Result{}, canonical.Unavailable()
+		return canonical.Result{}, canonical.CommitError(err)
 	}
 	if err = s.Canonical.Durability.Confirm(ctx, b.BatchID); err != nil {
 		return canonical.Result{}, canonical.Unavailable()

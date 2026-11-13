@@ -23,6 +23,15 @@ The selected storage baseline is **four separate-kernel Kubernetes nodes, Citus 
 
 ## Responsibilities
 
+Platform's first implementation handoff is now in the
+[coordination contract](Platform-Coordination-Contract.md),
+[deployment contract](Platform-Deployment-Contract.md), and
+[acceptance plan](Platform-Acceptance-Plan.md). The ownership API and transactional
+canonical fence have an isolated PostgreSQL integration runner. Source-election,
+processor/audit ownership, production replicated durability, Kubernetes and full
+failure/load acceptance remain pending. Items 5, 15 and 16 below stay open for
+joint review and the remaining boundaries; this is not absent-teammate sign-off.
+
 | Area | Responsibility |
 | --- | --- |
 | **Distributed State & Stream Processing** | Canonical storage, distributed reads, audit endpoints except `/unprocessed`, wildfire processing, and analytics dashboard. |
@@ -90,6 +99,11 @@ The checked documentation milestones below refer to the linked contracts, includ
   - **Completion evidence:** Request/response or message examples for success, duplicate, stale revision, stale token, and temporary storage failure.
 
 ### 5. Ownership and Fencing Contract
+
+Implementation candidate: [canonical authority v1](Platform-Coordination-Contract.md)
+defines scope/epoch/holder, authoritative expiry, takeover, pending-intent handling
+and transaction/commit checks. `python3 scripts/test-coordination.py` runs its
+local proof; other protected boundaries and authority-host/HA faults are pending.
 
 - [x] **Contribution documented** — [Canonical and Storage Contract, §§4 and 8](Canonical-and-Storage-Contract.md#4-selected-durability-and-failover-semantics) requires serialized stale-owner rejection and a fenced snapshot admission gate; [Wildfire Processing Contract, §7](Wildfire-Processing-Contract.md#7-durable-state-progress-and-output) separates takeover from delivery of committed intents.
 - [ ] **Agreement finalized**
@@ -208,6 +222,10 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 
 ### 15. Service and Deployment Boundaries
 
+First platform handoff: [portable four-node deployment contract](Platform-Deployment-Contract.md).
+Provisioning/manifests, complete capacity validation and executable startup remain
+implementation work.
+
 - [x] **Contribution documented** — [Canonical and Storage Contract, §5](Canonical-and-Storage-Contract.md#5-placement-on-four-kubernetes-nodes) provides canonical placement and resource requirements. [Ingestion and Messaging Contract, §4](Ingestion-and-Messaging-Contract.md#4-streams-replication-and-capacity) and [Coastal Delivery and Validation, §3](Coastal-Delivery-and-Validation.md#3-durable-critical-path) add broker isolation and recipient-storage needs.
 - [ ] **Agreement finalized**
   - **Remaining before finalization:** Platform must complete the service inventory, capacity and HA plan, ports/configuration/Secrets, probes, placement, shutdown/rollout and admission conventions, required images, and reproducible startup procedure.
@@ -218,6 +236,10 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
   - **Completion evidence:** Service inventory, configuration template, deployment conventions, and a reproducible startup procedure. Each component owner implements its own service manifests under these conventions.
 
 ### 16. Observability and Acceptance Evidence
+
+First platform handoff: [acceptance and evidence matrix](Platform-Acceptance-Plan.md).
+The local coordination runner captures its own results; Kubernetes telemetry and
+the integrated load/failure scenarios remain implementation work.
 
 - [x] **Contribution documented** — [Audit, Analytics, and Validation, §§7–8](Audit-Analytics-and-Validation.md#7-remaining-validation-gates) and [Wildfire Processing Contract, §8](Wildfire-Processing-Contract.md#8-required-evidence) list storage/audit/processing scenarios. [Validation and Replay Contract, §6](Validation-and-Replay-Contract.md#6-evidence) and [Coastal Delivery and Validation, §§5–7](Coastal-Delivery-and-Validation.md#5-delivery-evidence-and-reliability-target) add byte preservation, replay/auth, acceptance, recipient receipt, latency, and loss-reconciliation evidence.
 - [ ] **Agreement finalized**

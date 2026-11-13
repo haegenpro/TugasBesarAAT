@@ -54,6 +54,12 @@ Validated observations, replay cursors, retry schedules, notices, transitions, a
 
 ## M2 offline migrations
 
+The chain now includes additive `0004_ownership.sql`, provisioning source-scoped
+canonical authority and deferred commit checks. Earlier migration files retain
+their checksums. See the [coordination handoff](../docs/Platform-Coordination-Contract.md)
+for HTTP/configuration and the remaining durability/deployment gates. Do not
+modify applied migration files to enable ownership.
+
 Stop every Aggregator writer, replay job and publisher first. Set `MIGRATION_DATABASE_URL` to an administrator connection; runtime `DATABASE_URL` remains a restricted credential. From the repository root:
 
 ```powershell

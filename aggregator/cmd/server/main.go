@@ -17,6 +17,7 @@ import (
 	"aggregator/internal/clients"
 	"aggregator/internal/config"
 	"aggregator/internal/middleware"
+	"aggregator/internal/ownership"
 	"aggregator/internal/poller"
 	"aggregator/internal/publisher"
 	"aggregator/internal/server"
@@ -100,7 +101,17 @@ func main() {
 	a := api.New(st, status, deps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
 	router := server.New(logger, a)
 	if cfg.CanonicalEnabled {
-		canonical.HTTP{Repository: st, Token: cfg.CanonicalToken}.Register(router)
+		adapter := canonical.HTTP{Repository: st, Token: cfg.CanonicalToken}
+		if cfg.OwnershipEnabled {
+			authority, err := ownership.New(st.Pool, cfg.OwnershipTTL, canonical.Deadline)
+			if err != nil {
+				logger.Error("invalid ownership configuration", "error", err)
+				os.Exit(1)
+			}
+			st.Canonical.Fence = authority
+			adapter.Ownership = authority
+		}
+		adapter.Register(router)
 	}
 	server.RegisterSchemaAdmin(router, volcanicReaders, cfg.AdminToken)
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("aggregator", router)}

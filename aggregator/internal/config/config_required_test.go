@@ -8,6 +8,7 @@ import (
 func TestConfigurationRequiresExplicitValues(t *testing.T) {
 	t.Setenv("CANONICAL_ADAPTER_ENABLED", "false")
 	t.Setenv("CANONICAL_SERVICE_TOKEN", "")
+	t.Setenv("CANONICAL_OWNERSHIP_ENABLED", "false")
 	values := map[string]string{
 		"AGGREGATOR_ADMIN_TOKEN":     "test-aggregator-admin-token",
 		"BMKG_SEISMIC_READER_SCHEMA": "schemas/seismic.avsc",

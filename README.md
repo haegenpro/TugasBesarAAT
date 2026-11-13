@@ -6,11 +6,19 @@ an interactive downstream client, and two durable broker consumers.
 
 The M1 preparation refactor preserves these service boundaries. Auth and both
 consumers now own separate PostgreSQL instances; the two source history archives
-remain SQLite. This checkout starts from fresh volumes: no existing-data migration
-is provided. Sharding, replication, leader election/fencing, Kubernetes, additional
-M2 sources and the M2 Audit API remain future work. See the
+remain SQLite. M2 adds [offline canonical migrations](store/README.md#m2-offline-migrations)
+and a first [canonical ownership/fencing integration](docs/Platform-Coordination-Contract.md).
+Replicated deployment, source acquisition election, Kubernetes, live M2 source
+integration and the M2 Audit API still need implementation/integration. See the
 [preparation verification report](docs/Preparation%20Verification.md) for measured
 results and limitations.
+
+The Platform, Coordination & Reliability handoff is documented in the
+[coordination contract](docs/Platform-Coordination-Contract.md),
+[deployment plan](docs/Platform-Deployment-Contract.md), and
+[acceptance matrix](docs/Platform-Acceptance-Plan.md). Run its isolated local
+ownership proof with `python3 scripts/test-coordination.py`; full HA/load/VM
+acceptance is tracked separately.
 
 ## Services
 
