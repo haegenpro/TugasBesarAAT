@@ -42,6 +42,7 @@ type Poller struct {
 	cursors       map[string]int64
 	DisablePoll   bool
 	DisableReplay bool
+	DisableBMKG   bool
 	BMKG          *clients.BMKGClient
 	PVMBG         *clients.PVMBGClient
 	Store         HazardSaver
@@ -65,6 +66,9 @@ func (p *Poller) Run(ctx context.Context) {
 	}
 	var sources sync.WaitGroup
 	for _, source := range []string{"BMKG", "PVMBG"} {
+		if source == "BMKG" && p.DisableBMKG {
+			continue
+		}
 		sources.Add(1)
 		go func(source string) {
 			defer sources.Done()

@@ -19,6 +19,7 @@ import (
 	"aggregator/internal/config"
 	"aggregator/internal/middleware"
 	"aggregator/internal/ownership"
+	"aggregator/internal/pipeline"
 	"aggregator/internal/poller"
 	"aggregator/internal/publisher"
 	"aggregator/internal/server"
@@ -93,6 +94,7 @@ func main() {
 	status := poller.NewPVMBGStatus()
 
 	p := &poller.Poller{
+		DisableBMKG: platform.Bool("BMKG_RAW_ENABLED", false),
 		DisablePoll: !platform.Bool("AGGREGATOR_POLL_ENABLED", true), DisableReplay: !platform.Bool("AGGREGATOR_REPLAY_ENABLED", true),
 		BMKG:       bmkgClient,
 		PVMBG:      pvmbgClient,
@@ -168,6 +170,12 @@ func main() {
 		processorAPI.RegisterOwnership(router, "/internal/processor/ownership")
 	}
 	server.RegisterSchemaAdmin(router, volcanicReaders, cfg.AdminToken)
+	stopPipeline, err := pipeline.Start(ctx, st, registry, router, map[string]*avrowire.SourceReader{"seismic-events": seismicReader, "tsunami-warnings": tsunamiReader}, logger)
+	if err != nil {
+		logger.Error("invalid raw pipeline configuration", "error", err)
+		os.Exit(1)
+	}
+	defer stopPipeline()
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("aggregator", router)}
 	var workers sync.WaitGroup
 	launch := func(fn func()) { workers.Add(1); go func() { defer workers.Done(); fn() }() }
