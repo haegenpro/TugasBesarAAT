@@ -39,6 +39,9 @@ func filterScope(f Filters) string {
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 func (s *Store) QueryPage(ctx context.Context, f Filters, p PageRequest) (Page, error) {
+	if s.Reads.Inventory != nil {
+		return s.distributedPage(ctx, f, p)
+	}
 	out := Page{UnavailableUnits: []string{}}
 	if p.Limit < 1 || p.Limit > 1000 {
 		return out, ErrCursor

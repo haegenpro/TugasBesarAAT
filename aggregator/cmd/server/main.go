@@ -13,6 +13,7 @@ import (
 
 	"aggregator/internal/acquisition"
 	"aggregator/internal/api"
+	"aggregator/internal/audit"
 	"aggregator/internal/avrowire"
 	"aggregator/internal/canonical"
 	"aggregator/internal/clients"
@@ -176,6 +177,25 @@ func main() {
 		os.Exit(1)
 	}
 	defer stopPipeline()
+	if platform.Bool("AUDIT_ENABLED", false) {
+		token := os.Getenv("AUDIT_TOKEN")
+		if token == "" {
+			logger.Error("AUDIT_TOKEN required")
+			os.Exit(1)
+		}
+		for _, key := range []string{"CANONICAL_SERVICE_TOKEN", "PROCESSOR_SERVICE_TOKEN", "INGESTION_SERVICE_TOKEN", "HISTORY_SERVICE_TOKEN", "AGGREGATOR_ADMIN_TOKEN", "BMKG_API_KEY", "PVMBG_TOKEN"} {
+			if token == os.Getenv(key) {
+				logger.Error("dedicated audit credential required")
+				os.Exit(1)
+			}
+		}
+		if err = st.ConfigureLiveReads([]byte(os.Getenv("AUDIT_CURSOR_KEY"))); err != nil {
+			logger.Error("invalid audit read configuration", "error", err)
+			os.Exit(1)
+		}
+		audit.HTTP{Repository: st, Token: token, Signer: st.Reads.Signer, IngestionURL: os.Getenv("INGESTION_BASE_URL"), IngestionToken: os.Getenv("INGESTION_SERVICE_TOKEN"), Client: platform.Client(2 * time.Second)}.Register(router)
+		st.RegisterLegacyFailures(router, os.Getenv("INGESTION_SERVICE_TOKEN"))
+	}
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("aggregator", router)}
 	var workers sync.WaitGroup
 	launch := func(fn func()) { workers.Add(1); go func() { defer workers.Done(); fn() }() }
@@ -212,6 +232,11 @@ func monitorStore(ctx context.Context, st *store.Store, deps *api.Dependencies, 
 	pollerStarted := false
 	schemaReady := false
 	for {
+		if st.Reads.Inventory != nil {
+			readCtx, stop := context.WithTimeout(ctx, time.Second)
+			deps.SetReadReady(st.CheckReadControl(readCtx) == nil)
+			stop()
+		}
 		checkCtx, cancel := context.WithTimeout(middleware.EnsureCorrelationID(ctx), 5*time.Second)
 		err := st.Ping(checkCtx)
 		if err == nil && schemaReady {

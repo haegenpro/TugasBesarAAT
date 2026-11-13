@@ -27,6 +27,7 @@ type Store struct {
 	control                *pgxpool.Pool
 	Canonical              CanonicalOptions
 	Inputs                 InputOptions
+	Reads                  ReadOptions
 	Acquisition            Fence
 	Processor              Fence
 	idleTransactionTimeout time.Duration
@@ -285,6 +286,10 @@ func (s *Store) LastKnownVolcanic(ctx context.Context) ([]domain.HazardEvent, er
 }
 
 func (s *Store) GetByIDWithMetadata(ctx context.Context, id string) (e domain.HazardEvent, m domain.RecordMetadata, err error) {
+	if s.Reads.Inventory != nil {
+		e, m, _, err = s.GetByIDAvailability(ctx, id)
+		return
+	}
 	err = s.validatedRead(ctx, func(ctx context.Context) error { var e2 error; e, m, e2 = s.getByIDWithMetadata(ctx, id); return e2 })
 	return
 }

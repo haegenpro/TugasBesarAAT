@@ -8,7 +8,17 @@ type Dependencies struct {
 	brokerReady    atomic.Bool
 	lifecycleReady atomic.Bool
 	draining       atomic.Bool
+	readReady      atomic.Bool
+	separateReads  atomic.Bool
 }
+
+func (d *Dependencies) ReadReady() bool {
+	if d.separateReads.Load() {
+		return d.readReady.Load()
+	}
+	return d.StoreReady()
+}
+func (d *Dependencies) SetReadReady(v bool) { d.separateReads.Store(true); d.readReady.Store(v) }
 
 func (d *Dependencies) StoreReady() bool {
 	return d.storeReady.Load()

@@ -323,9 +323,18 @@ func (s *Store) RecoverAttempts(ctx context.Context) error {
 	return nil
 }
 func (s *Store) visibility(ctx context.Context) (int64, bool, error) {
+	if s.Reads.Authority != nil {
+		if err := s.Reads.Authority(ctx); err != nil {
+			return 0, false, err
+		}
+	}
 	var g int64
 	var pending bool
-	err := s.Pool.QueryRow(ctx, "SELECT generation,EXISTS(SELECT 1 FROM canonical_attempts WHERE state='pending') FROM canonical_visibility WHERE singleton").Scan(&g, &pending)
+	var primary bool
+	err := s.Pool.QueryRow(ctx, "SELECT generation,EXISTS(SELECT 1 FROM canonical_attempts WHERE state='pending'),NOT pg_is_in_recovery() FROM canonical_visibility WHERE singleton").Scan(&g, &pending, &primary)
+	if err == nil && !primary {
+		err = canonical.Unavailable()
+	}
 	return g, pending, err
 }
 func (s *Store) validatedRead(ctx context.Context, read func(context.Context) error) error {
