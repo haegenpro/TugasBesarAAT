@@ -96,6 +96,8 @@ func (s *Store) CheckSchema(ctx context.Context) error {
 		`SELECT route_key, hazard_id, source, source_ref_id, attributes, active FROM hazard_events LIMIT 0`,
 		`SELECT generation FROM canonical_visibility LIMIT 0`,
 		`SELECT attempt_id,state FROM canonical_attempts LIMIT 0`,
+		`SELECT epoch,expires_at FROM platform_audit_gate LIMIT 0`,
+		`SELECT capture_id,state FROM platform_audit_captures LIMIT 0`,
 		`SELECT volcano_id, area_name, latitude, longitude FROM volcano_reference LIMIT 0`,
 		`SELECT hazard_id, event_payload, correlation_id, queued_at FROM hazard_outbox LIMIT 0`,
 	} {
