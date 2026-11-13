@@ -228,11 +228,14 @@ class Cluster:
     def upload(self, node, path, data, mode="0600"):
         self.ssh(node, ["sudo", "-n", "install", "-D", "-m", mode, "/dev/stdin", path], input=data, timeout=180)
 
-    def install_node(self, node, binary, installer, token, first):
+    def install_node(self, node, binary, installer, token, first, join_server=None):
         print(f"Bootstrapping k3s {node['role']} {node['name']}", flush=True)
         self.wait_ssh(node)
         expected = {"cluster_id": self.cfg["cluster_id"], "inventory_sha256": fingerprint(self.cfg)}
-        config_data = (json.dumps(k3s_config(self.cfg, node, token, first), indent=2) + "\n").encode()
+        desired = k3s_config(self.cfg, node, token, first)
+        if join_server and not first:
+            desired["server"] = f"https://{join_server}:6443"
+        config_data = (json.dumps(desired, indent=2) + "\n").encode()
         marker = self.ssh(node, ["sudo", "-n", "cat", "/var/lib/aat/platform-owner.json"], check=False)
         if marker.returncode == 0:
             actual = json.loads(marker.stdout)
@@ -321,7 +324,8 @@ class Cluster:
             token_path.chmod(0o600)
         token = token_path.read_text().strip()
         self.redactions.append(token)
-        first = self.cfg["nodes"][0]
+        seed = json.loads((self.state / "owner.json").read_text()).get("bootstrap_seed", self.cfg["nodes"][0]["name"])
+        first = next(n for n in self.cfg["nodes"] if n["name"] == seed and n["role"] == "server")
         self.install_node(first, binary, installer, token, True)
         self.ready_server(first)
         self.health_identity(first)
@@ -329,8 +333,10 @@ class Cluster:
         secure_token = self.ssh(first, ["sudo", "-n", "cat", "/var/lib/rancher/k3s/server/token"]).stdout.decode().strip()
         require(secure_token.startswith("K10") and "::" in secure_token, "server did not issue a CA-pinned join token")
         self.redactions.append(secure_token)
-        for node in self.cfg["nodes"][1:]:
-            self.install_node(node, binary, installer, secure_token, False)
+        for node in self.cfg["nodes"]:
+            if node["name"] == first["name"]:
+                continue
+            self.install_node(node, binary, installer, secure_token, False, join_server=first["address"])
             if node["role"] == "server":
                 self.ready_server(node)
         raw = self.ssh(first, ["sudo", "-n", "cat", "/etc/rancher/k3s/k3s.yaml"]).stdout.decode()
