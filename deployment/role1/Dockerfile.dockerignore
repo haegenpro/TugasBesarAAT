@@ -1,0 +1,10 @@
+**
+!aggregator/
+!aggregator/**
+!store/
+!store/migrations/
+!store/migrations/**
+aggregator/.env*
+aggregator/**/.env*
+aggregator/**/evidence/**
+aggregator/**/.git/**
