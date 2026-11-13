@@ -85,7 +85,7 @@ func (l *Lab) m2Faults(ctx context.Context) {
 			if err == nil {
 				err = l.fault(ctx, r.Action, r.Service)
 			}
-			_ = writeJSON(filepath.Join(l.Dir, fmt.Sprintf("fault-response-%d.json", r.Sequence)), map[string]any{"error": errString(err), "action": r.Action, "service": r.Service})
+			_ = writeJSON(filepath.Join(l.Dir, fmt.Sprintf("fault-response-%d.json", r.Sequence)), map[string]any{"error": errString(err), "action": r.Action, "service": r.Service, "dsn": l.DSN[r.Service]})
 		}
 		select {
 		case <-ctx.Done():

@@ -123,8 +123,17 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 	}
 	// Three 1-GiB DB limits plus 128-MiB etcd members and 256 MiB VM headroom.
 	need := uint64(3456 << 20)
-	if suite != "core" && suite != "m2" {
+	if suite != "core" && suite != "m2" && suite != "m4" {
 		need = 3712 << 20
+	}
+	if suite == "m3" {
+		if !regexp.MustCompile(`^[a-z0-9./:_-]+@sha256:[a-f0-9]{64}$`).MatchString(os.Getenv("M3_NATS_IMAGE")) {
+			return nil, errors.New("blocked: M3_NATS_IMAGE requires the actual immutable NATS image digest")
+		}
+		// Limits are per-container ceilings, not simultaneous fixture working
+		// sets. Keep the staged core minimum and record measured usage/OOMs;
+		// do not require or perform a shared-engine capacity adjustment.
+		need = 3456 << 20
 	}
 	if info.MemTotal < need {
 		return nil, fmt.Errorf("blocked: Docker exposes %d MiB; %s needs at least %d MiB; settings were not changed", info.MemTotal>>20, suite, need>>20)
@@ -147,7 +156,10 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
-	for _, s := range []string{"core", "ha"} {
+	for _, s := range []string{"core", "ha", "m3", "m4"} {
+		if suite == "all" && (s == "m3" || s == "m4") {
+			continue
+		}
 		if suite != "all" && suite != s && !(suite == "m2" && s == "core") {
 			continue
 		}
@@ -200,6 +212,14 @@ func (l *Lab) composeConfig() map[string]any {
 		l.Services = append(l.Services, name)
 		services[name] = map[string]any{"image": l.Image, "labels": labels, "mem_limit": "1g", "mem_reservation": "512m", "stop_grace_period": "5s", "healthcheck": map[string]any{"disable": true}, "ports": []string{"127.0.0.1::5432"}, "volumes": []string{name + ":/var/lib/postgresql/data"}, "environment": map[string]string{"M1_NAME": name, "M1_SCOPE": l.Project, "M1_SUITE": l.Suite, "M1_GROUP": fmt.Sprint(group), "M1_ETCD": strings.Join(hosts, ","), "M1_PASSWORD": l.Password}}
 	}
+	if l.Suite == "m3" {
+		for i := 1; i <= 3; i++ {
+			name := fmt.Sprintf("broker%d", i)
+			l.Services = append(l.Services, name)
+			volumes[name] = map[string]any{"labels": labels}
+			services[name] = map[string]any{"image": os.Getenv("M3_NATS_IMAGE"), "labels": labels, "mem_limit": "1g", "mem_reservation": "512m", "ports": []string{"127.0.0.1::4222", "127.0.0.1::8222"}, "volumes": []string{name + ":/data", filepath.Join(l.Dir, name+".conf") + ":/etc/nats/nats.conf:ro"}, "entrypoint": []string{"nats-server"}, "command": []string{"--config", "/etc/nats/nats.conf"}}
+		}
+	}
 	return map[string]any{"services": services, "volumes": volumes, "networks": map[string]any{"default": map[string]any{"labels": labels}}}
 }
 func (l *Lab) compose(ctx context.Context, args ...string) ([]byte, error) {
@@ -212,6 +232,15 @@ func (l *Lab) start(ctx context.Context) error {
 	ctx = startup
 	if err := os.MkdirAll(l.Dir, 0700); err != nil {
 		return err
+	}
+	if l.Suite == "m3" {
+		for i := 1; i <= 3; i++ {
+			name := fmt.Sprintf("broker%d", i)
+			config := fmt.Sprintf("server_name: %s\nport: 4222\nhttp_port: 8222\nauthorization {user: raw,password: %s}\njetstream {store_dir: /data,max_memory_store: 64MB,max_file_store: 8GB,sync_interval: always}\ncluster {name: %s,listen: 0.0.0.0:6222,routes: [nats://broker1:6222,nats://broker2:6222,nats://broker3:6222]}\n", name, l.Password, l.Project)
+			if err := os.WriteFile(filepath.Join(l.Dir, name+".conf"), []byte(config), 0600); err != nil {
+				return err
+			}
+		}
 	}
 	if err := writeJSON(filepath.Join(l.Dir, "compose.json"), l.composeConfig()); err != nil {
 		return err
@@ -397,6 +426,28 @@ func (l *Lab) fault(ctx context.Context, action, service string) error {
 		}
 		u := url.URL{Scheme: "postgres", User: url.UserPassword("postgres", l.Password), Host: host, Path: "/m1", RawQuery: "sslmode=disable&connect_timeout=2"}
 		l.DSN[service] = u.String()
+		if l.Suite == "m3" || l.Suite == "m4" {
+			// A restarted single-copy Patroni member can accept connections while
+			// still read-only. Do not release the next component test before its
+			// own storage owner is writable again.
+			ready, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			return until(ready, func() error {
+				c, e := l.connect(ready, service)
+				if e != nil {
+					return e
+				}
+				defer c.Close(context.Background())
+				var writable bool
+				if e = c.QueryRow(ready, "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only')='off'").Scan(&writable); e != nil {
+					return e
+				}
+				if !writable {
+					return errors.New("waiting for restarted storage owner")
+				}
+				return nil
+			})
+		}
 	}
 	return err
 }
@@ -521,6 +572,8 @@ func runLab(ctx context.Context, root, suite string) error {
 			report.Results = append(report.Results, Result{Name: s + "_startup", Status: "blocked", Error: errString(err)})
 		} else if s == "m2" {
 			lab.result(ctx, "m2_write_core", lab.m2)
+		} else if s == "m3" || s == "m4" {
+			lab.result(ctx, s+"_component_integration", lab.m34)
 		} else if s == "core" {
 			lab.runCore(ctx)
 		} else {
@@ -550,7 +603,7 @@ func downRun(ctx context.Context, root, id string) error {
 	if !runPattern.MatchString(id) {
 		return errors.New("down requires the exact --run ID printed by run")
 	}
-	for _, suite := range []string{"core", "ha", "m2"} {
+	for _, suite := range []string{"core", "ha", "m2", "m3", "m4"} {
 		l := newLab(root, id, suite, "", "", nil)
 		data, err := os.ReadFile(filepath.Join(l.Dir, "compose.json"))
 		if os.IsNotExist(err) {
