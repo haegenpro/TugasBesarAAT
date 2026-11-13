@@ -105,6 +105,8 @@ def render(inventory,catalog,images):
                     current["containers"][0]["volumeMounts"].append({"name":"data","mountPath":storage["path"]})
                     volumes.append({"node":node,"path":path,"uid":uid,"claim":pv})
             template={"metadata":{"labels":member_labels},"spec":current}
+            if s.get("metrics_port"):
+                template["metadata"]["annotations"]={"prometheus.io/scrape":"true","prometheus.io/port":str(s["metrics_port"]),"prometheus.io/path":"/metrics"}
             if s["kind"]=="Job":
                 current["restartPolicy"]="Never"
                 add("batch/v1","Job",member,spec={"backoffLimit":6,"activeDeadlineSeconds":180,"template":template})

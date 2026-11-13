@@ -60,8 +60,8 @@ def render(inventory,extra_flows=()):
     for name in("wildfire-processor","ingestion","coastal-processor"):
         policy(name,app(name),ingress=[incoming(["prometheus","alloy"],[8080])],egress=[outgoing(["aggregator","schema-registry","sensor-pantai"],[8080]),outgoing(["broker"],[4222]),outgoing(["tempo"],[4318])])
     policy("load-generator",app("load-generator"),egress=[outgoing(["client-api","aggregator"],[8080])])
-    metric_ports=[8080,8081,8082,8083,8091,8092,8008,8222,9187,2381,9090,12345,3100,3200,3000,4317,4318,9100]
-    for name in monitor_names+["nats-exporter","node-exporter"]:
+    metric_ports=[8080,8081,8082,8083,8091,8092,8008,8222,9187,2381,9090,12345,3100,3200,3000,4317,4318,9100,9101,7777]
+    for name in monitor_names+["nats-exporter","node-exporter","platform-metrics"]:
         policy(name,app(name),ingress=[{"from":[{"podSelector":{}}],"ports":ports(metric_ports)}],
             egress=[{"to":[{"podSelector":{}}],"ports":ports(metric_ports)},
                     {"to":[{"ipBlock":{"cidr":inventory["service_cidr"]}}],"ports":ports([443])},

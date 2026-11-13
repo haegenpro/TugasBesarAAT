@@ -111,7 +111,7 @@ def manifests(storage):
                              "--client-cert-auth=true", "--peer-client-cert-auth=true", "--trusted-ca-file=/tls/ca.crt",
                              "--cert-file=/tls/tls.crt", "--key-file=/tls/tls.key", "--peer-trusted-ca-file=/tls/ca.crt",
                              "--peer-cert-file=/tls/tls.crt", "--peer-key-file=/tls/tls.key", "--quota-backend-bytes=134217728",
-                             "--auto-compaction-retention=1"],
+                             "--auto-compaction-retention=1", "--listen-metrics-urls=http://0.0.0.0:2381"],
                     "ports": [{"containerPort": 2379}, {"containerPort": 2380}], "resources": resources("other"),
                     "readinessProbe": {"exec": {"command": ["/usr/local/bin/etcdctl", "--endpoints=https://127.0.0.1:2379",
                         "--cacert=/tls/ca.crt", "--cert=/tls/tls.crt", "--key=/tls/tls.key", "endpoint", "health"]}, "periodSeconds": 5},

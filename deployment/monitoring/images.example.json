@@ -1,0 +1,10 @@
+{
+  "prometheus": null,
+  "loki": null,
+  "tempo": null,
+  "grafana": null,
+  "alloy": null,
+  "nats-exporter": null,
+  "node-exporter": null,
+  "platform-metrics": null
+}

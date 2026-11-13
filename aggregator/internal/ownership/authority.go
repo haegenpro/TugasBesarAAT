@@ -5,6 +5,7 @@ package ownership
 
 import (
 	"aggregator/internal/canonical"
+	"aggregator/internal/platform"
 	"context"
 	"errors"
 	"fmt"
@@ -67,7 +68,10 @@ func valid(v string) bool {
 }
 
 func validOwner(o canonical.Ownership) bool { return valid(o.Scope) && valid(o.Holder) && o.Epoch > 0 }
-func stale() error                          { return canonical.Fail(403, "stale_owner", "current live ownership required") }
+func stale() error {
+	platform.Add("stale_owner_rejections_total", 1)
+	return canonical.Fail(403, "stale_owner", "current live ownership required")
+}
 
 type record struct {
 	source  string

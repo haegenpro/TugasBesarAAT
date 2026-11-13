@@ -36,6 +36,7 @@ def render(inventory, config, image, replicas=3):
         "AGGREGATOR_POLL_ENABLED": "true", "AGGREGATOR_REPLAY_ENABLED": "true", "AGGREGATOR_PUBLISH_ENABLED": "true",
         "DB_IDLE_TRANSACTION_TIMEOUT": "15s", "DB_ADMISSION_IDLE_TIMEOUT": "30s",
         "SHUTDOWN_TIMEOUT": "30s", "DB_MAX_OPEN_CONNS": "16", "DB_STATEMENT_TIMEOUT": "5s", "DB_LOCK_TIMEOUT": "2s",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",
         "BMKG_SEISMIC_READER_SCHEMA": "/schemas/seismic.avsc", "BMKG_TSUNAMI_READER_SCHEMA": "/schemas/tsunami.avsc",
         "PVMBG_READER_SCHEMA": "/schemas/volcanic-v1.avsc",
     })
@@ -59,7 +60,7 @@ def render(inventory, config, image, replicas=3):
     deployment = resource("apps/v1", "Deployment", name, spec={
         "replicas": replicas, "minReadySeconds": 5, "progressDeadlineSeconds": 300,
         "strategy": {"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1}},
-        "selector": {"matchLabels": selector}, "template": {"metadata": {"labels": labels}, "spec": {
+        "selector": {"matchLabels": selector}, "template": {"metadata": {"labels": labels, "annotations": {"prometheus.io/scrape": "true", "prometheus.io/port": "8080", "prometheus.io/path": "/metrics"}}, "spec": {
             "automountServiceAccountToken": False, "terminationGracePeriodSeconds": 45,
             "securityContext": {"runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001,
                                 "seccompProfile": {"type": "RuntimeDefault"}},

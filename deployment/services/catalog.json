@@ -1,16 +1,320 @@
 {
   "version": 1,
-  "external": ["registry-db", "auth-db", "dashboard-db", "notifier-db"],
+  "external": [
+    "registry-db",
+    "auth-db",
+    "dashboard-db",
+    "notifier-db"
+  ],
   "services": [
-    {"name":"broker","role":"broker","kind":"StatefulSet","replicas":3,"image_key":"broker","secret":"broker-runtime","ports":{"client":4222,"monitor":8222,"route":6222},"environment":{"NATS_PORT":"4222","NATS_MONITOR_PORT":"8222"},"command":["nats-server","--config","/etc/nats/nats.conf"],"config_mounts":[{"name":"broker-config","path":"/etc/nats"}],"storage":{"path":"/data","size":"2Gi","uid":10001},"ready":{"path":"/healthz?js-enabled-only=true","port":8222},"live":{"path":"/healthz","port":8222},"dependencies":[]},
-    {"name":"broker-init","role":"other","kind":"Job","replicas":1,"image_key":"broker","secret":"broker-runtime","ports":{},"environment":{"NATS_PORT":"4222","NATS_MONITOR_PORT":"8222","NATS_URL":"nats://broker:4222","NATS_REPLICAS":"3"},"command":["/usr/local/bin/broker-init"],"dependencies":["broker"]},
-    {"name":"schema-registry","role":"other","kind":"Deployment","replicas":1,"image_key":"schema-registry","secret":"registry-runtime","ports":{"http":8080,"management":9000},"environment":{"QUARKUS_HTTP_PORT":"8080","QUARKUS_MANAGEMENT_PORT":"9000","APICURIO_DATASOURCE_URL":"jdbc:postgresql://registry-db:5432/registry"},"ready":{"path":"/health/ready","port":9000},"live":{"path":"/health/live","port":9000},"read_only_root":false,"dependencies":["registry-db"]},
-    {"name":"bmkg-mock","role":"mock","kind":"StatefulSet","replicas":1,"image_key":"bmkg-mock","secret":"bmkg-runtime","ports":{"http":8081},"environment":{"BMKG_PORT":"8081","SCHEMA_REGISTRY_URL":"http://schema-registry:8080/apis/ccompat/v7","SOURCE_ARCHIVE_PATH":"/data/archive.json"},"storage":{"path":"/data","size":"1Gi","uid":10001},"ready":{"path":"/health","port":8081},"live":{"path":"/health","port":8081},"dependencies":["schema-registry"]},
-    {"name":"pvmbg-mock","role":"mock","kind":"StatefulSet","replicas":1,"image_key":"pvmbg-mock","secret":"pvmbg-runtime","ports":{"http":8082},"environment":{"PVMBG_PORT":"8082","SCHEMA_REGISTRY_URL":"http://schema-registry:8080/apis/ccompat/v7","SOURCE_ARCHIVE_PATH":"/data/archive.json"},"storage":{"path":"/data","size":"1Gi","uid":10001},"ready":{"path":"/health","port":8082},"live":{"path":"/health","port":8082},"dependencies":["schema-registry"]},
-    {"name":"auth-service","role":"api","kind":"Deployment","replicas":3,"image_key":"auth-service","secret":"auth-runtime","ports":{"http":8083},"environment":{"AUTH_PORT":"8083"},"ready":{"path":"/ready","port":8083},"live":{"path":"/health","port":8083},"dependencies":["auth-db"]},
-    {"name":"client-api","role":"api","kind":"Deployment","replicas":3,"image_key":"client-api","secret":"client-api-runtime","ports":{"http":8080},"environment":{"CLIENT_API_PORT":"8080","AUTH_BASE_URL":"http://auth-service:8083","AGGREGATOR_BASE_URL":"http://aggregator:8080"},"ready":{"path":"/ready","port":8080},"live":{"path":"/health","port":8080},"dependencies":["auth-service","aggregator"]},
-    {"name":"consumer-dashboard","role":"consumer","kind":"Deployment","replicas":3,"image_key":"consumer-dashboard","secret":"dashboard-runtime","ports":{"http":8091},"environment":{"DASHBOARD_PORT":"8091","NATS_URL":"nats://broker:4222","SCHEMA_REGISTRY_URL":"http://schema-registry:8080/apis/ccompat/v7"},"ready":{"path":"/ready","port":8091},"live":{"path":"/health","port":8091},"dependencies":["dashboard-db","broker-init","schema-registry"]},
-    {"name":"consumer-notifier","role":"consumer","kind":"Deployment","replicas":3,"image_key":"consumer-notifier","secret":"notifier-runtime","ports":{"http":8092},"environment":{"NOTIFIER_PORT":"8092","NATS_URL":"nats://broker:4222","SCHEMA_REGISTRY_URL":"http://schema-registry:8080/apis/ccompat/v7"},"ready":{"path":"/ready","port":8092},"live":{"path":"/health","port":8092},"dependencies":["notifier-db","broker-init","schema-registry"]},
-    {"name":"sensor-pantai","role":"sensor","kind":"StatefulSet","replicas":1,"image":"sustuna/sensor-pantai@sha256:51fbd90d3891ad6e9f5768ad330ffb65205644cb29e50da65c7538f2e0b4397d","secret":"pantai-runtime","ports":{"http":8080},"environment":{"PANTAI_PROFILE":"practice","PANTAI_SEED":"42","PANTAI_SPEED":"60"},"storage":{"path":"/data","size":"1Gi","uid":10001},"ready":{"path":"/healthz","port":8080},"live":{"path":"/healthz","port":8080},"dependencies":[]}
+    {
+      "name": "broker",
+      "role": "broker",
+      "kind": "StatefulSet",
+      "replicas": 3,
+      "image_key": "broker",
+      "secret": "broker-runtime",
+      "ports": {
+        "client": 4222,
+        "monitor": 8222,
+        "route": 6222
+      },
+      "environment": {
+        "NATS_PORT": "4222",
+        "NATS_MONITOR_PORT": "8222"
+      },
+      "command": [
+        "nats-server",
+        "--config",
+        "/etc/nats/nats.conf"
+      ],
+      "config_mounts": [
+        {
+          "name": "broker-config",
+          "path": "/etc/nats"
+        }
+      ],
+      "storage": {
+        "path": "/data",
+        "size": "2Gi",
+        "uid": 10001
+      },
+      "ready": {
+        "path": "/healthz?js-enabled-only=true",
+        "port": 8222
+      },
+      "live": {
+        "path": "/healthz",
+        "port": 8222
+      },
+      "dependencies": []
+    },
+    {
+      "name": "broker-init",
+      "role": "other",
+      "kind": "Job",
+      "replicas": 1,
+      "image_key": "broker",
+      "secret": "broker-runtime",
+      "ports": {},
+      "environment": {
+        "NATS_PORT": "4222",
+        "NATS_MONITOR_PORT": "8222",
+        "NATS_URL": "nats://broker:4222",
+        "NATS_REPLICAS": "3"
+      },
+      "command": [
+        "/usr/local/bin/broker-init"
+      ],
+      "dependencies": [
+        "broker"
+      ]
+    },
+    {
+      "name": "schema-registry",
+      "role": "other",
+      "kind": "Deployment",
+      "replicas": 1,
+      "image_key": "schema-registry",
+      "secret": "registry-runtime",
+      "ports": {
+        "http": 8080,
+        "management": 9000
+      },
+      "environment": {
+        "QUARKUS_HTTP_PORT": "8080",
+        "QUARKUS_MANAGEMENT_PORT": "9000",
+        "APICURIO_DATASOURCE_URL": "jdbc:postgresql://registry-db:5432/registry"
+      },
+      "ready": {
+        "path": "/health/ready",
+        "port": 9000
+      },
+      "live": {
+        "path": "/health/live",
+        "port": 9000
+      },
+      "read_only_root": false,
+      "dependencies": [
+        "registry-db"
+      ]
+    },
+    {
+      "name": "bmkg-mock",
+      "role": "mock",
+      "kind": "StatefulSet",
+      "replicas": 1,
+      "image_key": "bmkg-mock",
+      "secret": "bmkg-runtime",
+      "ports": {
+        "http": 8081
+      },
+      "environment": {
+        "BMKG_PORT": "8081",
+        "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
+        "SOURCE_ARCHIVE_PATH": "/data/archive.json",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
+      },
+      "storage": {
+        "path": "/data",
+        "size": "1Gi",
+        "uid": 10001
+      },
+      "ready": {
+        "path": "/health",
+        "port": 8081
+      },
+      "live": {
+        "path": "/health",
+        "port": 8081
+      },
+      "dependencies": [
+        "schema-registry"
+      ],
+      "metrics_port": 8081
+    },
+    {
+      "name": "pvmbg-mock",
+      "role": "mock",
+      "kind": "StatefulSet",
+      "replicas": 1,
+      "image_key": "pvmbg-mock",
+      "secret": "pvmbg-runtime",
+      "ports": {
+        "http": 8082
+      },
+      "environment": {
+        "PVMBG_PORT": "8082",
+        "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
+        "SOURCE_ARCHIVE_PATH": "/data/archive.json",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
+      },
+      "storage": {
+        "path": "/data",
+        "size": "1Gi",
+        "uid": 10001
+      },
+      "ready": {
+        "path": "/health",
+        "port": 8082
+      },
+      "live": {
+        "path": "/health",
+        "port": 8082
+      },
+      "dependencies": [
+        "schema-registry"
+      ],
+      "metrics_port": 8082
+    },
+    {
+      "name": "auth-service",
+      "role": "api",
+      "kind": "Deployment",
+      "replicas": 3,
+      "image_key": "auth-service",
+      "secret": "auth-runtime",
+      "ports": {
+        "http": 8083
+      },
+      "environment": {
+        "AUTH_PORT": "8083",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
+      },
+      "ready": {
+        "path": "/ready",
+        "port": 8083
+      },
+      "live": {
+        "path": "/health",
+        "port": 8083
+      },
+      "dependencies": [
+        "auth-db"
+      ],
+      "metrics_port": 8083
+    },
+    {
+      "name": "client-api",
+      "role": "api",
+      "kind": "Deployment",
+      "replicas": 3,
+      "image_key": "client-api",
+      "secret": "client-api-runtime",
+      "ports": {
+        "http": 8080
+      },
+      "environment": {
+        "CLIENT_API_PORT": "8080",
+        "AUTH_BASE_URL": "http://auth-service:8083",
+        "AGGREGATOR_BASE_URL": "http://aggregator:8080",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
+      },
+      "ready": {
+        "path": "/ready",
+        "port": 8080
+      },
+      "live": {
+        "path": "/health",
+        "port": 8080
+      },
+      "dependencies": [
+        "auth-service",
+        "aggregator"
+      ],
+      "metrics_port": 8080
+    },
+    {
+      "name": "consumer-dashboard",
+      "role": "consumer",
+      "kind": "Deployment",
+      "replicas": 3,
+      "image_key": "consumer-dashboard",
+      "secret": "dashboard-runtime",
+      "ports": {
+        "http": 8091
+      },
+      "environment": {
+        "DASHBOARD_PORT": "8091",
+        "NATS_URL": "nats://broker:4222",
+        "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
+      },
+      "ready": {
+        "path": "/ready",
+        "port": 8091
+      },
+      "live": {
+        "path": "/health",
+        "port": 8091
+      },
+      "dependencies": [
+        "dashboard-db",
+        "broker-init",
+        "schema-registry"
+      ],
+      "metrics_port": 8091
+    },
+    {
+      "name": "consumer-notifier",
+      "role": "consumer",
+      "kind": "Deployment",
+      "replicas": 3,
+      "image_key": "consumer-notifier",
+      "secret": "notifier-runtime",
+      "ports": {
+        "http": 8092
+      },
+      "environment": {
+        "NOTIFIER_PORT": "8092",
+        "NATS_URL": "nats://broker:4222",
+        "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
+      },
+      "ready": {
+        "path": "/ready",
+        "port": 8092
+      },
+      "live": {
+        "path": "/health",
+        "port": 8092
+      },
+      "dependencies": [
+        "notifier-db",
+        "broker-init",
+        "schema-registry"
+      ],
+      "metrics_port": 8092
+    },
+    {
+      "name": "sensor-pantai",
+      "role": "sensor",
+      "kind": "StatefulSet",
+      "replicas": 1,
+      "image": "sustuna/sensor-pantai@sha256:51fbd90d3891ad6e9f5768ad330ffb65205644cb29e50da65c7538f2e0b4397d",
+      "secret": "pantai-runtime",
+      "ports": {
+        "http": 8080
+      },
+      "environment": {
+        "PANTAI_PROFILE": "practice",
+        "PANTAI_SEED": "42",
+        "PANTAI_SPEED": "60"
+      },
+      "storage": {
+        "path": "/data",
+        "size": "1Gi",
+        "uid": 10001
+      },
+      "ready": {
+        "path": "/healthz",
+        "port": 8080
+      },
+      "live": {
+        "path": "/healthz",
+        "port": 8080
+      },
+      "dependencies": []
+    }
   ]
 }

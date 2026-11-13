@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"aggregator/internal/canonical"
+	"aggregator/internal/platform"
 	"github.com/google/uuid"
 )
 
@@ -180,6 +181,10 @@ func (c *Coordinator) lead(ctx context.Context, source string, acquired canonica
 	}
 	leaseCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(ErrNotOwner)
+	metric := "acquisition_" + strings.ToLower(source)
+	platform.Add(metric+"_acquired_total", 1)
+	platform.Gauge(metric+"_active", 1)
+	defer platform.Gauge(metric+"_active", 0)
 	g := &guard{ctx: leaseCtx, cancel: cancel, owner: owner, until: until,
 		repository: c.repository, ready: c.Ready, budget: c.budget}
 	workCtx := context.WithValue(leaseCtx, guardKey{}, g)
@@ -207,6 +212,7 @@ running:
 			}
 			lease, until, err = c.renew(leaseCtx, owner)
 			if err != nil {
+				platform.Add(metric+"_renew_failures_total", 1)
 				break running
 			}
 			g.mu.Lock()
