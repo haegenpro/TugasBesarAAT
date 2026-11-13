@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "notice": "Synthetic protocol vectors; not live feed or evaluator evidence.",
+  "satellite_append": {
+    "contract_version": 1,
+    "ownership": {
+      "scope": "processor:SATELIT",
+      "epoch": 2,
+      "holder": "current-history-owner"
+    },
+    "messages": [
+      {
+        "envelope_version": 1,
+        "source": "SATELIT",
+        "message_id": "raw-v1:2581b6bdbe5865bc59fd45ac9da86bfc3bdc051fb98818892005191a72af123a",
+        "source_namespace": "synthetic-satellite-integration-v1",
+        "source_ref_id": null,
+        "operation": "heartbeat",
+        "source_position": 7,
+        "source_cursor": null,
+        "event_time": null,
+        "received_at": "2026-11-13T00:00:01Z",
+        "payload": "eyJ2aXJ0dWFsX25vdyI6IjIwMjYtMTEtMTNUMDA6MDA6MDBaIn0=",
+        "payload_ref": null,
+        "payload_size": 38,
+        "payload_sha256": "5b4aecf7ef7916c475ac3b35e87ea5f4d00fdaf4ccb51ea105a796241a54ab45",
+        "content_type": "application/json",
+        "source_schema_id": null,
+        "virtual_now": "2026-11-13T00:00:00Z",
+        "correlation_id": "synthetic-handoff-trace",
+        "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
+        "ownership_scope": "acquisition:SATELIT",
+        "ownership_epoch": 1,
+        "ownership_holder": "previous-producer"
+      }
+    ]
+  },
+  "receipt": {
+    "namespace": "synthetic-satellite-integration-v1",
+    "durable_through": 7,
+    "items": [
+      {
+        "message_id": "raw-v1:2581b6bdbe5865bc59fd45ac9da86bfc3bdc051fb98818892005191a72af123a",
+        "outcome": "stored"
+      }
+    ]
+  },
+  "unicode_checksum": {
+    "source_ref_ids": [
+      "é",
+      "a",
+      "a|b",
+      "火",
+      "a"
+    ],
+    "count": 5,
+    "serialized_utf8": "a\na\na|b\né\n火",
+    "sha256": "c1681e12b33704e7cc6147bdc484944c0eeb45da8ec1ee38a2c58d6f9176d8dc"
+  }
+}

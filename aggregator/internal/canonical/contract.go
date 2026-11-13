@@ -233,6 +233,12 @@ func Decode(r io.Reader, v any) error {
 	return d.Decode(v)
 }
 func uniqueValue(d *json.Decoder) error {
+	return uniqueAt(d, 0)
+}
+func uniqueAt(d *json.Decoder, depth int) error {
+	if depth > 64 {
+		return fmt.Errorf("JSON depth exceeds 64")
+	}
 	t, err := d.Token()
 	if err != nil {
 		return err
@@ -254,13 +260,13 @@ func uniqueValue(d *json.Decoder) error {
 				return fmt.Errorf("duplicate JSON key")
 			}
 			seen[k] = true
-			if e = uniqueValue(d); e != nil {
+			if e = uniqueAt(d, depth+1); e != nil {
 				return e
 			}
 		}
 	case '[':
 		for d.More() {
-			if e := uniqueValue(d); e != nil {
+			if e := uniqueAt(d, depth+1); e != nil {
 				return e
 			}
 		}

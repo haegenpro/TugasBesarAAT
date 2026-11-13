@@ -24,6 +24,8 @@ import (
 
 const MediaType = "application/avro"
 
+var ErrRegistryUnavailable = errors.New("schema registry unavailable")
+
 type Schema struct {
 	ID    int
 	Text  string
@@ -39,7 +41,17 @@ type Client struct {
 	mu        sync.RWMutex
 	byID      map[int]*Schema
 	bySubject map[string]*Schema
+	cache     SchemaCache
 }
+
+// SchemaCache belongs to the calling service's durable store. Writer IDs are
+// bound to schema text; a restart may use a verified known ID during outage.
+type SchemaCache interface {
+	Get(context.Context, int) (string, error)
+	Put(context.Context, int, string) error
+}
+
+func (c *Client) SetCache(cache SchemaCache) { c.cache = cache }
 
 type correlationIDKey struct{}
 
@@ -102,13 +114,13 @@ func (c *Client) request(ctx context.Context, method, path string, body any, out
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", ErrRegistryUnavailable, err)
 	}
 	defer resp.Body.Close()
 	status = resp.StatusCode
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("schema registry %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(message)))
+		return fmt.Errorf("%w: schema registry %s: status %d: %s", ErrRegistryUnavailable, path, resp.StatusCode, strings.TrimSpace(string(message)))
 	}
 	if output != nil {
 		return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(output)
@@ -135,6 +147,18 @@ func (c *Client) Register(ctx context.Context, subject, schemaText string) (*Sch
 		return nil, err
 	}
 	part := url.PathEscape(subject)
+	if finder, ok := c.cache.(interface {
+		Find(context.Context, string) (int, error)
+	}); ok {
+		if id, err := finder.Find(ctx, schemaText); err == nil && id > 0 {
+			schema := &Schema{ID: id, Text: schemaText, Codec: codec, plan: plan}
+			c.mu.Lock()
+			c.bySubject[key] = schema
+			c.byID[id] = schema
+			c.mu.Unlock()
+			return schema, nil
+		}
+	}
 	if err := c.request(ctx, http.MethodPut, "/config/"+part, map[string]string{"compatibility": "FULL_TRANSITIVE"}, nil); err != nil {
 		return nil, err
 	}
@@ -148,6 +172,11 @@ func (c *Client) Register(ctx context.Context, subject, schemaText string) (*Sch
 		return nil, errors.New("schema registry returned invalid ID")
 	}
 	schema := &Schema{ID: result.ID, Text: schemaText, Codec: codec, plan: plan}
+	if c.cache != nil {
+		if err := c.cache.Put(ctx, schema.ID, schema.Text); err != nil {
+			return nil, err
+		}
+	}
 	c.mu.Lock()
 	c.bySubject[key] = schema
 	c.byID[result.ID] = schema
@@ -165,8 +194,16 @@ func (c *Client) Lookup(ctx context.Context, id int) (*Schema, error) {
 	var result struct {
 		Schema string `json:"schema"`
 	}
-	if err := c.request(ctx, http.MethodGet, "/schemas/ids/"+strconv.Itoa(id), nil, &result); err != nil {
-		return nil, err
+	if id <= 0 {
+		return nil, errors.New("invalid schema ID")
+	}
+	if c.cache != nil {
+		result.Schema, _ = c.cache.Get(ctx, id)
+	}
+	if result.Schema == "" {
+		if err := c.request(ctx, http.MethodGet, "/schemas/ids/"+strconv.Itoa(id), nil, &result); err != nil {
+			return nil, err
+		}
 	}
 	codec, err := goavro.NewCodec(result.Schema)
 	if err != nil {
@@ -177,6 +214,11 @@ func (c *Client) Lookup(ctx context.Context, id int) (*Schema, error) {
 		return nil, err
 	}
 	schema := &Schema{ID: id, Text: result.Schema, Codec: codec, plan: plan}
+	if c.cache != nil {
+		if err := c.cache.Put(ctx, id, result.Schema); err != nil {
+			return nil, err
+		}
+	}
 	c.mu.Lock()
 	c.byID[id] = schema
 	c.mu.Unlock()
