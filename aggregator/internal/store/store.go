@@ -26,6 +26,7 @@ type Store struct {
 	logger                 *slog.Logger
 	control                *pgxpool.Pool
 	Canonical              CanonicalOptions
+	Inputs                 InputOptions
 	Acquisition            Fence
 	Processor              Fence
 	idleTransactionTimeout time.Duration
@@ -103,6 +104,13 @@ func (s *Store) CheckSchema(ctx context.Context) error {
 	} {
 		if _, err := s.Pool.Exec(ctx, query); err != nil {
 			return err
+		}
+	}
+	if len(s.Inputs.Starts) > 0 {
+		for _, query := range []string{`SELECT received_through,prepared_through,applied_through FROM input_sessions LIMIT 0`, `SELECT route_key,envelope,original_payload,state FROM input_history LIMIT 0`, `SELECT batch_id,batch,result FROM input_outputs LIMIT 0`, `SELECT history_sequence,payload,observed_at FROM input_bmkg_observations LIMIT 0`, `SELECT snapshot_started,validated_position FROM input_bmkg_checks LIMIT 0`, `SELECT namespace,state FROM input_cutovers LIMIT 0`, `SELECT schema_id,schema_text,sha256 FROM input_schema_cache LIMIT 0`} {
+			if _, err := s.Pool.Exec(ctx, query); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

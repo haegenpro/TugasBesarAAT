@@ -5,6 +5,7 @@ import (
 	"aggregator/internal/domain"
 	"context"
 	"github.com/jackc/pgx/v5"
+	"strings"
 )
 
 // ProtectProcessorState must be called before any prepared-state, lineage,
@@ -18,5 +19,9 @@ func (s *Store) ProtectProcessorState(ctx context.Context, tx pgx.Tx, owner cano
 	if err := s.Canonical.Durability.Prepare(ctx, tx); err != nil {
 		return err
 	}
-	return s.Processor.Protect(ctx, tx, owner, []canonical.Mutation{{Source: domain.SourceSatelit}})
+	source := domain.Source(strings.TrimPrefix(owner.Scope, "processor:"))
+	if source != domain.SourceSatelit && source != domain.SourceBMKG {
+		return canonical.Unavailable()
+	}
+	return s.Processor.Protect(ctx, tx, owner, []canonical.Mutation{{Source: source}})
 }

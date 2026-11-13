@@ -55,7 +55,7 @@ func NewAcquisition(pool *pgxpool.Pool, ttl, budget time.Duration) (*Authority, 
 
 func (a *Authority) accepts(scope string) bool {
 	if a.prefix == "processor:" {
-		return scope == "processor:SATELIT"
+		return scope == "processor:SATELIT" || scope == "processor:BMKG"
 	}
 	if a.prefix == "acquisition:" {
 		return scope == "acquisition:BMKG" || scope == "acquisition:PVMBG"
