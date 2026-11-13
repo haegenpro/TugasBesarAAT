@@ -135,9 +135,6 @@ func (s *Store) ApplyBatch(ctx context.Context, b canonical.Batch) (canonical.Re
 	if err = s.Canonical.Fence.Protect(ctx, tx, b.Ownership, b.Mutations); err != nil {
 		return canonical.Result{}, err
 	}
-	if err = s.Canonical.Durability.Prepare(ctx, tx); err != nil {
-		return canonical.Result{}, canonical.Unavailable()
-	}
 	result := canonical.Result{BatchID: b.BatchID, Outcome: "no_change", Items: []canonical.Item{}}
 	for _, m := range b.Mutations {
 		item, e := s.applyMutation(ctx, tx, b.BatchID, m)
@@ -349,9 +346,6 @@ func (s *Store) TransitionNamespace(ctx context.Context, owner canonical.Ownersh
 	if err = s.Canonical.Fence.Protect(ctx, tx, owner, []canonical.Mutation{{Source: source, SourceRefID: ref}}); err != nil {
 		return err
 	}
-	if err = s.Canonical.Durability.Prepare(ctx, tx); err != nil {
-		return err
-	}
 	route := mustRoute(source, ref)
 	if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,726104))", "entity:"+route); err != nil {
 		return err
@@ -364,7 +358,7 @@ func (s *Store) TransitionNamespace(ctx context.Context, owner canonical.Ownersh
 		if err = tx.Rollback(ctx); err != nil {
 			return err
 		}
-		return s.Canonical.Durability.Confirm(ctx, "namespace:"+route+":"+newNS)
+		return s.confirmNamespace(ctx, route, newNS)
 	}
 	tag, err := tx.Exec(ctx, "UPDATE canonical_entities SET source_namespace=$4,source_position=0 WHERE route_key=$1 AND source=$2 AND source_ref_id=$3 AND coalesce(source_namespace,'')=$5", route, source, ref, newNS, oldNS)
 	if err != nil {
@@ -376,5 +370,14 @@ func (s *Store) TransitionNamespace(ctx context.Context, owner canonical.Ownersh
 	if err = tx.Commit(ctx); err != nil {
 		return canonical.Unavailable()
 	}
-	return s.Canonical.Durability.Confirm(ctx, "namespace:"+route+":"+newNS)
+	return s.confirmNamespace(ctx, route, newNS)
+}
+
+func (s *Store) confirmNamespace(ctx context.Context, route, namespace string) error {
+	if adapter, ok := s.Canonical.Durability.(interface {
+		ConfirmNamespace(context.Context, string, string) error
+	}); ok {
+		return adapter.ConfirmNamespace(ctx, route, namespace)
+	}
+	return s.Canonical.Durability.Confirm(ctx, "namespace:"+route+":"+namespace)
 }

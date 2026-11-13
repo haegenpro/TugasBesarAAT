@@ -49,7 +49,7 @@ func Up(ctx context.Context, c *pgx.Conn, dir, target, runtimeRole string) error
 		return err
 	}
 	var unknown int
-	if err = tx.QueryRow(ctx, "SELECT count(*) FROM public.canonical_schema_migrations WHERE version NOT IN ('0001_m1.sql','0002_canonical.sql','0003_citus.sql','0004_ownership.sql')").Scan(&unknown); err != nil {
+	if err = tx.QueryRow(ctx, "SELECT count(*) FROM public.canonical_schema_migrations WHERE version NOT IN ('0001_m1.sql','0002_canonical.sql','0003_citus.sql','0004_ownership.sql','0005_replication_probe.sql','0006_acquisition.sql')").Scan(&unknown); err != nil {
 		return err
 	}
 	if unknown != 0 {
@@ -59,7 +59,7 @@ func Up(ctx context.Context, c *pgx.Conn, dir, target, runtimeRole string) error
 	if target == "citus" {
 		files = append(files, "0003_citus.sql")
 	}
-	files = append(files, "0004_ownership.sql")
+	files = append(files, "0004_ownership.sql", "0005_replication_probe.sql", "0006_acquisition.sql")
 	if target == "postgres" {
 		var n int
 		if err = tx.QueryRow(ctx, "SELECT count(*) FROM public.canonical_schema_migrations WHERE version='0003_citus.sql'").Scan(&n); err != nil {
@@ -111,6 +111,9 @@ func Up(ctx context.Context, c *pgx.Conn, dir, target, runtimeRole string) error
 		}
 		// A runtime credential must not be the owner/admin used for migration.
 		if _, err = tx.Exec(ctx, "REVOKE ALL ON public.canonical_schema_migrations FROM "+q); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, "REVOKE ALL ON public.platform_storage_identity FROM "+q+"; GRANT EXECUTE ON FUNCTION public.platform_replication_status() TO "+q); err != nil {
 			return err
 		}
 	}

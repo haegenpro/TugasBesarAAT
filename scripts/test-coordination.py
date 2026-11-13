@@ -73,13 +73,13 @@ def main():
         test_env = {key: value for key, value in os.environ.items()
                     if not key.startswith("M2_") and key != "TEST_POSTGRES_URL"}
         test_env.update({"M2_DATABASE_URL": f"postgres://postgres:{password}@127.0.0.1:{port}/postgres?sslmode=disable",
-                         "DB_MAX_OPEN_CONNS": "6", "CANONICAL_OWNERSHIP_ENABLED": "false"})
+                         "DB_MAX_OPEN_CONNS": "6", "CANONICAL_OWNERSHIP_ENABLED": "false", "ACQUISITION_ENABLED": "false"})
         command = ["go", "test", "-mod=readonly", "-count=1", "-timeout=90s", "-v"]
         if args.race:
             command.append("-race")
         base_command = list(command)
-        command.extend(["./internal/store", "./internal/canonical", "./internal/config", "-run",
-                        "^(TestPlatformOwnership|TestOwnership)"])
+        command.extend(["./internal/store", "./internal/canonical", "./internal/config", "./internal/acquisition", "./internal/poller", "./internal/api", "-run",
+                        "^(TestPlatformOwnership|TestPlatformAcquisition|TestOwnership|TestAcquisition|TestReadyDraining)"])
         print(f"Isolated ownership tests; evidence: {evidence.relative_to(ROOT)}", flush=True)
         tests = subprocess.run(command, cwd=ROOT / "aggregator", env=test_env,
                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=240)

@@ -9,12 +9,16 @@ The first implementation provides canonical ownership acquisition, renewal,
 release and a transactional `store.Fence` adapter. It is an integration candidate,
 not certification of four-node availability or another teammate's approval.
 See the [executed local validation report](Platform-Coordination-Validation.md).
+The subsequent [frozen-worker cleanup implementation](Platform-Recovery-Implementation.md)
+is a development draft with tests deferred, not an additional passed guarantee.
 Use this document with the existing [canonical adapter contract](Canonical-and-Storage-Contract.md#9-canonical-adapter-v1).
 
-Current scope is **canonical delivery authority**. Source-acquisition election,
-processor state/checkpoint protection, and audit capture ownership/expiry still
-need integration. Do not deploy multiple active legacy pollers and describe
-deduplication alone as upstream exactly-once acquisition.
+The first handoff covers **canonical delivery authority**. A subsequent
+[acquisition draft](Platform-Acquisition-Implementation.md) adds private
+source-wide election and fenced progress for the existing BMKG/PVMBG pollers;
+its tests and deployment are deferred. Processor state/checkpoint protection
+and audit ownership/expiry still need integration. Do not activate multiple
+unguarded legacy pollers or infer exactly-once upstream requests from deduplication.
 
 ## Authority and deployment boundary
 
@@ -182,10 +186,13 @@ OWNERSHIP_LEASE_TTL=15s
 ```
 
 Startup wires the authority into the HTTP routes and `Store.Canonical.Fence`.
-The existing production durability adapter is still absent, so enabling these
-settings alone **does not enable canonical batch success**. Its unavailable
-response remains intentional until the storage/HA integration supplies and
-verifies `Durability`. Multi-entity validation remains a separate gate.
+These settings alone **do not enable canonical batch success**: a durability
+adapter is still required. The new [replicated storage draft](../deployment/storage/README.md)
+installs one when `CANONICAL_DURABILITY_CONFIG` names a captured formation and
+its group DSN secrets are supplied. It also confirms authority operations and
+outbox publication. This draft and its verification scripts are implemented but
+unexecuted; HA testing is deferred and does not block coding. Multi-entity Citus
+validation remains a separate protocol milestone.
 
 Run the isolated handoff proof (requires Go and Docker access):
 

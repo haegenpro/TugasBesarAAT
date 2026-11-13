@@ -3,7 +3,10 @@
 Owner: Platform, Coordination & Reliability. The
 [local QEMU/KVM bootstrap provider](../deployment/platform/README.md) now supplies
 a working four-node k3s environment and pinned Tester Agent. Application/storage
-deployment remains pending; see [bootstrap validation](Platform-Bootstrap-Validation.md).
+deployment remains pending; [storage](../deployment/storage/README.md) and
+[replicated Aggregator](../deployment/aggregator/README.md) now have unverified
+implementation drafts. See [bootstrap validation](Platform-Bootstrap-Validation.md)
+for the earlier infrastructure results only.
 
 ## Portable topology
 
@@ -98,8 +101,9 @@ acknowledgements. Canonical replication does not protect unrelated databases.
 
 1. Deliver [canonical authority contract and integration proof](Platform-Coordination-Contract.md).
 2. Provision four configurable nodes, HA API entry and Tester Agent.
-3. Prove one synchronous PostgreSQL group, then full Citus/Patroni formation;
+3. Implement one synchronous PostgreSQL group, then full Citus/Patroni formation;
    integrate durability adapters and distributed recovery with the storage owner.
+   Author checks with the code and execute them in the later validation phase.
    Include bounded cleanup of the existing admission control session/advisory
    lock when an application process stays frozen, not only its data transaction.
 4. Deploy source-to-canonical-to-read flow; integrate poller/processor ownership,

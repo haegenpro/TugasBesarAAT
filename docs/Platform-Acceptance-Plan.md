@@ -30,12 +30,14 @@ report-ready summaries. Preserve failure counterexamples as failures.
 | Four separate-kernel Kubernetes nodes | four Ready QEMU/KVM guests, unique boot IDs, required namespace, core deployments | Platform | Passed on light 7 GiB bootstrap; [report](Platform-Bootstrap-Validation.md) |
 | Supplied Tester Agent | pinned unchanged manifest/image, one Ready pod per node | Platform | Passed 4/4; [report](Platform-Bootstrap-Validation.md) |
 | Basic control-plane continuity | first VM paused; fixed API, agent renewal and control-plane write continue; VM restored | Platform | Passed one local run; not canonical/source HA proof |
+| Frozen-worker data/control session cleanup | abandoned sessions expire; successor resolves attempts without the old process resuming; broken pooled sessions discarded | Storage + Platform | Implemented draft; [verification deferred](Platform-Recovery-Implementation.md) |
+| Replicated storage configuration and adapter | pinned image sources, local placement, primary routing, group WAL confirmation, authority/attempt/outbox integration | Storage + Platform | [Implemented draft and deferred scripts](../deployment/storage/README.md); no build or execution |
 | Canonical ownership acquisition/takeover | one winner, increasing epoch, scope policy, renewal/release, stale write rejection | Storage | Implemented local test runner; see its per-run results |
 | Transaction-bound fencing | takeover waits for protected transaction; busy expired transaction fails COMMIT; idle client backend terminated | Storage | Implemented local test runner; no VM/HA claim |
 | Lease protocol boundary | dedicated auth, strict JSON, bounded body/deadline, no client-selected expiry/TTL | Storage + Ingestion | Implemented tests |
 | Additive migration | fresh/M1 upgrade and repeat application; existing checksums unchanged; restricted runtime grants | Storage | Local PostgreSQL regression suite in runner |
-| >=3 Aggregators across nodes | placement, healthy-instance entry, per-instance throughput/error/latency | Storage + Platform | Pending |
-| Single acquisition and <=60s takeover | upstream request logs, owner epochs, contiguous progress and unique effects | Ingestion + Storage | Pending |
+| >=3 Aggregators across nodes | placement, healthy-instance entry, per-instance throughput/error/latency | Storage + Platform | [Deployment renderer and checks implemented](../deployment/aggregator/README.md); execution deferred |
+| Single acquisition and <=60s takeover | upstream request logs, owner epochs, contiguous progress and unique effects | Ingestion + Storage | [BMKG/PVMBG election and progress fencing implemented](Platform-Acquisition-Implementation.md); takeover/freeze/SLA evidence pending |
 | Worker/authority clock shifts | +45s/-30s, no conflicting successful owners; trace uncertainty | All owners | Pending |
 | VM freeze and resume | stale instance cannot write until authority refreshed; bounded cleanup | All owners | Pending |
 | Acknowledged-write durability | primary/disk loss, all surviving required WAL/decision state, checksum reconciliation | Storage + Platform | Pending |
@@ -84,6 +86,7 @@ removes its labelled container/data. Evidence is written to
 `evidence/platform-ownership/<run-id>/`. `--race` enables the Go race detector.
 
 The test simulates a stalled client database transaction; it does not suspend a
-VM, shift a host clock, or establish replicated failover. The production
-canonical write path stays unavailable without a verified durability adapter.
+VM, shift a host clock, or establish replicated failover. The canonical write
+path requires a configured durability adapter. The new adapter and HA scripts
+are [implemented but unexecuted](../deployment/storage/README.md).
 Full deployment/load/Tester Agent evidence remains a later milestone.

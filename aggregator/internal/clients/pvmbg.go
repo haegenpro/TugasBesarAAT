@@ -64,6 +64,7 @@ func decodeVolcanicReport(raw map[string]interface{}) (VolcanicReport, error) {
 }
 
 type PVMBGClient struct {
+	BeforeFetch    func(context.Context, string) error
 	CaptureFailure FailureRecorder
 	BaseURL        string
 	Token          string
@@ -101,6 +102,11 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	if c.BeforeFetch != nil {
+		if err := c.BeforeFetch(callCtx, "PVMBG"); err != nil {
+			return nil, err
+		}
+	}
 
 	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, c.BaseURL+path, nil)
 	if err != nil {

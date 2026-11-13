@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"aggregator/internal/acquisition"
 	"aggregator/internal/api"
 	"aggregator/internal/avrowire"
 	"aggregator/internal/canonical"
@@ -69,6 +70,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+	if path := os.Getenv("CANONICAL_DURABILITY_CONFIG"); path != "" {
+		if err := st.ConfigureReplication(ctx, path); err != nil {
+			logger.Error("invalid replication configuration", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	deps := &api.Dependencies{}
 	bmkgClient := clients.NewBMKGClient(cfg.BMKGBaseURL, cfg.BMKGAPIKey, logger)
@@ -97,6 +104,29 @@ func main() {
 		MaxBackoff: cfg.MaxBackoff,
 		Logger:     logger,
 	}
+	if cfg.AcquisitionEnabled {
+		authority, err := ownership.NewAcquisition(st.Pool, cfg.AcquisitionTTL, canonical.Deadline)
+		if err != nil {
+			logger.Error("invalid acquisition authority", "error", err)
+			os.Exit(1)
+		}
+		durability, ok := st.Canonical.Durability.(ownership.Durability)
+		if !ok {
+			logger.Error("acquisition requires the replicated durability adapter")
+			os.Exit(1)
+		}
+		authority.Durability = durability
+		coordinator, err := acquisition.New(authority, logger)
+		if err != nil {
+			logger.Error("invalid acquisition coordinator", "error", err)
+			os.Exit(1)
+		}
+		coordinator.Ready = deps.StoreReady
+		st.Acquisition = authority
+		p.Acquisition = coordinator
+		bmkgClient.BeforeFetch = acquisition.RequireRequest
+		pvmbgClient.BeforeFetch = acquisition.RequireRequest
+	}
 
 	a := api.New(st, status, deps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
 	router := server.New(logger, a)
@@ -109,6 +139,9 @@ func main() {
 				os.Exit(1)
 			}
 			st.Canonical.Fence = authority
+			if durability, ok := st.Canonical.Durability.(ownership.Durability); ok {
+				authority.Durability = durability
+			}
 			adapter.Ownership = authority
 		}
 		adapter.Register(router)
@@ -117,6 +150,7 @@ func main() {
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("aggregator", router)}
 	var workers sync.WaitGroup
 	launch := func(fn func()) { workers.Add(1); go func() { defer workers.Done(); fn() }() }
+	launch(func() { <-ctx.Done(); deps.SetDraining(true); deps.SetStoreReady(false) })
 	launch(func() { monitorStore(ctx, st, deps, p, logger) })
 	launch(func() { st.CollectMetrics(ctx) })
 	if platform.Bool("AGGREGATOR_PUBLISH_ENABLED", true) {
@@ -162,6 +196,12 @@ func monitorStore(ctx context.Context, st *store.Store, deps *api.Dependencies, 
 			if err == nil {
 				schemaReady = true
 			}
+		}
+		if err == nil {
+			err = st.CheckAcquisition(checkCtx)
+		}
+		if err == nil {
+			err = st.CheckDurability(checkCtx)
 		}
 		cancel()
 		deps.SetStoreReady(err == nil)

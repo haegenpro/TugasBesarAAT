@@ -50,6 +50,13 @@ func (s *Store) beginMutation(ctx context.Context) (pgx.Tx, error) {
 		release()
 		return nil, err
 	}
+	if s.Canonical.Durability != nil {
+		if err = s.Canonical.Durability.Prepare(ctx, reg); err != nil {
+			_ = reg.Rollback(context.Background())
+			release()
+			return nil, err
+		}
+	}
 	if _, err = reg.Exec(ctx, "INSERT INTO canonical_attempts(attempt_id,state,topology) VALUES($1,'pending',$2)", id, topology); err == nil {
 		_, err = reg.Exec(ctx, "UPDATE canonical_visibility SET generation=generation+1 WHERE singleton")
 	}
@@ -68,6 +75,23 @@ func (s *Store) beginMutation(ctx context.Context) (pgx.Tx, error) {
 		return nil, err
 	}
 	t := &mutationTx{Tx: tx, s: s, admission: admission, id: id}
+	if s.Canonical.Durability != nil {
+		if err = s.Canonical.Durability.Prepare(ctx, tx); err != nil {
+			_ = t.Rollback(context.Background())
+			return nil, err
+		}
+	}
+	idleTimeout := s.idleTransactionTimeout
+	if idleTimeout == 0 {
+		idleTimeout = defaultIdleTransactionTimeout
+	}
+	// Reapply locally for admitted mutations, including custom pool adapters.
+	// Store.New also installs the connection-startup default to cover BEGIN's
+	// gap before this statement. A later ownership fence may shorten the budget.
+	if _, err = tx.Exec(ctx, "SELECT set_config('idle_in_transaction_session_timeout',$1,true)", timeoutMilliseconds(idleTimeout)); err != nil {
+		_ = t.Rollback(context.Background())
+		return nil, err
+	}
 	var state string
 	// Recovery takes FOR UPDATE; it cannot finalize an attempt while a protected
 	// transaction holds this lock, nor can a finalized attempt start new work.
@@ -96,6 +120,17 @@ func (t *mutationTx) Commit(ctx context.Context) error {
 	}
 	t.closed = true
 	defer releaseAdmission(t.admission)
+	// A long-running or resumed mutation must not commit after its separate
+	// admission session has expired. This refreshes only this live caller's
+	// session; it cannot keep a frozen process alive through another worker.
+	if _, err := t.admission.Exec(ctx, "SELECT 1"); err != nil {
+		cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = t.Tx.Rollback(cleanup)
+		// Leave the pending attempt for normal fenced decision recovery. A lost
+		// connection or timeout must not be turned into an assumed abort/success.
+		return canonical.Unavailable()
+	}
 	if _, err := t.Tx.Exec(ctx, "INSERT INTO canonical_attempt_commits(attempt_id) VALUES($1)", t.id); err != nil {
 		t.Tx.Rollback(context.Background())
 		return err
@@ -127,8 +162,14 @@ func (t *mutationTx) Rollback(ctx context.Context) error {
 // distributedSettled is intentionally conservative: any prepared decision on
 // any participating primary blocks finalization, and unavailable workers block.
 func (s *Store) primaryTopology(ctx context.Context) (string, int, error) {
+	return readPrimaryTopology(ctx, s.Pool)
+}
+
+func readPrimaryTopology(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) (string, int, error) {
 	var citus bool
-	if err := s.Pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='citus')").Scan(&citus); err != nil {
+	if err := q.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='citus')").Scan(&citus); err != nil {
 		return "", 0, err
 	}
 	if !citus {
@@ -136,7 +177,7 @@ func (s *Store) primaryTopology(ctx context.Context) (string, int, error) {
 	}
 	var topology string
 	var count, inactive int
-	err := s.Pool.QueryRow(ctx, "SELECT coalesce(jsonb_agg(jsonb_build_array(nodeid,nodename,nodeport,groupid) ORDER BY nodeid),'[]'::jsonb)::text,count(*),count(*) FILTER(WHERE NOT isactive) FROM pg_dist_node WHERE groupid>0 AND noderole='primary'").Scan(&topology, &count, &inactive)
+	err := q.QueryRow(ctx, "SELECT coalesce(jsonb_agg(jsonb_build_array(nodeid,nodename,nodeport,groupid) ORDER BY nodeid),'[]'::jsonb)::text,count(*),count(*) FILTER(WHERE NOT isactive) FROM pg_dist_node WHERE groupid>0 AND noderole='primary'").Scan(&topology, &count, &inactive)
 	if err != nil {
 		return "", 0, err
 	}
@@ -151,7 +192,12 @@ func (s *Store) distributedSettled(ctx context.Context, expected string) error {
 		return err
 	}
 	if topology != expected {
-		return fmt.Errorf("attempt topology changed; explicit integration recovery required")
+		adapter, ok := s.Canonical.Durability.(interface {
+			PermitTopologyChange(context.Context, string, string) error
+		})
+		if !ok || adapter.PermitTopologyChange(ctx, expected, topology) != nil {
+			return fmt.Errorf("attempt topology changed; explicit integration recovery required")
+		}
 	}
 
 	var n int
@@ -192,6 +238,11 @@ func (s *Store) resolveAttempt(ctx context.Context, id string) error {
 		return err
 	}
 	defer tx.Rollback(context.Background())
+	if s.Canonical.Durability != nil {
+		if err = s.Canonical.Durability.Prepare(ctx, tx); err != nil {
+			return err
+		}
+	}
 	var state, topology string
 	if err = tx.QueryRow(ctx, "SELECT state,topology FROM canonical_attempts WHERE attempt_id=$1 FOR UPDATE NOWAIT", id).Scan(&state, &topology); err != nil {
 		return err
@@ -206,6 +257,13 @@ func (s *Store) resolveAttempt(ctx context.Context, id string) error {
 	if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM canonical_attempt_commits WHERE attempt_id=$1)", id).Scan(&committed); err != nil {
 		return err
 	}
+	if adapter, ok := s.Canonical.Durability.(interface {
+		ConfirmTransaction(context.Context, pgx.Tx) error
+	}); ok {
+		if err = adapter.ConfirmTransaction(ctx, tx); err != nil {
+			return err
+		}
+	}
 	state = "aborted"
 	if committed {
 		state = "committed"
@@ -219,8 +277,9 @@ func (s *Store) resolveAttempt(ctx context.Context, id string) error {
 	return tx.Commit(ctx)
 }
 
-// RecoverAttempts never expires work. Session locks fence live registration;
-// row locks and the atomic commit marker fence delayed/lost writers. The global
+// RecoverAttempts never infers outcomes from age. PostgreSQL timeouts release
+// abandoned data/control sessions. Recovery must still acquire the attempt's
+// session lock and row lock and inspect the atomic commit marker. The global
 // prepared-decision probe must succeed before a terminal outcome is published.
 func (s *Store) RecoverAttempts(ctx context.Context) error {
 	rows, err := s.Pool.Query(ctx, "SELECT attempt_id::text FROM canonical_attempts WHERE state='pending' ORDER BY created_at LIMIT 32")
@@ -291,16 +350,20 @@ func (s *Store) validatedRead(ctx context.Context, read func(context.Context) er
 		}
 	}
 }
-func (s *Store) publicationReady(ctx context.Context, id *string) error {
-	if id == nil {
-		return nil
-	} // Migrated M1 intents were already committed offline.
-	var state string
-	if err := s.Pool.QueryRow(ctx, "SELECT state FROM canonical_attempts WHERE attempt_id=$1", *id).Scan(&state); err != nil {
-		return err
-	}
-	if state != "committed" {
-		return canonical.Unavailable()
+func (s *Store) publicationReady(ctx context.Context, tx pgx.Tx, id *string) error {
+	if id != nil {
+		var state string
+		if err := tx.QueryRow(ctx, "SELECT state FROM canonical_attempts WHERE attempt_id=$1", *id).Scan(&state); err != nil {
+			return err
+		}
+		if state != "committed" {
+			return canonical.Unavailable()
+		}
+	} // Migrated M1 intents have no attempt ID, but still need WAL evidence.
+	if adapter, ok := s.Canonical.Durability.(interface {
+		ConfirmTransaction(context.Context, pgx.Tx) error
+	}); ok {
+		return adapter.ConfirmTransaction(ctx, tx)
 	}
 	return nil
 }

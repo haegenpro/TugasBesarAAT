@@ -3,6 +3,14 @@
 Validation date: 13 November 2026. This report covers the first platform
 coordination implementation, not the complete Platform role or M2 acceptance.
 
+These results cover the first handoff committed as `61807f4`. Subsequent
+[frozen-worker cleanup changes](Platform-Recovery-Implementation.md) and the
+[replicated storage draft](../deployment/storage/README.md) are untested under
+the development-first workflow. The subsequent
+[acquisition and Aggregator draft](Platform-Acquisition-Implementation.md) is
+also unexecuted. The results below do not validate that later code, its new
+migrations, manifests or deferred checks.
+
 ## Executed results
 
 | Check | Result |

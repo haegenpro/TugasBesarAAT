@@ -18,16 +18,45 @@ import (
 )
 
 type Authority struct {
-	pool   *pgxpool.Pool
-	ttl    time.Duration
-	budget time.Duration
+	pool       *pgxpool.Pool
+	ttl        time.Duration
+	budget     time.Duration
+	prefix     string
+	Durability Durability
+}
+
+// Durability is optional for the original local ownership development path.
+// The replicated server installs it for authority writes as well as batches.
+type Durability interface {
+	Prepare(context.Context, pgx.Tx) error
+	ConfirmOwnership(context.Context, canonical.Ownership, bool) error
 }
 
 func New(pool *pgxpool.Pool, ttl, budget time.Duration) (*Authority, error) {
 	if pool == nil || budget < time.Millisecond || budget > canonical.Deadline || ttl < 3*budget || ttl > time.Minute {
 		return nil, fmt.Errorf("ownership requires a pool, a 1ms..2s request budget, and a lease of 3 budgets..1 minute")
 	}
-	return &Authority{pool: pool, ttl: ttl, budget: budget}, nil
+	return &Authority{pool: pool, ttl: ttl, budget: budget, prefix: "canonical:"}, nil
+}
+
+// NewAcquisition keeps acquisition scopes private to the poller coordinator.
+// The canonical authority cannot issue or accept these tokens.
+func NewAcquisition(pool *pgxpool.Pool, ttl, budget time.Duration) (*Authority, error) {
+	if ttl < 12*time.Second || ttl > 30*time.Second {
+		return nil, fmt.Errorf("acquisition lease TTL must be between 12s and 30s")
+	}
+	a, err := New(pool, ttl, budget)
+	if err == nil {
+		a.prefix = "acquisition:"
+	}
+	return a, err
+}
+
+func (a *Authority) accepts(scope string) bool {
+	if a.prefix == "acquisition:" {
+		return scope == "acquisition:BMKG" || scope == "acquisition:PVMBG"
+	}
+	return scope == "canonical:BMKG" || scope == "canonical:PVMBG" || scope == "canonical:SATELIT" || scope == "canonical:SENSOR_PANTAI"
 }
 
 func valid(v string) bool {
@@ -77,6 +106,12 @@ func (a *Authority) begin(ctx context.Context) (pgx.Tx, error) {
 		_ = tx.Rollback(context.Background())
 		return nil, canonical.Unavailable()
 	}
+	if a.Durability != nil {
+		if err = a.Durability.Prepare(ctx, tx); err != nil {
+			_ = tx.Rollback(context.Background())
+			return nil, canonical.Unavailable()
+		}
+	}
 	return tx, nil
 }
 
@@ -96,6 +131,9 @@ func matches(r record, o canonical.Ownership) bool {
 func (a *Authority) Acquire(ctx context.Context, request canonical.AcquireOwnership) (canonical.Lease, error) {
 	if !valid(request.Scope) || !valid(request.Holder) {
 		return canonical.Lease{}, canonical.Fail(400, "invalid_request", "scope and unique process holder required")
+	}
+	if !a.accepts(request.Scope) {
+		return canonical.Lease{}, canonical.Fail(400, "invalid_scope", "scope is not authorized by this authority")
 	}
 	ctx, cancel := context.WithTimeout(ctx, a.budget)
 	defer cancel()
@@ -127,11 +165,15 @@ func (a *Authority) Acquire(ctx context.Context, request canonical.AcquireOwners
 	if err = tx.Commit(ctx); err != nil {
 		return canonical.Lease{}, canonical.Unavailable()
 	}
-	return a.lease(request.Scope, r), nil
+	lease := a.lease(request.Scope, r)
+	if a.Durability != nil && a.Durability.ConfirmOwnership(ctx, lease.Ownership, false) != nil {
+		return canonical.Lease{}, canonical.Unavailable()
+	}
+	return lease, nil
 }
 
 func (a *Authority) Renew(ctx context.Context, o canonical.Ownership) (canonical.Lease, error) {
-	if !validOwner(o) {
+	if !validOwner(o) || !a.accepts(o.Scope) {
 		return canonical.Lease{}, canonical.Fail(400, "invalid_request", "scope, positive epoch and holder required")
 	}
 	ctx, cancel := context.WithTimeout(ctx, a.budget)
@@ -156,11 +198,14 @@ func (a *Authority) Renew(ctx context.Context, o canonical.Ownership) (canonical
 	if err = tx.Commit(ctx); err != nil {
 		return canonical.Lease{}, canonical.Unavailable()
 	}
+	if a.Durability != nil && a.Durability.ConfirmOwnership(ctx, o, false) != nil {
+		return canonical.Lease{}, canonical.Unavailable()
+	}
 	return a.lease(o.Scope, r), nil
 }
 
 func (a *Authority) Release(ctx context.Context, o canonical.Ownership) error {
-	if !validOwner(o) {
+	if !validOwner(o) || !a.accepts(o.Scope) {
 		return canonical.Fail(400, "invalid_request", "scope, positive epoch and holder required")
 	}
 	ctx, cancel := context.WithTimeout(ctx, a.budget)
@@ -184,6 +229,9 @@ func (a *Authority) Release(ctx context.Context, o canonical.Ownership) error {
 	if err = tx.Commit(ctx); err != nil {
 		return canonical.Unavailable()
 	}
+	if a.Durability != nil && a.Durability.ConfirmOwnership(ctx, o, true) != nil {
+		return canonical.Unavailable()
+	}
 	return nil
 }
 
@@ -191,7 +239,7 @@ func (a *Authority) Release(ctx context.Context, o canonical.Ownership) error {
 // renewal and release through the transaction's commit. The deferred check
 // rejects a transaction that outlives its lease even without a successor.
 func (a *Authority) Protect(ctx context.Context, tx pgx.Tx, o canonical.Ownership, mutations []canonical.Mutation) error {
-	if !validOwner(o) || len(mutations) == 0 {
+	if !validOwner(o) || !a.accepts(o.Scope) || len(mutations) == 0 {
 		return stale()
 	}
 	if err := a.configure(ctx, tx); err != nil {
@@ -217,3 +265,29 @@ func (a *Authority) Protect(ctx context.Context, tx pgx.Tx, o canonical.Ownershi
 }
 
 var _ canonical.OwnershipRepository = (*Authority)(nil)
+
+// Validate preflights an outbound request. Effects still need Protect through
+// COMMIT; no database transaction is held across the HTTP request.
+func (a *Authority) Validate(ctx context.Context, o canonical.Ownership) error {
+	if !validOwner(o) || !a.accepts(o.Scope) {
+		return stale()
+	}
+	ctx, cancel := context.WithTimeout(ctx, a.budget)
+	defer cancel()
+	tx, err := a.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.Background())
+	r, now, err := lock(ctx, tx, o.Scope, "SHARE")
+	if err != nil {
+		return err
+	}
+	if !matches(r, o) || !live(r, now) {
+		return stale()
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return canonical.Unavailable()
+	}
+	return nil
+}

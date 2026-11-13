@@ -54,11 +54,20 @@ Validated observations, replay cursors, retry schedules, notices, transitions, a
 
 ## M2 offline migrations
 
-The chain now includes additive `0004_ownership.sql`, provisioning source-scoped
-canonical authority and deferred commit checks. Earlier migration files retain
+The chain includes additive `0004_ownership.sql`, provisioning source-scoped
+canonical authority and deferred commit checks, and `0005_replication_probe.sql`,
+adding an administrator-controlled identity and restricted WAL status function
+for the [unverified replicated storage draft](../deployment/storage/README.md).
+Earlier migration files retain
 their checksums. See the [coordination handoff](../docs/Platform-Coordination-Contract.md)
 for HTTP/configuration and the remaining durability/deployment gates. Do not
 modify applied migration files to enable ownership.
+
+Migration `0006_acquisition.sql` adds separate BMKG/PVMBG acquisition scopes.
+The [acquisition draft](../docs/Platform-Acquisition-Implementation.md) wires
+source-wide election and transactional cursor/status/data fencing into the
+existing pollers. It is opt-in and unverified; the canonical HTTP authority
+cannot issue acquisition leases. Old migration checksums remain unchanged.
 
 Stop every Aggregator writer, replay job and publisher first. Set `MIGRATION_DATABASE_URL` to an administrator connection; runtime `DATABASE_URL` remains a restricted credential. From the repository root:
 
@@ -73,5 +82,11 @@ The administrator command holds a migration lock, validates checksums and baseli
 `--target citus` additionally converts the canonical tables to the **experimental** four-shard single-copy candidate and removes retained coordinator heap copies. All worker databases, current authority, runtime roles/inter-node credentials and topology must already be provisioned. It is not the approved replicated deployment; Role 2 must integrate production durability, permissions and failover before activation.
 
 `canonical_entities` retains UUID/time/revision/activity/source order, including tombstones without an active payload. `canonical_operations` enforces source-scoped operation identities; `canonical_batches` records retry outcomes. Entity-owned lifecycle events/outboxes are colocated with canonical rows; notices and source-status lifecycle remain in the reporting tables. Visibility generations, fenced attempts and commit markers are small coordinator control state requiring Role 2 durability integration. Outbox delivery checks terminal attempt completion before publishing.
+
+The development-first [frozen-worker cleanup draft](../docs/Platform-Recovery-Implementation.md)
+adds Aggregator data/control session timeouts and a commit-time admission check.
+Defaults are `DB_IDLE_TRANSACTION_TIMEOUT=15s` and
+`DB_ADMISSION_IDLE_TIMEOUT=30s`; no database-wide configuration or schema
+migration is needed. Recovery/compatibility tests for this draft are deferred.
 
 See [M2 report](../docs/Role1-M2-Write-Core.md) for exact acceptance results, protocol limits and service API configuration.

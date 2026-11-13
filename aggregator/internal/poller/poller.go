@@ -2,6 +2,7 @@
 package poller
 
 import (
+	"aggregator/internal/acquisition"
 	"aggregator/internal/clients"
 	"aggregator/internal/domain"
 	"aggregator/internal/mapping"
@@ -30,7 +31,12 @@ type RecoveryStore interface {
 
 type pollFunc func(context.Context, string, time.Time) error
 
+type SourceCoordinator interface {
+	Run(context.Context, string, func(context.Context))
+}
+
 type Poller struct {
+	Acquisition   SourceCoordinator
 	metricsMu     sync.Mutex
 	heads         map[string]int64
 	cursors       map[string]int64
@@ -48,24 +54,56 @@ type Poller struct {
 }
 
 func (p *Poller) Run(ctx context.Context) {
+	if p.requiresAcquisition() && p.Acquisition == nil {
+		p.logSourceFailure("acquisition", "", errors.New("protected store requires a source coordinator"))
+		return
+	}
+	_, canReplay := p.Store.(RecoveryStore)
+	if p.DisablePoll && (p.DisableReplay || !canReplay) {
+		<-ctx.Done()
+		return
+	}
+	var sources sync.WaitGroup
+	for _, source := range []string{"BMKG", "PVMBG"} {
+		sources.Add(1)
+		go func(source string) {
+			defer sources.Done()
+			work := func(owned context.Context) { p.runSource(owned, source) }
+			if p.Acquisition != nil {
+				p.Acquisition.Run(ctx, source, work)
+			} else {
+				work(ctx)
+			}
+		}(source)
+	}
+	sources.Wait()
+}
+
+func (p *Poller) runSource(ctx context.Context, source string) {
 	var wg sync.WaitGroup
 	launch := func(endpoint string, fn pollFunc) {
 		wg.Add(1)
 		go func() { defer wg.Done(); p.loop(ctx, endpoint, fn) }()
 	}
 	if !p.DisablePoll {
-		launch("BMKG", p.pollSeismic)
-		launch("BMKG_TSUNAMI", p.pollWarnings)
-		launch("PVMBG", p.pollVolcanic)
+		if source == "BMKG" {
+			launch("BMKG", p.pollSeismic)
+			launch("BMKG_TSUNAMI", p.pollWarnings)
+		} else {
+			launch("PVMBG", p.pollVolcanic)
+		}
 		if _, ok := p.Store.(interface {
 			PendingVolcanic(context.Context) ([]clients.VolcanicReport, error)
-		}); ok {
+		}); ok && source == "PVMBG" {
 			launch("mapping:volcanic", func(c context.Context, id string, _ time.Time) error { return p.retryVolcanicMapping(c, id) })
 		}
 	}
 	if !p.DisableReplay {
 		if _, ok := p.Store.(RecoveryStore); ok {
 			for _, entity := range []string{"seismic-events", "tsunami-warnings", "volcanic-reports"} {
+				if (source == "PVMBG") != (entity == "volcanic-reports") {
+					continue
+				}
 				entity := entity
 				launch("history:"+entity, func(c context.Context, id string, _ time.Time) error { return p.replay(c, id, entity) })
 			}
@@ -83,6 +121,9 @@ func (p *Poller) loop(ctx context.Context, endpoint string, fn pollFunc) {
 		return
 	}
 	failures := 0
+	// A newly elected owner resumes promptly from persisted progress. Do not
+	// inherit a failed predecessor's potentially long retry delay on first use.
+	firstOwnedAttempt := p.Acquisition != nil
 	for ctx.Err() == nil {
 		delay := interval
 		if p.Ready == nil || p.Ready() {
@@ -92,7 +133,7 @@ func (p *Poller) loop(ctx context.Context, endpoint string, fn pollFunc) {
 			var err error
 			if st, ok := p.Store.(RecoveryStore); ok {
 				status, err = st.PollStatus(callCtx, endpoint)
-				if err == nil && status.NextAttempt != nil && status.NextAttempt.After(time.Now()) {
+				if err == nil && !firstOwnedAttempt && status.NextAttempt != nil && status.NextAttempt.After(time.Now()) {
 					if !sleep(ctx, time.Until(*status.NextAttempt)) {
 						return
 					}
@@ -102,6 +143,7 @@ func (p *Poller) loop(ctx context.Context, endpoint string, fn pollFunc) {
 			// A status read failure is not an empty cursor. Do not accidentally
 			// fetch a full snapshot or advance a cursor when PostgreSQL is down.
 			if err == nil {
+				firstOwnedAttempt = false
 				err = p.attempt(callCtx, endpoint, cid, status, fn)
 			}
 			if err != nil {
@@ -137,6 +179,15 @@ func (p *Poller) since(endpoint string, lastSuccess *time.Time, started time.Tim
 }
 
 func (p *Poller) attempt(ctx context.Context, endpoint, cid string, status domain.EndpointStatus, fn pollFunc) error {
+	if p.requiresAcquisition() || acquisition.HasGuard(ctx) {
+		source, ok := acquisition.Source(endpoint)
+		if !ok {
+			return acquisition.ErrNotOwner
+		}
+		if _, err := acquisition.Token(ctx, source); err != nil {
+			return err
+		}
+	}
 	ctx, span := platform.Start(ctx, "ingest "+endpoint)
 	defer span.End()
 	started := domain.Now()
@@ -147,6 +198,16 @@ func (p *Poller) attempt(ctx context.Context, endpoint, cid string, status domai
 		err = errors.Join(err, st.RecordAttempt(ctx, endpoint, cid, err == nil, p.Interval, p.MaxBackoff, started))
 	}
 	return err
+}
+
+func (p *Poller) requiresAcquisition() bool {
+	if p.Acquisition != nil {
+		return true
+	}
+	if st, ok := p.Store.(interface{ AcquisitionRequired() bool }); ok {
+		return st.AcquisitionRequired()
+	}
+	return false
 }
 
 func (p *Poller) pollOnce(ctx context.Context, endpoint, cid string, fn pollFunc) error {

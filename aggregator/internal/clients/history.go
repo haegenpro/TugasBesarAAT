@@ -111,6 +111,11 @@ func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, ke
 	return p, nil
 }
 func (c *BMKGClient) FetchHistory(ctx context.Context, cid, entity string, after int64) (HistoryPage, error) {
+	if c.BeforeFetch != nil {
+		if err := c.BeforeFetch(ctx, "BMKG"); err != nil {
+			return HistoryPage{}, err
+		}
+	}
 	return fetchHistory(ctx, c.HTTP, c.BaseURL, "X-BMKG-Key", c.APIKey, "bmkg", entity, cid, after, c.Logger, c.Registry, c.Readers["/"+entity], c.CaptureFailure)
 }
 func (c *PVMBGClient) FetchHistory(ctx context.Context, cid, entity string, after int64) (HistoryPage, error) {
@@ -123,6 +128,11 @@ func (c *PVMBGClient) FetchHistory(ctx context.Context, cid, entity string, afte
 			return HistoryPage{}, err
 		}
 		defer release()
+	}
+	if c.BeforeFetch != nil {
+		if err := c.BeforeFetch(ctx, "PVMBG"); err != nil {
+			return HistoryPage{}, err
+		}
 	}
 	return fetchHistory(ctx, c.HTTP, c.BaseURL, "Authorization", "Bearer "+c.Token, "pvmbg", entity, cid, after, c.Logger, c.Registry, reader, c.CaptureFailure)
 }

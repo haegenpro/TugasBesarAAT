@@ -151,6 +151,10 @@ func Health(c *gin.Context) {
 }
 
 func (a *API) Ready(c *gin.Context) {
+	if a.Deps.Draining() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "draining"})
+		return
+	}
 	storeReady := a.Deps.StoreReady()
 	brokerReady := a.Deps.BrokerReady() && a.Deps.LifecycleReady()
 	status := "ready"

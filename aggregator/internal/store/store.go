@@ -22,10 +22,12 @@ import (
 )
 
 type Store struct {
-	Pool      *pgxpool.Pool
-	logger    *slog.Logger
-	control   *pgxpool.Pool
-	Canonical CanonicalOptions
+	Pool                   *pgxpool.Pool
+	logger                 *slog.Logger
+	control                *pgxpool.Pool
+	Canonical              CanonicalOptions
+	Acquisition            Fence
+	idleTransactionTimeout time.Duration
 }
 
 func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, error) {
@@ -36,26 +38,44 @@ func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, 
 	if err != nil {
 		return nil, errors.New("invalid DATABASE_URL")
 	}
+	timeouts, err := loadSessionTimeouts()
+	if err != nil {
+		return nil, err
+	}
 	cfg.MaxConns = int32(platform.Int("DB_MAX_OPEN_CONNS", 16))
 	cfg.MinConns = 0
 	cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(platform.Duration("DB_STATEMENT_TIMEOUT", 5*time.Second).Milliseconds(), 10)
 	cfg.ConnConfig.RuntimeParams["lock_timeout"] = strconv.FormatInt(platform.Duration("DB_LOCK_TIMEOUT", 2*time.Second).Milliseconds(), 10)
 	cfg.ConnConfig.Tracer = &sqlTracer{logger: logger}
+	timeouts.configureData(cfg)
 	pool, err := pgxpool.NewWithConfig(middleware.EnsureCorrelationID(ctx), cfg)
 	if err != nil {
 		return nil, err
 	}
 	controlConfig := cfg.Copy()
 	controlConfig.MaxConns = 4
+	timeouts.configureControl(controlConfig)
+	beforeControlAcquire := controlConfig.BeforeAcquire
+	controlConfig.BeforeAcquire = func(ctx context.Context, conn *pgx.Conn) bool {
+		if beforeControlAcquire != nil && !beforeControlAcquire(ctx, conn) {
+			return false
+		}
+		// A process resuming after a freeze can have server-expired connections
+		// still cached locally. Discard them before handing a session to a caller.
+		return conn.Ping(ctx) == nil
+	}
 	control, err := pgxpool.NewWithConfig(ctx, controlConfig)
 	if err != nil {
 		pool.Close()
 		return nil, err
 	}
-	return &Store{Pool: pool, control: control, logger: logger}, nil
+	return &Store{Pool: pool, control: control, logger: logger, idleTransactionTimeout: timeouts.transaction}, nil
 }
 
 func (s *Store) Close() {
+	if adapter, ok := s.Canonical.Durability.(interface{ Close() }); ok {
+		adapter.Close()
+	}
 	s.Pool.Close()
 	s.control.Close()
 }
@@ -99,6 +119,9 @@ func (s *Store) SaveDedup(ctx context.Context, e domain.HazardEvent, correlation
 		return false, err
 	}
 	defer tx.Rollback(ctx)
+	if err = s.protectAcquisition(ctx, tx, string(e.Source)); err != nil {
+		return false, err
+	}
 	_, inserted, err = s.saveHazardTx(ctx, tx, e, correlationID, true)
 	if err != nil {
 		return false, err

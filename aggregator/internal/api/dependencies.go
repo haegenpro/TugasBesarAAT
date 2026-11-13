@@ -7,6 +7,7 @@ type Dependencies struct {
 	storeReady     atomic.Bool
 	brokerReady    atomic.Bool
 	lifecycleReady atomic.Bool
+	draining       atomic.Bool
 }
 
 func (d *Dependencies) StoreReady() bool {
@@ -27,3 +28,5 @@ func (d *Dependencies) SetBrokerReady(ready bool) {
 
 func (d *Dependencies) LifecycleReady() bool     { return d.lifecycleReady.Load() }
 func (d *Dependencies) SetLifecycleReady(v bool) { d.lifecycleReady.Store(v) }
+func (d *Dependencies) Draining() bool           { return d.draining.Load() }
+func (d *Dependencies) SetDraining(v bool)       { d.draining.Store(v) }

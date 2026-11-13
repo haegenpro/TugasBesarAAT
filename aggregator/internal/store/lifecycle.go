@@ -147,6 +147,10 @@ func (s *Store) sourceTx(ctx context.Context, source string) (pgx.Tx, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err = s.protectAcquisition(ctx, tx, source); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, err
+	}
 	// Serialize source commits, keeping network calls outside transactions.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,1))`, source); err != nil {
 		tx.Rollback(ctx)

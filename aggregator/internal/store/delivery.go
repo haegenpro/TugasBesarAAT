@@ -37,7 +37,7 @@ func (s *Store) DeliverNext(ctx context.Context, publish func(context.Context, O
 	if err != nil {
 		return false, err
 	}
-	if err = s.publicationReady(ctx, attempt); err != nil {
+	if err = s.publicationReady(ctx, tx, attempt); err != nil {
 		return false, err
 	}
 	ctx = middleware.WithCorrelationID(platform.Extract(ctx, http.Header{"Traceparent": []string{tp}, "Tracestate": []string{ts}}), cid)
@@ -85,7 +85,7 @@ func (s *Store) DeliverLifecycle(ctx context.Context, publish func(context.Conte
 	if err != nil {
 		return false, err
 	}
-	if err = s.publicationReady(ctx, attempt); err != nil {
+	if err = s.publicationReady(ctx, tx, attempt); err != nil {
 		return false, err
 	}
 	var e domain.LifecycleEvent

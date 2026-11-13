@@ -1,0 +1,11 @@
+**
+!deployment/
+!deployment/storage/
+!deployment/storage/entrypoint.py
+!deployment/storage/bootstrap.py
+!experiments/
+!experiments/m1/
+!experiments/m1/requirements.lock
+!store/
+!store/migrations/
+!store/migrations/0005_replication_probe.sql

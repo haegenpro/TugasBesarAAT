@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "storage_mode": "postgres",
+  "runtime_secret": "aat-m2-aggregator-runtime",
+  "storage_secret": "aat-m2-aggregator-storage",
+  "durability_configmap": "aat-m2-storage-durability",
+  "environment": {
+    "BMKG_BASE_URL": "http://bmkg-mock:8081",
+    "PVMBG_BASE_URL": "http://pvmbg-mock:8082",
+    "NATS_URL": "nats://broker:4222",
+    "NATS_STREAM": "HAZARDS",
+    "NATS_SUBJECT": "hazard.events",
+    "NATS_LIFECYCLE_STREAM": "REPORT_LIFECYCLE",
+    "NATS_LIFECYCLE_SUBJECT": "report.lifecycle",
+    "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
+    "POLL_INTERVAL": "3",
+    "SOURCE_RETRY_MAX_SEC": "60",
+    "BMKG_FRESHNESS_SEC": "30",
+    "PVMBG_FRESHNESS_SEC": "60",
+    "ACQUISITION_LEASE_TTL": "15s",
+    "OWNERSHIP_LEASE_TTL": "15s"
+  }
+}
