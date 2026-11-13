@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "cluster_id": "aat-m2",
+  "namespace": "sistem-informasi-kebencanaan-bnpb",
+  "libvirt_uri": "qemu:///system",
+  "state_dir": "/var/tmp/aat-m2",
+  "ssh_user": "aat",
+  "host_reserve_mib": 4096,
+  "startup_headroom_mib": 1024,
+  "network": {
+    "name": "aat-m2",
+    "bridge": "aatm2br0",
+    "cidr": "192.168.127.0/24",
+    "gateway": "192.168.127.1"
+  },
+  "api_endpoint": "https://192.168.127.1:7443",
+  "pod_cidr": "10.42.0.0/16",
+  "service_cidr": "10.43.0.0/16",
+  "cloud_image": {
+    "url": "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64.img",
+    "sha256": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
+  },
+  "k3s": {
+    "version": "v1.37.2+k3s1",
+    "binary_url": "https://github.com/k3s-io/k3s/releases/download/v1.37.2%2Bk3s1/k3s",
+    "binary_sha256": "265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda",
+    "installer_url": "https://raw.githubusercontent.com/k3s-io/k3s/v1.37.2%2Bk3s1/install.sh",
+    "installer_sha256": "ed01f89fd977bf20ac1516bbebf8370bf3ddbaa55dac8aba610956a4c78cc00b"
+  },
+  "api_proxy_image": "haproxy@sha256:1c3568e520453cc8ba98c39501febcf450429c80e6cc27ecad779961d76e597c",
+  "tester": {
+    "manifest_url": "https://raw.githubusercontent.com/susTuna/if4031-tester-agent/ebb55261711123a9a211739ffbf140a275caa6da/manifest.yaml",
+    "manifest_sha256": "964c086918cc31d5e887958b70d0606070b1e0c514c0017231ca651d0efa0f39",
+    "image": "sustuna/tester-agent@sha256:b3143da159cf23a8744ede12b847da6208353754234d53a5a7b46d071cf277ec"
+  },
+  "nodes": [
+    {"name":"aat-m2-a", "role":"server", "address":"192.168.127.11", "mac":"52:54:00:aa:02:11", "vcpus":2, "memory_mib":2048, "root_gib":12, "data_gib":8, "physical_host":"daniel-laptop"},
+    {"name":"aat-m2-b", "role":"server", "address":"192.168.127.12", "mac":"52:54:00:aa:02:12", "vcpus":2, "memory_mib":2048, "root_gib":12, "data_gib":8, "physical_host":"daniel-laptop"},
+    {"name":"aat-m2-c", "role":"server", "address":"192.168.127.13", "mac":"52:54:00:aa:02:13", "vcpus":2, "memory_mib":2048, "root_gib":12, "data_gib":8, "physical_host":"daniel-laptop"},
+    {"name":"aat-m2-d", "role":"agent", "address":"192.168.127.14", "mac":"52:54:00:aa:02:14", "vcpus":2, "memory_mib":1024, "root_gib":12, "data_gib":8, "physical_host":"daniel-laptop"}
+  ]
+}

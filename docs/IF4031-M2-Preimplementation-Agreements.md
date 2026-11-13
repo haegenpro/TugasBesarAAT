@@ -223,8 +223,12 @@ These agreements can be drafted in parallel with P0. Finalize each one before it
 ### 15. Service and Deployment Boundaries
 
 First platform handoff: [portable four-node deployment contract](Platform-Deployment-Contract.md).
-Provisioning/manifests, complete capacity validation and executable startup remain
-implementation work.
+The [QEMU/KVM k3s bootstrap](../deployment/platform/README.md) now supplies a
+light four-node environment, fixed host API and the unchanged Tester Agent;
+[local validation](Platform-Bootstrap-Validation.md) includes one control-plane
+VM-pause experiment. Full application/storage manifests, capacity, durability
+and recovery remain implementation work. The 7 GiB bootstrap is not a claim that
+the selected canonical database topology fits this laptop.
 
 - [x] **Contribution documented** — [Canonical and Storage Contract, §5](Canonical-and-Storage-Contract.md#5-placement-on-four-kubernetes-nodes) provides canonical placement and resource requirements. [Ingestion and Messaging Contract, §4](Ingestion-and-Messaging-Contract.md#4-streams-replication-and-capacity) and [Coastal Delivery and Validation, §3](Coastal-Delivery-and-Validation.md#3-durable-critical-path) add broker isolation and recipient-storage needs.
 - [ ] **Agreement finalized**

@@ -27,6 +27,9 @@ report-ready summaries. Preserve failure counterexamples as failures.
 
 | Requirement | Proof / measurements | Partners | Status |
 | --- | --- | --- | --- |
+| Four separate-kernel Kubernetes nodes | four Ready QEMU/KVM guests, unique boot IDs, required namespace, core deployments | Platform | Passed on light 7 GiB bootstrap; [report](Platform-Bootstrap-Validation.md) |
+| Supplied Tester Agent | pinned unchanged manifest/image, one Ready pod per node | Platform | Passed 4/4; [report](Platform-Bootstrap-Validation.md) |
+| Basic control-plane continuity | first VM paused; fixed API, agent renewal and control-plane write continue; VM restored | Platform | Passed one local run; not canonical/source HA proof |
 | Canonical ownership acquisition/takeover | one winner, increasing epoch, scope policy, renewal/release, stale write rejection | Storage | Implemented local test runner; see its per-run results |
 | Transaction-bound fencing | takeover waits for protected transaction; busy expired transaction fails COMMIT; idle client backend terminated | Storage | Implemented local test runner; no VM/HA claim |
 | Lease protocol boundary | dedicated auth, strict JSON, bounded body/deadline, no client-selected expiry/TTL | Storage + Ingestion | Implemented tests |

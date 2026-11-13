@@ -20,6 +20,12 @@ The Platform, Coordination & Reliability handoff is documented in the
 ownership proof with `python3 scripts/test-coordination.py`; full HA/load/VM
 acceptance is tracked separately.
 
+A [four-node QEMU/KVM k3s bootstrap](deployment/platform/README.md) is available
+via `python3 scripts/platform-cluster.py up`. Its light laptop profile uses
+three 2 GiB servers and one 1 GiB agent, with a memory/headroom preflight. This
+provisions Kubernetes and the supplied Tester Agent; it does not deploy the full
+Citus/application stack. See the [bootstrap validation](docs/Platform-Bootstrap-Validation.md).
+
 ## Services
 
 | Service | Directory | Example host port, or internal port | Purpose |

@@ -1,7 +1,9 @@
 # Platform deployment contract and remaining work
 
-Owner: Platform, Coordination & Reliability. This is the first deployment
-handoff/design record; a working Kubernetes deployment is not yet supplied.
+Owner: Platform, Coordination & Reliability. The
+[local QEMU/KVM bootstrap provider](../deployment/platform/README.md) now supplies
+a working four-node k3s environment and pinned Tester Agent. Application/storage
+deployment remains pending; see [bootstrap validation](Platform-Bootstrap-Validation.md).
 
 ## Portable topology
 
@@ -12,8 +14,13 @@ not assumptions inside application code. Check KVM acceleration and disk/RAM
 capacity before provisioning. Record physical-host placement in the README.
 
 Proposed Kubernetes layout: nodes A/B/C are k3s servers and workload nodes; D is
-an agent/workload node. The API/registration address must survive one server
-loss. Version pins and a stable entry point are still implementation work.
+an agent/workload node. Host API access uses an authenticated-health-checking
+HAProxy endpoint; initial guest registration uses the first private server and
+then k3s discovers other server endpoints. Bootstrap version pins and host API
+continuity are implemented. Permanent first-server replacement is still recovery
+work. The light local profile has 2 GiB per server and 1 GiB for the agent, 7 GiB
+total. This cannot accommodate the full canonical database reservation below;
+use the profile for infrastructure/coordination development.
 
 Retain the storage owner's [four-group placement](Canonical-and-Storage-Contract.md#5-placement-on-four-kubernetes-nodes):
 
