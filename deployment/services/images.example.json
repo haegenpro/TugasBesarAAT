@@ -1,0 +1,10 @@
+{
+  "broker": null,
+  "schema-registry": null,
+  "bmkg-mock": null,
+  "pvmbg-mock": null,
+  "auth-service": null,
+  "client-api": null,
+  "consumer-dashboard": null,
+  "consumer-notifier": null
+}
