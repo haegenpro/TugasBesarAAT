@@ -39,9 +39,18 @@ func m2Fault(t *testing.T, action, service string) {
 		if e == nil {
 			var response struct {
 				Error string `json:"error"`
+				DSN   string `json:"dsn"`
 			}
 			require.NoError(t, json.Unmarshal(raw, &response))
 			require.Empty(t, response.Error)
+			// Random loopback bindings may change across Docker stop/start. Refresh
+			// subsequent test connections from this run-owned controller response.
+			if action == "start" && response.DSN != "" {
+				key := map[string]string{"coord": "M2_DATABASE_URL", "worker1": "M2_WORKER1_URL", "worker2": "M2_WORKER2_URL"}[service]
+				if key != "" {
+					require.NoError(t, os.Setenv(key, response.DSN))
+				}
+			}
 			return
 		}
 		select {

@@ -167,7 +167,7 @@ func m2Store(t *testing.T, dsn string) *Store {
 	t.Helper()
 	var output io.Writer = io.Discard
 	if dir := os.Getenv("M2_EVIDENCE_DIR"); dir != "" {
-		file, err := os.OpenFile(filepath.Join(dir, "sql-"+t.Name()+".jsonl"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		file, err := os.OpenFile(filepath.Join(dir, "sql-"+strings.NewReplacer("/", "-", "\\", "-").Replace(t.Name())+".jsonl"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 		require.NoError(t, err)
 		t.Cleanup(func() { file.Close() })
 		output = file

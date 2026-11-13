@@ -1,0 +1,105 @@
+{
+  "canonical_adapter_version": 1,
+  "canonical_json_format_version": 2,
+  "routing_encoding_version": 1,
+  "notes": [
+    "Synthetic M2/M5 handoff examples; not evaluator data.",
+    "UUIDv4 and first ingested_at are storage-assigned; source_ref_id is the independent processor identity.",
+    "Ownership is illustrative; production requires the Role 2 authority/durability providers.",
+    "Prepared payload digest covers the exact UTF-8 prepared_mutations_json string, without an added newline."
+  ],
+  "request": {
+    "contract_version": 1,
+    "batch_id": "fixture-output-batch:17",
+    "ownership": {
+      "scope": "fixture:fire-output",
+      "epoch": 1,
+      "holder": "fixture-owner"
+    },
+    "mutations": [
+      {
+        "operation_id": "fixture-output:17",
+        "source": "SATELIT",
+        "source_ref_id": "fire-v1:9556f0c47d0542a72f1e0c2f3c75703519460eda1f130dda9de84e9106590f95",
+        "operation": "upsert",
+        "source_order": {
+          "namespace": "fixture-output-v1",
+          "position": 17
+        },
+        "expected_revision": 0,
+        "event": {
+          "hazard_type": "WILDFIRE",
+          "severity": "WASPADA",
+          "area_name": "Fixture Province",
+          "latitude": 0,
+          "longitude": 0.0005,
+          "occurred_at": "2026-11-12T00:00:00Z",
+          "attributes": {
+            "detection_count": 2,
+            "satellites": [
+              "N20",
+              "N21"
+            ],
+            "max_confidence": "h",
+            "total_frp_mw": 20,
+            "detection_keys": [
+              "N20|2026-11-12|0000|0|0",
+              "N21|2026-11-12|0001|0|0.001"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "prepared_reference": {
+    "id": "owned:fixture-output-batch:17",
+    "count": 1,
+    "sha256": "7b22eb5a821eb7bd7207755b4d042d8dfe3feca589bb891db09adb068f562306"
+  },
+  "prepared_mutations_json": "[{\"operation_id\":\"fixture-output:17\",\"source\":\"SATELIT\",\"source_ref_id\":\"fire-v1:9556f0c47d0542a72f1e0c2f3c75703519460eda1f130dda9de84e9106590f95\",\"operation\":\"upsert\",\"source_order\":{\"namespace\":\"fixture-output-v1\",\"position\":17},\"expected_revision\":0,\"event\":{\"hazard_type\":\"WILDFIRE\",\"severity\":\"WASPADA\",\"area_name\":\"Fixture Province\",\"latitude\":0,\"longitude\":0.0005,\"occurred_at\":\"2026-11-12T00:00:00Z\",\"attributes\":{\"detection_count\":2,\"satellites\":[\"N20\",\"N21\"],\"max_confidence\":\"h\",\"total_frp_mw\":20,\"detection_keys\":[\"N20|2026-11-12|0000|0|0\",\"N21|2026-11-12|0001|0|0.001\"]}}}]",
+  "outcomes": [
+    {
+      "operation": "first upsert",
+      "revision": 1,
+      "active": true,
+      "new_publication_intents": 1
+    },
+    {
+      "operation": "same batch retry with successor ownership",
+      "outcome": "duplicate",
+      "extra_revisions": 0,
+      "extra_publication_intents": 0
+    },
+    {
+      "operation": "newer equal content",
+      "outcome": "no_change",
+      "revision": 1,
+      "source_position_advances": true
+    },
+    {
+      "operation": "material correction",
+      "revision": 2,
+      "preserve_uuid": true,
+      "preserve_ingested_at": true
+    },
+    {
+      "operation": "retract",
+      "revision": 3,
+      "active": false,
+      "event": null
+    },
+    {
+      "operation": "restoration",
+      "revision": 4,
+      "active": true,
+      "reuse_uuid": true,
+      "reuse_ingested_at": true
+    }
+  ],
+  "visibility": {
+    "strategy": "durable pending attempts and generation validation",
+    "ordinary_read_deadline_ms": 2000,
+    "uncertain_result_status": 503,
+    "cross_request_snapshot": false
+  }
+}
