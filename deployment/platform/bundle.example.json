@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "node_reserve_mib": 512,
+  "unresolved": [
+    "Populate actual immutable image inventories and render all referenced artifacts",
+    "Prepare owned local volumes and private Secrets; capture actual storage group identities",
+    "Run the offline schema migration with all writers/publishers stopped and distributed recovery settled",
+    "Obtain service-owned database HA/schema artifacts and teammate service manifests",
+    "Resize or relocate the full stack; current 7 GiB VM allocation is insufficient"
+  ],
+  "stages": [
+    {"id":"storage","requires":[],"manifest":"artifacts/storage.json","wait":[]},
+    {"id":"isolation","requires":["storage"],"manifest":"artifacts/isolation.json","wait":[]},
+    {"id":"owner-databases","requires":["storage","isolation"],"manifest":"artifacts/owner-databases.json","wait":[]},
+    {"id":"services","requires":["owner-databases"],"manifest":"artifacts/services.json","wait":[{"kind":"Job","name":"broker-init"}]},
+    {"id":"aggregator","requires":["services"],"manifest":"artifacts/aggregator.json","wait":[{"kind":"Deployment","name":"aat-m2-aggregator"}]},
+    {"id":"owner-processing","requires":["aggregator"],"manifest":"artifacts/owner-processing.json","wait":[]},
+    {"id":"monitoring","requires":["services"],"manifest":"artifacts/monitoring.json","wait":[{"kind":"Deployment","name":"platform-metrics"}]}
+  ]
+}

@@ -8,8 +8,10 @@ The M1 preparation refactor preserves these service boundaries. Auth and both
 consumers now own separate PostgreSQL instances; the two source history archives
 remain SQLite. M2 adds [offline canonical migrations](store/README.md#m2-offline-migrations)
 and a first [canonical ownership/fencing integration](docs/Platform-Coordination-Contract.md).
-Replicated deployment, source acquisition election, Kubernetes, live M2 source
-integration and the M2 Audit API still need implementation/integration. See the
+M2 platform drafts now cover replicated storage/deployment, source election,
+Kubernetes, processor/audit coordination, recovery, isolation, observability,
+priority admission and deferred load/fault evidence. Teammate source/processor/
+Audit API integration and full runtime acceptance remain pending. See the
 [preparation verification report](docs/Preparation%20Verification.md) for measured
 results and limitations.
 
@@ -19,6 +21,11 @@ The Platform, Coordination & Reliability handoff is documented in the
 [acceptance matrix](docs/Platform-Acceptance-Plan.md). Run its isolated local
 ownership proof with `python3 scripts/test-coordination.py`; full HA/load/VM
 acceptance is tracked separately.
+
+Start the next integration phase with the
+[platform integration handoff](docs/Platform-Integration-Handoff.md). It links
+each subsection, owner inputs, capacity limits and the prepared deployment
+workflow. The full application/storage stack does not fit the light 7 GiB VMs.
 
 A [four-node QEMU/KVM k3s bootstrap](deployment/platform/README.md) is available
 via `python3 scripts/platform-cluster.py up`. Its light laptop profile uses

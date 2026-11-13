@@ -77,8 +77,10 @@ The renderer explicitly enables source acquisition, canonical interfaces and
 replicated durability. [Acquisition details](../../docs/Platform-Acquisition-Implementation.md)
 explain election, cancellation and transactional stale-progress rejection.
 Source leases are private to the process; canonical HTTP ownership routes cannot
-issue acquisition tokens. Snapshot/processor authority, service isolation,
-dependency deployments and full load/recovery evidence remain later work.
+issue acquisition tokens. Snapshot/processor authority, service isolation and
+dependency deployment drafts are linked in the
+[integration handoff](../../docs/Platform-Integration-Handoff.md).
+Owner integration and full load/recovery evidence remain deferred.
 
 Deferred checks cover manifest resource/placement constraints, source
 coordination, stale database effects and drain/readiness behavior. No runtime

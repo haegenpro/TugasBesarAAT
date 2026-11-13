@@ -20,8 +20,8 @@ Proposed Kubernetes layout: nodes A/B/C are k3s servers and workload nodes; D is
 an agent/workload node. Host API access uses an authenticated-health-checking
 HAProxy endpoint; initial guest registration uses the first private server and
 then k3s discovers other server endpoints. Bootstrap version pins and host API
-continuity are implemented. Permanent first-server replacement is still recovery
-work. The light local profile has 2 GiB per server and 1 GiB for the agent, 7 GiB
+continuity are implemented. [Permanent first-server replacement](Platform-Replacement-Runbook.md)
+has an unexecuted recovery workflow. The light local profile has 2 GiB per server and 1 GiB for the agent, 7 GiB
 total. This cannot accommodate the full canonical database reservation below;
 use the profile for infrastructure/coordination development.
 
@@ -98,6 +98,10 @@ acknowledgements. Canonical replication does not protect unrelated databases.
   Critical warnings remain independent of canonical snapshot/write barriers.
 
 ## Implementation sequence
+
+The following sequence is the original implementation plan. Platform drafts for
+these stages are now linked in the [integration handoff](Platform-Integration-Handoff.md).
+Owner integration and the deferred acceptance evidence remain open.
 
 1. Deliver [canonical authority contract and integration proof](Platform-Coordination-Contract.md).
 2. Provision four configurable nodes, HA API entry and Tester Agent.
