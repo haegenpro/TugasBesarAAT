@@ -29,6 +29,10 @@ func (l *Lab) m34(ctx context.Context, d map[string]any) error {
 		}
 		args = []string{"-C", filepath.Join(root, "aggregator"), "test", "-mod=readonly", "-count=1", "-p=1", "-timeout=240s", "-v", "./internal/store", "-run", pattern}
 	}
+	if l.Suite == "recovery-core" {
+		pattern = "^(TestM7|TestM4MissingWorkerPreservesContinuation)"
+		args = []string{"-C", filepath.Join(root, "aggregator"), "test", "-mod=readonly", "-count=1", "-p=1", "-timeout=150s", "-v", "./internal/store", "-run", pattern}
+	}
 	if wildfireSuite(l.Suite) {
 		pattern = map[string]string{
 			"wildfire-replay":     "^(TestM6DurableReplay|TestM6Normalized|TestM6Configuration)",
@@ -70,20 +74,29 @@ func (l *Lab) m34(ctx context.Context, d map[string]any) error {
 	err := command.Run()
 	redacted := strings.ReplaceAll(string(output.b), l.Password, "[redacted]")
 	_ = os.WriteFile(filepath.Join(l.Dir, l.Suite+"-tests.log"), []byte(redacted), 0600)
+	if l.Suite == "recovery-core" && strings.Contains(redacted, "RECOVERY_BLOCKED:") {
+		return fmt.Errorf("blocked: pinned Citus online movement unavailable; see redacted test log")
+	}
 	if l.Suite == "audit-analytics" && !strings.Contains(redacted, "=== RUN   Test") {
 		return fmt.Errorf("no requested audit/analytics test executed")
+	}
+	if l.Suite == "recovery-core" && (!strings.Contains(redacted, "=== RUN   TestM7") || strings.Contains(redacted, "--- SKIP: TestM7")) {
+		return fmt.Errorf("requested recovery assertions did not execute; inspect test log")
 	}
 	if wildfireSuite(l.Suite) && !strings.Contains(redacted, "=== RUN   TestM6") {
 		return fmt.Errorf("requested wildfire scenarios did not execute; inspect test log")
 	}
 	d["command"] = "go -C aggregator test -mod=readonly -count=1 -p=1 -timeout=180s -v ./internal/store ./internal/ingestion ./internal/pipeline -run " + pattern
-	if l.Suite == "audit-analytics" {
+	if l.Suite == "audit-analytics" || l.Suite == "recovery-core" {
 		d["command"] = "go -C aggregator " + strings.Join(args[2:], " ")
 	}
 	if wildfireSuite(l.Suite) {
 		d["command"] = "go -C aggregator " + strings.Join(args[2:], " ")
 	}
 	d["elapsed_ms"] = time.Since(started).Milliseconds()
+	if l.Suite == "recovery-core" {
+		d["go_flags"] = os.Getenv("GOFLAGS")
+	}
 	d["scope"] = "isolated single-copy Citus/component proof; not replicated deployment acceptance"
 	d["nats_image"] = os.Getenv("M3_NATS_IMAGE")
 	if err != nil {

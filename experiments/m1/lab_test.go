@@ -45,12 +45,12 @@ func TestResourceOwnership(t *testing.T) {
 	}
 }
 func TestProfilesAreIsolated(t *testing.T) {
-	for _, suite := range []string{"core", "ha"} {
+	for _, suite := range []string{"core", "ha", "recovery-core", "recovery-ha"} {
 		l := newLab(t.TempDir(), "test", suite, "secret", "image", nil)
 		config := l.composeConfig()
 		services := config["services"].(map[string]any)
 		want := 4
-		if suite == "ha" {
+		if haProfile(suite) {
 			want = 6
 		}
 		if len(services) != want {
@@ -76,10 +76,34 @@ func TestProfilesAreIsolated(t *testing.T) {
 			if _, ok := s["env_file"]; ok {
 				t.Fatal("application env imported")
 			}
-			if s["environment"].(map[string]string)["M1_SUITE"] != suite {
+			profile := suite
+			if haProfile(suite) {
+				profile = "ha"
+			}
+			if s["environment"].(map[string]string)["M1_SUITE"] != profile {
 				t.Fatal("suite changed")
 			}
 		}
+	}
+}
+
+func TestReplacementCannotTargetOtherResources(t *testing.T) {
+	for _, suite := range []string{"core", "ha", "recovery-core"} {
+		l := newLab(t.TempDir(), "test", suite, "secret", "image", nil)
+		_, err := l.replaceEmptyMember(context.Background(), "pg1")
+		if err == nil {
+			t.Fatal("replacement allowed outside explicit recovery suite")
+		}
+	}
+	l := newLab(t.TempDir(), "test", "recovery-ha", "secret", "image", nil)
+	l.DB = []string{"pg1", "pg2", "pg3"}
+	if _, err := l.replaceEmptyMember(context.Background(), "foreign"); err == nil {
+		t.Fatal("foreign member accepted")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := l.replaceEmptyMember(ctx, "pg1"); err == nil {
+		t.Fatal("cancelled replacement accepted")
 	}
 }
 func TestCanceledPolling(t *testing.T) {

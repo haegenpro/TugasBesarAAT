@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "synthetic": true,
+  "dataset": {
+    "id": "synthetic-recovery-v1",
+    "entities": 64,
+    "source": "BMKG",
+    "references": "recovery-000 through recovery-063 inclusive",
+    "geography": "63 at latitude -6, longitude 107; one at latitude 1, longitude 125",
+    "routing": "agreed UTF-8 JSON source-pair hash, independent of geographic skew",
+    "retracted_reference": "recovery-063",
+    "expected_active_count": 63
+  },
+  "group_ledger": {
+    "count": 50,
+    "serialization": "For i=0..49: recovery-{i:03d}|independent-payload-{i:03d} followed by LF, including final LF. This is NOT the Audit API checksum serialization.",
+    "sha256": "1e562bee415ca7632f89cc98b93bfd2ab82c34eff2a9eb3f1d7c1013b812e3ea"
+  },
+  "audit_vectors": [
+    {
+      "references": [],
+      "count": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "references": ["a", "b"],
+      "count": 2,
+      "sha256": "7e18f737311b2dc3b2f269dd78396b0351f14fb66efa879f768cb23181883c78"
+    }
+  ],
+  "physical_placement": {
+    "safe": {"node-a": ["s1", "s2"], "node-b": ["s3", "s4"]},
+    "safe_transient_destination": {"node-a": ["s1", "s2"], "node-b": ["s1", "s3", "s4"]},
+    "unsafe_transient_destination": {"node-a": ["s1", "s2"], "node-b": ["s1", "s2", "s3", "s4"]}
+  },
+  "limitations": ["No evaluator or historical catalogue data.", "Single-group HA and single-copy Citus are separate component proofs."]
+}

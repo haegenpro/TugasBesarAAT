@@ -3,7 +3,7 @@ import hashlib
 import copy
 import ipaddress
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from urllib.parse import urlparse
 import uuid
@@ -30,7 +30,8 @@ def validate(cfg):
     require(re.fullmatch(r"aat-[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?", cluster), "cluster_id must be a short aat- DNS label")
     require(cfg.get("namespace") == NAMESPACE, "assignment namespace must be preserved")
     require(cfg.get("libvirt_uri") == "qemu:///system", "VM provider requires qemu:///system")
-    state = Path(cfg.get("state_dir", ""))
+    # This is a Linux/libvirt host path even when validating a plan on Windows.
+    state = PurePosixPath(cfg.get("state_dir", ""))
     require(state.is_absolute() and ".." not in state.parts and state.name == cluster and len(state.parts) >= 4,
             "state_dir must be an absolute cluster-specific directory")
     require(re.fullmatch(r"[a-z][a-z0-9_-]{0,30}", cfg.get("ssh_user", "")), "invalid ssh_user")

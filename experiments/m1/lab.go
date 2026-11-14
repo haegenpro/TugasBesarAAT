@@ -123,7 +123,7 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 	}
 	// Three 1-GiB DB limits plus 128-MiB etcd members and 256 MiB VM headroom.
 	need := uint64(3456 << 20)
-	if suite != "core" && suite != "m2" && suite != "m4" && suite != "audit-analytics" && !wildfireSuite(suite) {
+	if suite != "core" && suite != "m2" && suite != "m4" && suite != "audit-analytics" && suite != "recovery-core" && !wildfireSuite(suite) {
 		need = 3712 << 20
 	}
 	if suite == "m3" {
@@ -160,7 +160,7 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 		if suite == "all" && (s == "m3" || s == "m4" || s == "wildfire") {
 			continue
 		}
-		if suite != "all" && suite != s && !(suite == "m2" && s == "core") && !(suite == "audit-analytics" && s == "m4") && !(wildfireSuite(suite) && s == "wildfire") {
+		if suite != "all" && suite != s && !(suite == "m2" && s == "core") && !(suite == "audit-analytics" && s == "m4") && !(suite == "recovery" && (s == "core" || s == "ha")) && !(suite == "recovery-core" && s == "core") && !(suite == "recovery-ha" && s == "ha") && !(wildfireSuite(suite) && s == "wildfire") {
 			continue
 		}
 		lab := newLab(root, "doctor", s, "doctor-only", "role1-m1-doctor", nil)
@@ -183,7 +183,7 @@ func (l *Lab) composeConfig() map[string]any {
 	services := map[string]any{}
 	volumes := map[string]any{}
 	etcdCount := 1
-	if l.Suite == "ha" {
+	if haProfile(l.Suite) {
 		etcdCount = 3
 	}
 	var peers, hosts []string
@@ -200,17 +200,21 @@ func (l *Lab) composeConfig() map[string]any {
 		services[name] = map[string]any{"image": etcdImage, "labels": labels, "mem_limit": "128m", "volumes": []string{name + ":/etcd-data"}, "command": []string{"/usr/local/bin/etcd", "--name", name, "--data-dir", "/etcd-data", "--listen-client-urls", "http://0.0.0.0:2379", "--advertise-client-urls", "http://" + name + ":2379", "--listen-peer-urls", "http://0.0.0.0:2380", "--initial-advertise-peer-urls", "http://" + name + ":2380", "--initial-cluster", strings.Join(peers, ","), "--initial-cluster-token", l.Project, "--auto-compaction-retention", "1", "--quota-backend-bytes", "16777216"}}
 	}
 	l.DB = []string{"coord", "worker1", "worker2"}
-	if l.Suite == "ha" {
+	if haProfile(l.Suite) {
 		l.DB = []string{"pg1", "pg2", "pg3"}
 	}
 	for i, name := range l.DB {
 		group := i
-		if l.Suite == "ha" {
+		if haProfile(l.Suite) {
 			group = 0
 		}
 		volumes[name] = map[string]any{"labels": labels}
 		l.Services = append(l.Services, name)
-		services[name] = map[string]any{"image": l.Image, "labels": labels, "mem_limit": "1g", "mem_reservation": "512m", "stop_grace_period": "5s", "healthcheck": map[string]any{"disable": true}, "ports": []string{"127.0.0.1::5432"}, "volumes": []string{name + ":/var/lib/postgresql/data"}, "environment": map[string]string{"M1_NAME": name, "M1_SCOPE": l.Project, "M1_SUITE": l.Suite, "M1_GROUP": fmt.Sprint(group), "M1_ETCD": strings.Join(hosts, ","), "M1_PASSWORD": l.Password}}
+		profile := l.Suite
+		if haProfile(l.Suite) {
+			profile = "ha"
+		}
+		services[name] = map[string]any{"image": l.Image, "labels": labels, "mem_limit": "1g", "mem_reservation": "512m", "stop_grace_period": "5s", "healthcheck": map[string]any{"disable": true}, "ports": []string{"127.0.0.1::5432"}, "volumes": []string{name + ":/var/lib/postgresql/data"}, "environment": map[string]string{"M1_NAME": name, "M1_SCOPE": l.Project, "M1_SUITE": profile, "M1_GROUP": fmt.Sprint(group), "M1_ETCD": strings.Join(hosts, ","), "M1_PASSWORD": l.Password}}
 	}
 	if l.Suite == "m3" {
 		for i := 1; i <= 3; i++ {
@@ -277,7 +281,7 @@ func (l *Lab) start(ctx context.Context) error {
 				return err
 			}
 		}
-		if l.Suite != "ha" {
+		if !haProfile(l.Suite) {
 			c, err := l.connect(ready, "coord")
 			if err != nil {
 				return err
@@ -571,6 +575,9 @@ func runLab(ctx context.Context, root, suite string) error {
 		// or altering engine/database capacity on the shared development machine.
 		suites = []string{"wildfire-replay", "wildfire-late", "wildfire-replies", "wildfire-crashes", "wildfire-history", "wildfire-boundaries", "wildfire-migrations"}
 	}
+	if suite == "recovery" {
+		suites = []string{"recovery-core", "recovery-ha"}
+	}
 	for _, s := range suites {
 		if ctx.Err() != nil {
 			report.Results = append(report.Results, Result{Name: s + "_startup", Status: "blocked", Error: ctx.Err().Error()})
@@ -580,6 +587,10 @@ func runLab(ctx context.Context, root, suite string) error {
 		err = lab.start(ctx)
 		if err != nil {
 			report.Results = append(report.Results, Result{Name: s + "_startup", Status: "blocked", Error: errString(err)})
+		} else if s == "recovery-ha" {
+			lab.result(ctx, "empty_member_recovery", lab.recoveryHA)
+		} else if s == "recovery-core" {
+			lab.result(ctx, "canonical_online_movement", lab.m34)
 		} else if s == "m2" {
 			lab.result(ctx, "m2_write_core", lab.m2)
 		} else if s == "m3" || s == "m4" || s == "audit-analytics" || wildfireSuite(s) {
@@ -613,7 +624,7 @@ func downRun(ctx context.Context, root, id string) error {
 	if !runPattern.MatchString(id) {
 		return errors.New("down requires the exact --run ID printed by run")
 	}
-	for _, suite := range []string{"core", "ha", "m2", "m3", "m4", "audit-analytics", "wildfire", "wildfire-replay", "wildfire-late", "wildfire-replies", "wildfire-crashes", "wildfire-history", "wildfire-boundaries", "wildfire-migrations"} {
+	for _, suite := range []string{"core", "ha", "m2", "m3", "m4", "audit-analytics", "recovery-core", "recovery-ha", "wildfire", "wildfire-replay", "wildfire-late", "wildfire-replies", "wildfire-crashes", "wildfire-history", "wildfire-boundaries", "wildfire-migrations"} {
 		l := newLab(root, id, suite, "", "", nil)
 		data, err := os.ReadFile(filepath.Join(l.Dir, "compose.json"))
 		if os.IsNotExist(err) {

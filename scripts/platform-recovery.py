@@ -14,7 +14,6 @@ import sys
 import time
 import uuid
 
-from platform_lib.cluster import Cluster
 from platform_lib.inventory import load
 from storage_lib import durability_config,plan,require,write_json
 
@@ -50,6 +49,9 @@ def validate_config(storage,config):
 
 class Recovery:
     def __init__(self,inventory,storage,config,target):
+        # Offline plans/checks also run on Windows; libvirt's Linux-only locking
+        # dependency is needed only when constructing the mutating executor.
+        from platform_lib.cluster import Cluster
         validate_config(storage,config)
         self.cluster=Cluster(inventory);self.inventory=inventory;self.storage=storage;self.config=config
         self.plan=recovery_plan(inventory,storage,target);self.target=self.plan["node"]
