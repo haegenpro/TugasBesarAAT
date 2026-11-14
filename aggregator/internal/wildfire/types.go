@@ -22,6 +22,7 @@ type Province struct {
 }
 type Config struct {
 	Version                int             `json:"version"`
+	AlgorithmVersion       int             `json:"algorithm_version,omitempty"`
 	Namespace              string          `json:"namespace"`
 	InitialOffset          *int64          `json:"initial_offset"`
 	AllowedLatenessSeconds *int64          `json:"allowed_lateness_seconds"`

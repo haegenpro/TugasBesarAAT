@@ -15,6 +15,7 @@ import (
 )
 
 type replayConfig struct {
+	AlgorithmVersion       int    `json:"algorithm_version,omitempty"`
 	Version                int    `json:"version"`
 	Namespace              string `json:"namespace"`
 	InitialOffset          *int64 `json:"initial_offset"`
@@ -62,7 +63,7 @@ func run(args []string, out, errOut io.Writer) error {
 	if err != nil {
 		return err
 	}
-	model, err := wildfire.New(wildfire.Config{Version: c.Version, Namespace: c.Namespace, InitialOffset: c.InitialOffset, AllowedLatenessSeconds: c.AllowedLatenessSeconds, ProvinceSHA256: c.ProvinceSHA256, ProvinceJSON: provinces})
+	model, err := wildfire.New(wildfire.Config{Version: c.Version, AlgorithmVersion: c.AlgorithmVersion, Namespace: c.Namespace, InitialOffset: c.InitialOffset, AllowedLatenessSeconds: c.AllowedLatenessSeconds, ProvinceSHA256: c.ProvinceSHA256, ProvinceJSON: provinces})
 	if err != nil {
 		return err
 	}

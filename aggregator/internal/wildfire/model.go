@@ -31,6 +31,12 @@ type Model struct {
 }
 
 func New(config Config) (*Model, error) {
+	if config.AlgorithmVersion == 0 {
+		config.AlgorithmVersion = 1
+	}
+	if config.AlgorithmVersion != 1 && config.AlgorithmVersion != 2 {
+		return nil, fmt.Errorf("unsupported wildfire algorithm version")
+	}
 	if config.Version != Version || !text(config.Namespace) || config.InitialOffset == nil || *config.InitialOffset < 0 || *config.InitialOffset >= math.MaxInt64 || config.AllowedLatenessSeconds == nil || *config.AllowedLatenessSeconds < 0 || *config.AllowedLatenessSeconds > math.MaxInt64/int64(time.Second) {
 		return nil, fmt.Errorf("version, namespace, initial_offset and nonnegative allowed_lateness_seconds required")
 	}
@@ -165,7 +171,7 @@ func (m *Model) Apply(input Operation) (Result, error) {
 		}
 	}
 	components, singletons, excluded := graph(obs)
-	fires, intents, diagnostics := resolve(m.config.Namespace, input.Offset, components, obs, m.fires, aliases, m.provinces)
+	fires, intents, diagnostics := resolveVersion(m.config.AlgorithmVersion, m.config.Namespace, input.Offset, components, obs, m.fires, aliases, m.provinces)
 	previous := m.watermark
 	m.observations = obs
 	m.aliases = aliases
@@ -197,6 +203,10 @@ func (m *Model) Apply(input Operation) (Result, error) {
 	return clone(result), nil
 }
 func (m *Model) Snapshot() Snapshot {
+	algorithm := Algorithm
+	if m.config.AlgorithmVersion == 2 {
+		algorithm = "wildfire-reference-v2"
+	}
 	observations := []Observation{}
 	keys := []string{}
 	for key := range m.observations {
@@ -210,5 +220,5 @@ func (m *Model) Snapshot() Snapshot {
 	for _, id := range sortedIDs(m.fires, false) {
 		fires = append(fires, m.fires[id])
 	}
-	return clone(Snapshot{Version: Version, Algorithm: Algorithm, Namespace: m.config.Namespace, ProvinceSHA256: m.config.ProvinceSHA256, Frontier: m.frontier, Watermark: m.watermark, VirtualNow: m.virtualNow, LateMutations: m.late, Singletons: m.singletons, Excluded: m.excluded, Observations: observations, Fires: fires, Diagnostics: m.diagnostics, History: m.history})
+	return clone(Snapshot{Version: Version, Algorithm: algorithm, Namespace: m.config.Namespace, ProvinceSHA256: m.config.ProvinceSHA256, Frontier: m.frontier, Watermark: m.watermark, VirtualNow: m.virtualNow, LateMutations: m.late, Singletons: m.singletons, Excluded: m.excluded, Observations: observations, Fires: fires, Diagnostics: m.diagnostics, History: m.history})
 }

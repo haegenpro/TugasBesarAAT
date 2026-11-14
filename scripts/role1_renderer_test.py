@@ -34,4 +34,36 @@ class Role1RendererTests(unittest.TestCase):
         bad=copy.deepcopy(self.config);bad['payload_quota_bytes']=0
         with self.assertRaises(ValueError):render(self.inventory,self.aggregator,bad,self.image,self.image)
 
+    def wildfire_configuration(self):
+        config=copy.deepcopy(self.config)
+        text=(ROOT/'docs/fixtures/wildfire-m6/config.json').read_text(encoding='utf-8')
+        processor=json.loads(text)
+        config['satellite_namespace']=processor['namespace']
+        config['satellite_initial_offset']=processor['initial_offset']
+        config['wildfire']={'config_json':text,'province_json':(ROOT/'docs/fixtures/wildfire-m5/provinces.json').read_text(encoding='utf-8')}
+        return config
+
+    def test_wildfire_is_explicit_immutable_and_uses_existing_resource_class(self):
+        config=self.wildfire_configuration()
+        result=render(self.inventory,self.aggregator,config,self.image,self.image)
+        table=next(v for v in result['items'] if v['kind']=='ConfigMap' and '-wildfire-' in v['metadata']['name'])
+        self.assertTrue(table['immutable'])
+        processor=json.loads(table['data']['config.json'])
+        self.assertEqual(processor['province_file'],'provinces.json')
+        aggregators=[v for v in result['items'] if v['kind']=='Deployment' and v['spec']['template']['spec']['containers'][0]['name']!='ingestion']
+        container=aggregators[0]['spec']['template']['spec']['containers'][0]
+        self.assertEqual(container['resources']['limits']['memory'],'512Mi')
+        self.assertIn({'name':'WILDFIRE_PROCESSOR_ENABLED','value':'true'},container['env'])
+        ingestion=next(v for v in result['items'] if v['kind']=='Deployment' and v['spec']['template']['spec']['containers'][0]['name']=='ingestion')
+        self.assertNotIn('WILDFIRE_PROCESSOR_ENABLED',{v['name'] for v in ingestion['spec']['template']['spec']['containers'][0]['env']})
+
+    def test_wildfire_rejects_bad_digest_scope_and_budget(self):
+        for change in ('digest','scope','quota'):
+            config=self.wildfire_configuration()
+            if change=='digest':config['wildfire']['province_json']+=' '
+            elif change=='scope':config['satellite_namespace']='different'
+            else:
+                processor=json.loads(config['wildfire']['config_json']);processor['prepared_bytes']=processor['cache_bytes'];config['wildfire']['config_json']=json.dumps(processor)
+            with self.assertRaises(ValueError):render(self.inventory,self.aggregator,config,self.image,self.image)
+
 if __name__=='__main__':unittest.main()

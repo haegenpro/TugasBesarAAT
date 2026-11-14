@@ -57,6 +57,10 @@ func restorationBefore(a, b Fire) bool {
 // Each transition region is the connected predecessor/successor bipartite
 // graph. Mixed split+merge regions are reported rather than inventing precedence.
 func resolve(namespace string, offset int64, components [][]string, obs map[string]Observation, old map[string]Fire, aliases map[string]string, provinces []Province) (map[string]Fire, []Intent, []Diagnostic) {
+	return resolveVersion(1, namespace, offset, components, obs, old, aliases, provinces)
+}
+
+func resolveVersion(version int, namespace string, offset int64, components [][]string, obs map[string]Observation, old map[string]Fire, aliases map[string]string, provinces []Province) (map[string]Fire, []Intent, []Diagnostic) {
 	next := map[string]Fire{}
 	for id, f := range old {
 		next[id] = f
@@ -91,7 +95,7 @@ func resolve(namespace string, offset int64, components [][]string, obs map[stri
 		keys = unique(keys)
 		code := ""
 		events := map[int]*Event{}
-		if split && merge {
+		if split && merge && version == 1 {
 			code = "ambiguous_merge_split"
 		} else {
 			for _, j := range cs {

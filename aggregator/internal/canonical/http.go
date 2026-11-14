@@ -26,6 +26,13 @@ type Repository interface {
 type PreparedResolver interface {
 	Open(context.Context, PreparedReference) (io.ReadCloser, error)
 }
+
+// ResolvePrepared applies the same count/digest/quota checks for an in-process
+// owning processor as the private HTTP adapter. It does not interpret paths.
+func ResolvePrepared(ctx context.Context, resolver PreparedResolver, quota int64, ref PreparedReference) ([]Mutation, error) {
+	return (HTTP{Resolver: resolver, MaxPreparedBytes: quota}).resolve(ctx, ref)
+}
+
 type HTTP struct {
 	Repository       Repository
 	Ownership        OwnershipRepository

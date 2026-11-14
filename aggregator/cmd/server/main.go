@@ -25,6 +25,7 @@ import (
 	"aggregator/internal/publisher"
 	"aggregator/internal/server"
 	"aggregator/internal/store"
+	"aggregator/internal/wildfireprocessor"
 )
 
 func main() {
@@ -131,10 +132,30 @@ func main() {
 		pvmbgClient.BeforeFetch = acquisition.RequireRequest
 	}
 
+	var wildfireEngine *wildfireprocessor.Engine
+	if platform.Bool("WILDFIRE_PROCESSOR_ENABLED", false) {
+		wc, configErr := wildfireprocessor.LoadConfig(os.Getenv("WILDFIRE_PROCESSOR_CONFIG"))
+		if configErr == nil {
+			wildfireEngine, configErr = wildfireprocessor.New(st, wc)
+		}
+		if configErr == nil {
+			check, cancel := context.WithTimeout(ctx, canonical.Deadline)
+			configErr = wildfireEngine.Check(check)
+			cancel()
+		}
+		if configErr != nil || !cfg.CanonicalEnabled {
+			logger.Error("wildfire requires valid explicit configuration and canonical adapter", "error", configErr)
+			os.Exit(1)
+		}
+	}
 	a := api.New(st, status, deps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
 	router := server.New(logger, a)
 	if cfg.CanonicalEnabled {
 		adapter := canonical.HTTP{Repository: st, Token: cfg.CanonicalToken}
+		if wildfireEngine != nil {
+			adapter.Resolver = wildfireEngine
+			adapter.MaxPreparedBytes = wildfireEngine.Config.PreparedBytes
+		}
 		if cfg.OwnershipEnabled {
 			authority, err := ownership.New(st.Pool, cfg.OwnershipTTL, canonical.Deadline)
 			if err != nil {
@@ -171,7 +192,7 @@ func main() {
 		processorAPI.RegisterOwnership(router, "/internal/processor/ownership")
 	}
 	server.RegisterSchemaAdmin(router, volcanicReaders, cfg.AdminToken)
-	stopPipeline, err := pipeline.Start(ctx, st, registry, router, map[string]*avrowire.SourceReader{"seismic-events": seismicReader, "tsunami-warnings": tsunamiReader}, logger)
+	stopPipeline, err := pipeline.Start(ctx, st, registry, router, map[string]*avrowire.SourceReader{"seismic-events": seismicReader, "tsunami-warnings": tsunamiReader}, logger, wildfireEngine)
 	if err != nil {
 		logger.Error("invalid raw pipeline configuration", "error", err)
 		os.Exit(1)

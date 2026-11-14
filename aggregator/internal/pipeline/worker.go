@@ -9,12 +9,14 @@ import (
 	"aggregator/internal/ownership"
 	"aggregator/internal/platform"
 	"aggregator/internal/rawinput"
+	"aggregator/internal/wildfireprocessor"
 	"context"
 	"errors"
 	"fmt"
 	"github.com/nats-io/nats.go/jetstream"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -32,10 +34,23 @@ type Worker struct {
 	JS                  jetstream.JetStream
 	Logger              *slog.Logger
 	BeforeACK           func(context.Context) error
+	Wildfire            *wildfireprocessor.Engine
 }
 
 func (w *Worker) Run(ctx context.Context, source, namespace string) {
 	ownership.Run(ctx, w.Processor, "processor:"+source, func(owned context.Context, p canonical.Ownership) {
+		if source == "SATELIT" && w.Wildfire != nil {
+			var workers sync.WaitGroup
+			workers.Add(2)
+			go func() { defer workers.Done(); w.Wildfire.RunPreparation(owned, p, w.Logger) }()
+			go func() {
+				defer workers.Done()
+				ownership.Run(owned, w.Delivery, "canonical:SATELIT", func(work context.Context, d canonical.Ownership) { w.Wildfire.RunDelivery(work, p, d, w.Logger) })
+			}()
+			w.loop(owned, source, namespace, p, canonical.Ownership{})
+			workers.Wait()
+			return
+		}
 		if source == "BMKG" {
 			ownership.Run(owned, w.Delivery, "canonical:BMKG", func(work context.Context, d canonical.Ownership) { w.loop(work, source, namespace, p, d) })
 		} else {

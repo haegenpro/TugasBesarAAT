@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "namespace": "fixture-satellite-session",
+  "initial_offset": 1,
+  "algorithm_version": 2,
+  "allowed_lateness_seconds": 1800,
+  "province_file": "../wildfire-m5/provinces.json",
+  "province_sha256": "e54f343525a296ebe49de9156ceef3edea61bb288f46c7744e55b5caf6cc5f75",
+  "page_rows": 8,
+  "cache_bytes": 16777216,
+  "staging_bytes": 67108864,
+  "prepared_bytes": 2097152
+}

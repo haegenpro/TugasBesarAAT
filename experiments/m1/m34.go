@@ -22,6 +22,24 @@ func (l *Lab) m34(ctx context.Context, d map[string]any) error {
 		pattern = "^(TestM3|TestM2Migrations|TestM2InterruptedDistributedCommit|TestM2RecoveryAndPublicationFence)"
 	}
 	args := []string{"-C", filepath.Join(root, "aggregator"), "test", "-mod=readonly", "-count=1", "-p=1", "-timeout=180s", "-v", "./internal/store", "./internal/ingestion", "./internal/pipeline", "-run", pattern}
+	if wildfireSuite(l.Suite) {
+		pattern = map[string]string{
+			"wildfire-replay":     "^(TestM6DurableReplay|TestM6Normalized|TestM6Configuration)",
+			"wildfire-late":       "^(TestM6Late|TestM6Quota)",
+			"wildfire-replies":    "^TestM6Lost",
+			"wildfire-crashes":    "^(TestM6Killed|TestM6CrashHelper)",
+			"wildfire-history":    "^TestM6Shared",
+			"wildfire-boundaries": "^(TestM6Receipt|TestM6Takeover|TestM6Prepared|TestM6Interrupted)",
+			"wildfire-migrations": "^(TestM2Migrations|TestM6Populated)",
+		}[l.Suite]
+		if pattern == "" {
+			return fmt.Errorf("unknown wildfire scenario group")
+		}
+		args = []string{"-C", filepath.Join(root, "aggregator"), "test", "-mod=readonly", "-count=1", "-p=1", "-timeout=10m", "-v", "./internal/wildfireprocessor", "-run", pattern}
+		if l.Suite == "wildfire-migrations" {
+			args = append(args[:len(args)-2], "./internal/store", "-run", pattern)
+		}
+	}
 	command := exec.CommandContext(ctx, "go", args...)
 	command.Env = append(os.Environ(), "M2_DATABASE_URL="+l.DSN["coord"], "M2_WORKER1_URL="+l.DSN["worker1"], "M2_WORKER2_URL="+l.DSN["worker2"], "M2_EVIDENCE_DIR="+l.Dir, "DB_MAX_OPEN_CONNS=6")
 	if l.Suite == "m3" {
@@ -45,7 +63,13 @@ func (l *Lab) m34(ctx context.Context, d map[string]any) error {
 	err := command.Run()
 	redacted := strings.ReplaceAll(string(output.b), l.Password, "[redacted]")
 	_ = os.WriteFile(filepath.Join(l.Dir, l.Suite+"-tests.log"), []byte(redacted), 0600)
+	if wildfireSuite(l.Suite) && !strings.Contains(redacted, "=== RUN   TestM6") {
+		return fmt.Errorf("requested wildfire scenarios did not execute; inspect test log")
+	}
 	d["command"] = "go -C aggregator test -mod=readonly -count=1 -p=1 -timeout=180s -v ./internal/store ./internal/ingestion ./internal/pipeline -run " + pattern
+	if wildfireSuite(l.Suite) {
+		d["command"] = "go -C aggregator " + strings.Join(args[2:], " ")
+	}
 	d["elapsed_ms"] = time.Since(started).Milliseconds()
 	d["scope"] = "isolated single-copy Citus/component proof; not replicated deployment acceptance"
 	d["nats_image"] = os.Getenv("M3_NATS_IMAGE")

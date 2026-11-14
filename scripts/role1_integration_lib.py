@@ -1,5 +1,6 @@
 """Offline M3/M4 assembly. No infrastructure, credential or VM side effects."""
 import copy
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -41,6 +42,29 @@ def render(inventory, aggregator_config, config, aggregator_image, ingestion_ima
     result["items"] += [obj("v1", "ServiceAccount", account, automountServiceAccountToken=False), obj("rbac.authorization.k8s.io/v1", "Role", account, rules=[{"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]}]), obj("rbac.authorization.k8s.io/v1", "RoleBinding", account, subjects=[{"kind": "ServiceAccount", "name": account, "namespace": ns}], roleRef={"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": account})]
     raw_schema = (Path(__file__).resolve().parent.parent / "docs/fixtures/raw-input-v1.avsc").read_text(encoding="utf-8")
     result["items"].append(obj("v1", "ConfigMap", cluster + "-raw-schema", data={"raw-input.avsc": raw_schema}))
+    if "wildfire" in config:
+        wildfire = config["wildfire"]
+        require(isinstance(wildfire, dict), "wildfire requires explicit normalized processor inputs")
+        config_text, province_text = wildfire.get("config_json"), wildfire.get("province_json")
+        require(isinstance(config_text, str) and isinstance(province_text, str), "wildfire config_json/province_json must preserve UTF-8 contents")
+        require(len(config_text.encode("utf-8")) <= 1 << 20 and len(province_text.encode("utf-8")) <= 1 << 20, "wildfire configuration exceeds bounded startup inputs")
+        processor = json.loads(config_text)
+        require(processor.get("version") == 1 and processor.get("algorithm_version") == 2, "wildfire requires algorithm version 2")
+        require(processor.get("namespace") == config["satellite_namespace"] and processor.get("initial_offset") == config["satellite_initial_offset"], "wildfire must match the configured satellite history")
+        require(type(processor.get("allowed_lateness_seconds")) is int and processor["allowed_lateness_seconds"] >= 0, "fixed explicit wildfire lateness required")
+        for key in ("page_rows", "cache_bytes", "staging_bytes", "prepared_bytes"):
+            require(type(processor.get(key)) is int and processor[key] > 0, "explicit wildfire execution budgets required")
+        require(processor["page_rows"] <= 1000 and processor["cache_bytes"] >= 4096 and processor["staging_bytes"] >= 4096 and 1024 <= processor["prepared_bytes"] <= processor["cache_bytes"] // 4 and processor["page_rows"] <= processor["cache_bytes"] // 256, "wildfire execution budgets are incompatible")
+        require(hashlib.sha256(province_text.encode("utf-8")).hexdigest() == processor.get("province_sha256"), "wildfire province checksum mismatch")
+        require(isinstance(json.loads(province_text), list) and json.loads(province_text), "immutable province table required")
+        processor["province_file"] = "provinces.json"
+        encoded = json.dumps(processor, ensure_ascii=False, separators=(",", ":"))
+        identity = hashlib.sha256((encoded + "\0" + province_text).encode("utf-8")).hexdigest()[:12]
+        name = cluster + "-wildfire-" + identity
+        result["items"].append(obj("v1", "ConfigMap", name, immutable=True, data={"config.json": encoded, "provinces.json": province_text}))
+        pod["volumes"].append({"name": "wildfire", "configMap": {"name": name}})
+        container["volumeMounts"].append({"name": "wildfire", "mountPath": "/etc/wildfire", "readOnly": True})
+        container["env"] += values({"WILDFIRE_PROCESSOR_ENABLED": "true", "WILDFIRE_PROCESSOR_CONFIG": "/etc/wildfire/config.json"})
     owned = copy.deepcopy(pod)
     owned.pop("serviceAccountName", None)
     owned["volumes"] = [{"name": "durability", "configMap": {"name": config["ingestion_durability_configmap"]}}, {"name": "raw-schema", "configMap": {"name": cluster + "-raw-schema"}}, {"name": "tmp", "emptyDir": {"sizeLimit": "16Mi"}}]

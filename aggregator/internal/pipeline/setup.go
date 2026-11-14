@@ -7,6 +7,7 @@ import (
 	"aggregator/internal/platform"
 	"aggregator/internal/rawinput"
 	"aggregator/internal/store"
+	"aggregator/internal/wildfireprocessor"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -27,11 +28,18 @@ type Session struct {
 	Initial   int64  `json:"initial_offset"`
 }
 
-func Start(parent context.Context, st *store.Store, registry *avrowire.Client, r *gin.Engine, readers map[string]*avrowire.SourceReader, logger *slog.Logger) (func(), error) {
+func Start(parent context.Context, st *store.Store, registry *avrowire.Client, r *gin.Engine, readers map[string]*avrowire.SourceReader, logger *slog.Logger, wildfireEngines ...*wildfireprocessor.Engine) (func(), error) {
+	var wildfireEngine *wildfireprocessor.Engine
+	if len(wildfireEngines) > 0 {
+		wildfireEngine = wildfireEngines[0]
+	}
 	enabled := platform.Bool("RAW_PIPELINE_ENABLED", false)
 	history := platform.Bool("SATELLITE_HISTORY_ENABLED", false)
 	noop := func() {}
 	if !enabled && !history {
+		if wildfireEngine != nil {
+			return nil, fmt.Errorf("wildfire processor requires the raw pipeline")
+		}
 		return noop, nil
 	}
 	if st.Processor == nil || st.Canonical.Durability == nil {
@@ -73,7 +81,21 @@ func Start(parent context.Context, st *store.Store, registry *avrowire.Client, r
 		rawinput.HTTP{Repository: st, Token: token}.Register(r)
 	}
 	if !enabled {
+		if wildfireEngine != nil {
+			return nil, fmt.Errorf("wildfire processor requires active raw consumption")
+		}
 		return noop, nil
+	}
+	if wildfireEngine != nil {
+		configured := false
+		for _, session := range sessions {
+			if session.Source == "SATELIT" && session.Namespace == wildfireEngine.Config.Namespace && session.Initial == *wildfireEngine.Config.InitialOffset {
+				configured = true
+			}
+		}
+		if !configured {
+			return nil, fmt.Errorf("wildfire configuration must match the configured satellite history session")
+		}
 	}
 	if sources["BMKG"] && !platform.Bool("BMKG_RAW_ENABLED", false) {
 		return nil, fmt.Errorf("raw BMKG requires disabling legacy BMKG through BMKG_RAW_ENABLED")
@@ -109,7 +131,7 @@ func Start(parent context.Context, st *store.Store, registry *avrowire.Client, r
 		wg.Add(1)
 		go func(session Session) {
 			defer wg.Done()
-			w := &Worker{Store: st, Registry: registry, Reader: reader, Readers: readers, Processor: processor, Delivery: delivery, JS: js, Logger: logger}
+			w := &Worker{Store: st, Registry: registry, Reader: reader, Readers: readers, Processor: processor, Delivery: delivery, JS: js, Logger: logger, Wildfire: wildfireEngine}
 			w.Run(ctx, session.Source, session.Namespace)
 		}(session)
 	}

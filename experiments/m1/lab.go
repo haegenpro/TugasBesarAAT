@@ -123,7 +123,7 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 	}
 	// Three 1-GiB DB limits plus 128-MiB etcd members and 256 MiB VM headroom.
 	need := uint64(3456 << 20)
-	if suite != "core" && suite != "m2" && suite != "m4" {
+	if suite != "core" && suite != "m2" && suite != "m4" && !wildfireSuite(suite) {
 		need = 3712 << 20
 	}
 	if suite == "m3" {
@@ -156,11 +156,11 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
-	for _, s := range []string{"core", "ha", "m3", "m4"} {
-		if suite == "all" && (s == "m3" || s == "m4") {
+	for _, s := range []string{"core", "ha", "m3", "m4", "wildfire"} {
+		if suite == "all" && (s == "m3" || s == "m4" || s == "wildfire") {
 			continue
 		}
-		if suite != "all" && suite != s && !(suite == "m2" && s == "core") {
+		if suite != "all" && suite != s && !(suite == "m2" && s == "core") && !(wildfireSuite(suite) && s == "wildfire") {
 			continue
 		}
 		lab := newLab(root, "doctor", s, "doctor-only", "role1-m1-doctor", nil)
@@ -495,7 +495,11 @@ func (l *Lab) stop(ctx context.Context) error {
 	return err // Deliberately no --volumes.
 }
 func (l *Lab) result(ctx context.Context, name string, fn func(context.Context, map[string]any) error) {
-	caseCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	budget := 3 * time.Minute
+	if wildfireSuite(l.Suite) {
+		budget = 12 * time.Minute
+	}
+	caseCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	details := map[string]any{}
 	start := time.Now()
@@ -561,6 +565,12 @@ func runLab(ctx context.Context, root, suite string) error {
 	if suite != "all" {
 		suites = []string{suite}
 	}
+	if suite == "wildfire" {
+		// Each scenario group gets fresh owned containers/volumes. This bounds
+		// accumulated per-database maintenance resources without deleting evidence
+		// or altering engine/database capacity on the shared development machine.
+		suites = []string{"wildfire-replay", "wildfire-late", "wildfire-replies", "wildfire-crashes", "wildfire-history", "wildfire-boundaries", "wildfire-migrations"}
+	}
 	for _, s := range suites {
 		if ctx.Err() != nil {
 			report.Results = append(report.Results, Result{Name: s + "_startup", Status: "blocked", Error: ctx.Err().Error()})
@@ -572,7 +582,7 @@ func runLab(ctx context.Context, root, suite string) error {
 			report.Results = append(report.Results, Result{Name: s + "_startup", Status: "blocked", Error: errString(err)})
 		} else if s == "m2" {
 			lab.result(ctx, "m2_write_core", lab.m2)
-		} else if s == "m3" || s == "m4" {
+		} else if s == "m3" || s == "m4" || wildfireSuite(s) {
 			lab.result(ctx, s+"_component_integration", lab.m34)
 		} else if s == "core" {
 			lab.runCore(ctx)
@@ -603,7 +613,7 @@ func downRun(ctx context.Context, root, id string) error {
 	if !runPattern.MatchString(id) {
 		return errors.New("down requires the exact --run ID printed by run")
 	}
-	for _, suite := range []string{"core", "ha", "m2", "m3", "m4"} {
+	for _, suite := range []string{"core", "ha", "m2", "m3", "m4", "wildfire", "wildfire-replay", "wildfire-late", "wildfire-replies", "wildfire-crashes", "wildfire-history", "wildfire-boundaries", "wildfire-migrations"} {
 		l := newLab(root, id, suite, "", "", nil)
 		data, err := os.ReadFile(filepath.Join(l.Dir, "compose.json"))
 		if os.IsNotExist(err) {

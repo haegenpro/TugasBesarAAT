@@ -210,10 +210,30 @@ type sample struct {
 var mu sync.Mutex
 var requests = map[string]*sample{}
 var gauges = map[string]float64{}
+var observations = map[string]*sample{}
 var bounds = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 5}
 
 func Gauge(name string, value float64) { mu.Lock(); defer mu.Unlock(); gauges[name] = value }
 func Add(name string, value float64)   { mu.Lock(); defer mu.Unlock(); gauges[name] += value }
+
+// Observe records bounded-label application latency histograms. Names are
+// internal constants, never source identities or request-controlled labels.
+func Observe(name string, value float64) {
+	mu.Lock()
+	defer mu.Unlock()
+	s := observations[name]
+	if s == nil {
+		s = &sample{}
+		observations[name] = s
+	}
+	s.Count++
+	s.Sum += value
+	for i, b := range bounds {
+		if value <= b {
+			s.Buckets[i]++
+		}
+	}
+}
 func Metrics(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -227,6 +247,13 @@ func Metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	for n, v := range gauges {
 		fmt.Fprintf(w, "app_%s %g\n", n, v)
+	}
+	for n, s := range observations {
+		fmt.Fprintf(w, "app_%s_sum %g\napp_%s_count %d\n", n, s.Sum, n, s.Count)
+		for i, b := range bounds {
+			fmt.Fprintf(w, "app_%s_bucket{le=%q} %d\n", n, strconv.FormatFloat(b, 'g', -1, 64), s.Buckets[i])
+		}
+		fmt.Fprintf(w, "app_%s_bucket{le=\"+Inf\"} %d\n", n, s.Count)
 	}
 }
 
