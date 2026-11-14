@@ -42,6 +42,9 @@ func (s Signer) Encode(p Position) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b) + "." + base64.RawURLEncoding.EncodeToString(h.Sum(nil)), nil
 }
 func (s Signer) Decode(token, endpoint, scope, filters string) (Position, error) {
+	return s.DecodeSnapshot(token, endpoint, scope, filters, nil)
+}
+func (s Signer) DecodeSnapshot(token, endpoint, scope, filters string, snapshot *string) (Position, error) {
 	var p Position
 	bad := fmt.Errorf("invalid cursor")
 	if !s.Valid() {
@@ -67,7 +70,7 @@ func (s Signer) Decode(token, endpoint, scope, filters string) (Position, error)
 	if !hmac.Equal(sig, h.Sum(nil)) {
 		return p, bad
 	}
-	if err = canonical.Decode(bytes.NewReader(b), &p); err != nil || p.Version != 1 || p.Endpoint != endpoint || p.Scope != scope || p.Filters != filters || p.Snapshot != nil {
+	if err = canonical.Decode(bytes.NewReader(b), &p); err != nil || p.Version != 1 || p.Endpoint != endpoint || p.Scope != scope || p.Filters != filters || (p.Snapshot == nil) != (snapshot == nil) || (p.Snapshot != nil && *p.Snapshot != *snapshot) {
 		return Position{}, bad
 	}
 	return p, nil

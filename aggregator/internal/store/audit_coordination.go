@@ -315,7 +315,7 @@ func (s *Store) TouchSnapshot(ctx context.Context, id string) error {
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	if err = s.Canonical.Durability.Prepare(ctx, tx); err != nil {
+	if err = s.prepareSnapshotMetadata(ctx, tx); err != nil {
 		return err
 	}
 	result, err := tx.Exec(ctx, `UPDATE platform_audit_captures SET idle_expires_at=LEAST(clock_timestamp()+interval '15 minutes',absolute_expires_at)
@@ -329,7 +329,7 @@ func (s *Store) TouchSnapshot(ctx context.Context, id string) error {
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
-	return s.confirmCapture(ctx, id, "ready")
+	return s.confirmSnapshotMetadata(ctx, id)
 }
 
 // ProtectSnapshotRead holds metadata protection through the caller's frozen-row
@@ -340,7 +340,7 @@ func (s *Store) ProtectSnapshotRead(ctx context.Context, tx pgx.Tx, id string) e
 	if s.Canonical.Durability == nil {
 		return canonical.Unavailable()
 	}
-	if err := s.Canonical.Durability.Prepare(ctx, tx); err != nil {
+	if err := s.prepareSnapshotMetadata(ctx, tx); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, "SET LOCAL idle_in_transaction_session_timeout='2s'; SET LOCAL statement_timeout='2s'"); err != nil {

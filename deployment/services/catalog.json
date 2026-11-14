@@ -206,6 +206,7 @@
       },
       "environment": {
         "CLIENT_API_PORT": "8080",
+        "ANALYTICS_ENABLED": "false",
         "AUTH_BASE_URL": "http://auth-service:8083",
         "AGGREGATOR_BASE_URL": "http://aggregator:8080",
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",

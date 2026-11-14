@@ -8,6 +8,17 @@ from storage_lib import plan
 ROOT=Path(__file__).resolve().parent.parent
 
 class Role1RendererTests(unittest.TestCase):
+    def test_optional_analytics_and_snapshot_configuration(self):
+        config=copy.deepcopy(self.config)
+        config.update(analytics_enabled=True,audit_sessions_enabled=True)
+        result=render(self.inventory,self.aggregator,config,self.image,self.image)
+        aggregator=next(v for v in result['items'] if v['kind']=='Deployment' and v['spec']['template']['spec']['containers'][0]['name']!='ingestion')
+        container=aggregator['spec']['template']['spec']['containers'][0]
+        env={v['name']:v for v in container['env']}
+        self.assertEqual(env['ANALYTICS_ENABLED']['value'],'true')
+        self.assertEqual(env['AUDIT_SESSIONS_ENABLED']['value'],'true')
+        self.assertIn('valueFrom',env['ANALYTICS_SERVICE_TOKEN'])
+        self.assertEqual(container['resources']['limits']['memory'],'512Mi')
     def setUp(self):
         self.inventory=json.loads((ROOT/'deployment/platform/inventory.example.json').read_text())
         self.aggregator=json.loads((ROOT/'deployment/aggregator/config.example.json').read_text())

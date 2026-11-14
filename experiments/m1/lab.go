@@ -123,7 +123,7 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 	}
 	// Three 1-GiB DB limits plus 128-MiB etcd members and 256 MiB VM headroom.
 	need := uint64(3456 << 20)
-	if suite != "core" && suite != "m2" && suite != "m4" && !wildfireSuite(suite) {
+	if suite != "core" && suite != "m2" && suite != "m4" && suite != "audit-analytics" && !wildfireSuite(suite) {
 		need = 3712 << 20
 	}
 	if suite == "m3" {
@@ -160,7 +160,7 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 		if suite == "all" && (s == "m3" || s == "m4" || s == "wildfire") {
 			continue
 		}
-		if suite != "all" && suite != s && !(suite == "m2" && s == "core") && !(wildfireSuite(suite) && s == "wildfire") {
+		if suite != "all" && suite != s && !(suite == "m2" && s == "core") && !(suite == "audit-analytics" && s == "m4") && !(wildfireSuite(suite) && s == "wildfire") {
 			continue
 		}
 		lab := newLab(root, "doctor", s, "doctor-only", "role1-m1-doctor", nil)
@@ -582,7 +582,7 @@ func runLab(ctx context.Context, root, suite string) error {
 			report.Results = append(report.Results, Result{Name: s + "_startup", Status: "blocked", Error: errString(err)})
 		} else if s == "m2" {
 			lab.result(ctx, "m2_write_core", lab.m2)
-		} else if s == "m3" || s == "m4" || wildfireSuite(s) {
+		} else if s == "m3" || s == "m4" || s == "audit-analytics" || wildfireSuite(s) {
 			lab.result(ctx, s+"_component_integration", lab.m34)
 		} else if s == "core" {
 			lab.runCore(ctx)
@@ -613,7 +613,7 @@ func downRun(ctx context.Context, root, id string) error {
 	if !runPattern.MatchString(id) {
 		return errors.New("down requires the exact --run ID printed by run")
 	}
-	for _, suite := range []string{"core", "ha", "m2", "m3", "m4", "wildfire", "wildfire-replay", "wildfire-late", "wildfire-replies", "wildfire-crashes", "wildfire-history", "wildfire-boundaries", "wildfire-migrations"} {
+	for _, suite := range []string{"core", "ha", "m2", "m3", "m4", "audit-analytics", "wildfire", "wildfire-replay", "wildfire-late", "wildfire-replies", "wildfire-crashes", "wildfire-history", "wildfire-boundaries", "wildfire-migrations"} {
 		l := newLab(root, id, suite, "", "", nil)
 		data, err := os.ReadFile(filepath.Join(l.Dir, "compose.json"))
 		if os.IsNotExist(err) {

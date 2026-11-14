@@ -13,6 +13,8 @@ import (
 )
 
 type config struct {
+	AnalyticsEnabled     bool
+	AnalyticsToken       string
 	Port                 string
 	AuthURL              string
 	AggregatorURL        string
@@ -46,6 +48,14 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 	cfg := config{Port: v["CLIENT_API_PORT"], AuthURL: v["AUTH_BASE_URL"], AggregatorURL: v["AGGREGATOR_BASE_URL"], AuthInternalKey: v["AUTH_INTERNAL_KEY"], MaxInFlight: maxInFlight, MaxInFlightPerClient: perClient}
+	if raw := os.Getenv("ANALYTICS_ENABLED"); raw != "" && raw != "true" && raw != "false" {
+		return config{}, fmt.Errorf("invalid ANALYTICS_ENABLED")
+	}
+	cfg.AnalyticsEnabled = os.Getenv("ANALYTICS_ENABLED") == "true"
+	cfg.AnalyticsToken = os.Getenv("ANALYTICS_SERVICE_TOKEN")
+	if cfg.AnalyticsEnabled && (cfg.AnalyticsToken == "" || cfg.AnalyticsToken == cfg.AuthInternalKey) {
+		return config{}, fmt.Errorf("dedicated ANALYTICS_SERVICE_TOKEN required")
+	}
 	if raw := os.Getenv("CLIENT_API_PRIORITY_ENABLED"); raw != "" && raw != "false" && raw != "true" {
 		return config{}, fmt.Errorf("CLIENT_API_PRIORITY_ENABLED must be true or false")
 	}

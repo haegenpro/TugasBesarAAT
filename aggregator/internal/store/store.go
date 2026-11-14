@@ -31,6 +31,8 @@ type Store struct {
 	Acquisition            Fence
 	Processor              Fence
 	idleTransactionTimeout time.Duration
+	analytics              *analyticsState
+	snapshots              *snapshotService
 }
 
 func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, error) {

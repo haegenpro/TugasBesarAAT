@@ -1,6 +1,7 @@
 package main
 
 import (
+	"aggregator/internal/analytics"
 	"aggregator/internal/platform"
 	"context"
 	"log/slog"
@@ -198,6 +199,47 @@ func main() {
 		os.Exit(1)
 	}
 	defer stopPipeline()
+	analyticsEnabled := platform.Bool("ANALYTICS_ENABLED", false)
+	sessionsEnabled := platform.Bool("AUDIT_SESSIONS_ENABLED", false)
+	if sessionsEnabled && !platform.Bool("AUDIT_ENABLED", false) {
+		logger.Error("audit sessions require AUDIT_ENABLED")
+		os.Exit(1)
+	}
+	if platform.Bool("AUDIT_ENABLED", false) || analyticsEnabled {
+		if err = st.ConfigureLiveReads([]byte(os.Getenv("AUDIT_CURSOR_KEY"))); err != nil {
+			logger.Error("invalid authoritative read configuration", "error", err)
+			os.Exit(1)
+		}
+	}
+	var stopSnapshots func()
+	if sessionsEnabled {
+		stopSnapshots, err = st.ConfigureSnapshots(ctx)
+		if err != nil {
+			logger.Error("invalid snapshot configuration", "error", err)
+			os.Exit(1)
+		}
+		defer stopSnapshots()
+	}
+	if analyticsEnabled {
+		token := os.Getenv("ANALYTICS_SERVICE_TOKEN")
+		if token == "" {
+			logger.Error("ANALYTICS_SERVICE_TOKEN required")
+			os.Exit(1)
+		}
+		for _, key := range []string{"AUDIT_TOKEN", "CANONICAL_SERVICE_TOKEN", "PROCESSOR_SERVICE_TOKEN", "INGESTION_SERVICE_TOKEN", "HISTORY_SERVICE_TOKEN", "AGGREGATOR_ADMIN_TOKEN", "AUTH_INTERNAL_KEY", "BMKG_API_KEY", "PVMBG_TOKEN"} {
+			if token == os.Getenv(key) {
+				logger.Error("dedicated analytics service credential required")
+				os.Exit(1)
+			}
+		}
+		closeAnalytics, e := st.ConfigureAnalytics(ctx)
+		if e != nil {
+			logger.Error("invalid analytics configuration", "error", e)
+			os.Exit(1)
+		}
+		defer closeAnalytics()
+		analytics.HTTP{Repository: st, Token: token}.Register(router)
+	}
 	if platform.Bool("AUDIT_ENABLED", false) {
 		token := os.Getenv("AUDIT_TOKEN")
 		if token == "" {
@@ -210,11 +252,11 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		if err = st.ConfigureLiveReads([]byte(os.Getenv("AUDIT_CURSOR_KEY"))); err != nil {
-			logger.Error("invalid audit read configuration", "error", err)
-			os.Exit(1)
+		adapter := audit.HTTP{Repository: st, Token: token, Signer: st.Reads.Signer, IngestionURL: os.Getenv("INGESTION_BASE_URL"), IngestionToken: os.Getenv("INGESTION_SERVICE_TOKEN"), Client: platform.Client(2 * time.Second)}
+		if sessionsEnabled {
+			adapter.Sessions = st
 		}
-		audit.HTTP{Repository: st, Token: token, Signer: st.Reads.Signer, IngestionURL: os.Getenv("INGESTION_BASE_URL"), IngestionToken: os.Getenv("INGESTION_SERVICE_TOKEN"), Client: platform.Client(2 * time.Second)}.Register(router)
+		adapter.Register(router)
 		st.RegisterLegacyFailures(router, os.Getenv("INGESTION_SERVICE_TOKEN"))
 	}
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("aggregator", router)}

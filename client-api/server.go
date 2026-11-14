@@ -30,6 +30,10 @@ func (a *api) router() *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "client-api"})
 	})
 	r.GET("/ready", a.ready)
+	if a.cfg.AnalyticsEnabled {
+		r.GET("/analytics", a.analyticsAsset)
+		r.GET("/analytics/assets/:file", a.analyticsAsset)
+	}
 	limited := r.Group("/", limitInFlight(a.cfg.MaxInFlight, a.log))
 	if a.cfg.PriorityEnabled {
 		limited = r.Group("/", limitInFlight(a.cfg.AuthMaxInFlight, a.log))
@@ -46,6 +50,9 @@ func (a *api) router() *gin.Engine {
 	protected.GET("/hazards/:id", a.getHazard)
 	protected.GET("/notices", a.listNotices)
 	protected.GET("/notices/:id", a.getNotice)
+	if a.cfg.AnalyticsEnabled {
+		protected.GET("/analytics/summary", a.analyticsSummary)
+	}
 	return r
 }
 

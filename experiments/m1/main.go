@@ -26,7 +26,7 @@ func main() {
 
 func dispatch(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("use doctor, run --suite core|ha|m2|m3|m4|wildfire|all, or down --run RUN_ID")
+		return errors.New("use doctor, run --suite core|ha|m2|m3|m4|wildfire|audit-analytics|all, or down --run RUN_ID")
 	}
 	if args[0] == "_hold-gate" {
 		return holdGate(ctx)
@@ -40,7 +40,7 @@ func dispatch(ctx context.Context, args []string) error {
 		return errors.New("run from experiments/m1 (go -C experiments/m1 run . ...)")
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	suite := fs.String("suite", "all", "core, ha, m2, m3, m4, wildfire, named wildfire scenario group, or all; suites run sequentially")
+	suite := fs.String("suite", "all", "core, ha, m2, m3, m4, wildfire, audit-analytics, named wildfire scenario group, or all; suites run sequentially")
 	runID := fs.String("run", "", "run ID for down; volumes are retained")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
@@ -67,7 +67,7 @@ func dispatch(ctx context.Context, args []string) error {
 }
 
 func validSuite(s string) bool {
-	return s == "all" || s == "core" || s == "ha" || s == "m2" || s == "m3" || s == "m4" || wildfireSuite(s)
+	return s == "all" || s == "core" || s == "ha" || s == "m2" || s == "m3" || s == "m4" || s == "audit-analytics" || wildfireSuite(s)
 }
 
 func wildfireSuite(s string) bool {

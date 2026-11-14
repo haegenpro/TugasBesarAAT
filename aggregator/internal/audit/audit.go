@@ -11,11 +11,12 @@ import (
 )
 
 type Query struct {
-	Source string
-	Since  time.Time
-	Limit  int
-	After  pagecursor.Position
-	Scope  string
+	Snapshot string
+	Source   string
+	Since    time.Time
+	Limit    int
+	After    pagecursor.Position
+	Scope    string
 }
 
 func (q Query) Filters() string { return q.Source + "|" + q.Since.UTC().Format(time.RFC3339Nano) }

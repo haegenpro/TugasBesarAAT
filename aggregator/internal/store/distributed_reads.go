@@ -35,6 +35,7 @@ type readShard struct {
 	ID    int64
 	Group int
 	Table string
+	pool  *pgxpool.Pool // Request-owned verified frozen-copy reader; never HTTP selected.
 }
 type readSpec struct {
 	Source                            string

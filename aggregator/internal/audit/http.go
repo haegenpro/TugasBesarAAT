@@ -18,6 +18,7 @@ import (
 )
 
 type HTTP struct {
+	Sessions                     Sessions
 	Repository                   Repository
 	Token                        string
 	Signer                       pagecursor.Signer
@@ -26,6 +27,10 @@ type HTTP struct {
 }
 
 func (h HTTP) Register(r gin.IRoutes) {
+	if h.Sessions != nil {
+		r.POST("/internal/audit/snapshots", h.createSnapshot)
+		r.GET("/internal/audit/snapshots/:snapshot_id", h.snapshotStatus)
+	}
 	r.GET("/internal/audit/events", h.events)
 	r.GET("/internal/audit/checksum", h.checksum)
 	r.GET("/internal/audit/location", h.location)
@@ -65,7 +70,7 @@ func source(c *gin.Context) (string, bool) {
 	return s, true
 }
 func (h HTTP) events(c *gin.Context) {
-	if !h.authorized(c) || !parameters(c, "source", "since", "limit", "cursor") {
+	if !h.authorized(c) || !parameters(c, "source", "since", "limit", "cursor", "snapshot_id") {
 		return
 	}
 	s, ok := source(c)
@@ -73,6 +78,20 @@ func (h HTTP) events(c *gin.Context) {
 		return
 	}
 	q := Query{Source: s, Limit: 100, Scope: "audit"}
+	var snapshot *string
+	if v, present := c.Request.URL.Query()["snapshot_id"]; present {
+		if h.Sessions == nil {
+			rawinput.Error(c, canonical.Fail(400, "bad_request", "sessions disabled"))
+			return
+		}
+		id, e := uuid.Parse(v[0])
+		if e != nil || id.String() != v[0] {
+			rawinput.Error(c, canonical.Fail(400, "bad_request", "invalid snapshot"))
+			return
+		}
+		q.Snapshot = id.String()
+		snapshot = &q.Snapshot
+	}
 	if v, present := c.Request.URL.Query()["since"]; present {
 		t, err := time.Parse(time.RFC3339Nano, v[0])
 		_, offset := t.Zone()
@@ -91,7 +110,7 @@ func (h HTTP) events(c *gin.Context) {
 		q.Limit = n
 	}
 	if v, present := c.Request.URL.Query()["cursor"]; present {
-		p, err := h.Signer.Decode(v[0], "audit/events", q.Scope, q.Filters())
+		p, err := h.Signer.DecodeSnapshot(v[0], "audit/events", q.Scope, q.Filters(), snapshot)
 		if err != nil {
 			rawinput.Error(c, canonical.Fail(400, "bad_request", "invalid cursor"))
 			return
@@ -106,7 +125,14 @@ func (h HTTP) events(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), canonical.Deadline)
 	defer cancel()
-	p, err := h.Repository.AuditEvents(ctx, q)
+	var p Page
+	var err error
+	if snapshot != nil {
+		p, err = h.Sessions.SnapshotEvents(ctx, q)
+		c.Header("X-Audit-Snapshot-ID", q.Snapshot)
+	} else {
+		p, err = h.Repository.AuditEvents(ctx, q)
+	}
 	if err != nil {
 		rawinput.Error(c, err)
 		return
@@ -114,7 +140,7 @@ func (h HTTP) events(c *gin.Context) {
 	c.JSON(200, p)
 }
 func (h HTTP) checksum(c *gin.Context) {
-	if !h.authorized(c) || !parameters(c, "source") {
+	if !h.authorized(c) || !parameters(c, "source", "snapshot_id") {
 		return
 	}
 	s, ok := source(c)
@@ -123,7 +149,19 @@ func (h HTTP) checksum(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), canonical.Deadline)
 	defer cancel()
-	v, err := h.Repository.AuditChecksum(ctx, s)
+	var v Checksum
+	var err error
+	if id, present := c.Request.URL.Query()["snapshot_id"]; present {
+		u, e := uuid.Parse(id[0])
+		if h.Sessions == nil || e != nil || u.String() != id[0] {
+			rawinput.Error(c, canonical.Fail(400, "bad_request", "invalid snapshot"))
+			return
+		}
+		v, err = h.Sessions.SnapshotChecksum(ctx, id[0], s)
+		c.Header("X-Audit-Snapshot-ID", id[0])
+	} else {
+		v, err = h.Repository.AuditChecksum(ctx, s)
+	}
 	if err != nil {
 		rawinput.Error(c, err)
 		return

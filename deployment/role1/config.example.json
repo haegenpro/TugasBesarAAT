@@ -1,5 +1,7 @@
 {
   "version": 1,
+  "analytics_enabled": false,
+  "audit_sessions_enabled": false,
   "bmkg_namespace": "synthetic-bmkg-integration-v1",
   "bmkg_initial_offset": 1,
   "satellite_namespace": "synthetic-satellite-integration-v1",

@@ -22,6 +22,13 @@ func (l *Lab) m34(ctx context.Context, d map[string]any) error {
 		pattern = "^(TestM3|TestM2Migrations|TestM2InterruptedDistributedCommit|TestM2RecoveryAndPublicationFence)"
 	}
 	args := []string{"-C", filepath.Join(root, "aggregator"), "test", "-mod=readonly", "-count=1", "-p=1", "-timeout=180s", "-v", "./internal/store", "./internal/ingestion", "./internal/pipeline", "-run", pattern}
+	if l.Suite == "audit-analytics" {
+		pattern = "^(TestM8|TestM9|TestPlatformAudit)"
+		if selected := os.Getenv("M89_TEST_FILTER"); selected != "" {
+			pattern = selected
+		}
+		args = []string{"-C", filepath.Join(root, "aggregator"), "test", "-mod=readonly", "-count=1", "-p=1", "-timeout=240s", "-v", "./internal/store", "-run", pattern}
+	}
 	if wildfireSuite(l.Suite) {
 		pattern = map[string]string{
 			"wildfire-replay":     "^(TestM6DurableReplay|TestM6Normalized|TestM6Configuration)",
@@ -63,10 +70,16 @@ func (l *Lab) m34(ctx context.Context, d map[string]any) error {
 	err := command.Run()
 	redacted := strings.ReplaceAll(string(output.b), l.Password, "[redacted]")
 	_ = os.WriteFile(filepath.Join(l.Dir, l.Suite+"-tests.log"), []byte(redacted), 0600)
+	if l.Suite == "audit-analytics" && !strings.Contains(redacted, "=== RUN   Test") {
+		return fmt.Errorf("no requested audit/analytics test executed")
+	}
 	if wildfireSuite(l.Suite) && !strings.Contains(redacted, "=== RUN   TestM6") {
 		return fmt.Errorf("requested wildfire scenarios did not execute; inspect test log")
 	}
 	d["command"] = "go -C aggregator test -mod=readonly -count=1 -p=1 -timeout=180s -v ./internal/store ./internal/ingestion ./internal/pipeline -run " + pattern
+	if l.Suite == "audit-analytics" {
+		d["command"] = "go -C aggregator " + strings.Join(args[2:], " ")
+	}
 	if wildfireSuite(l.Suite) {
 		d["command"] = "go -C aggregator " + strings.Join(args[2:], " ")
 	}

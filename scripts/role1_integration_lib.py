@@ -29,6 +29,13 @@ def render(inventory, aggregator_config, config, aggregator_image, ingestion_ima
     deployment = next(x for x in result["items"] if x["kind"] == "Deployment")
     pod = deployment["spec"]["template"]["spec"]
     container = pod["containers"][0]
+    for feature in ("analytics_enabled", "audit_sessions_enabled"):
+        require(type(config.get(feature, False)) is bool, feature + " must be boolean")
+    if config.get("analytics_enabled", False):
+        container["env"] += values({"ANALYTICS_ENABLED": "true"})
+        container["env"].append(secret_env("ANALYTICS_SERVICE_TOKEN", config["runtime_secret"]))
+    if config.get("audit_sessions_enabled", False):
+        container["env"] += values({"AUDIT_SESSIONS_ENABLED": "true"})
     sessions = [{"source": source, "namespace": config[name + "_namespace"], "initial_offset": config[name + "_initial_offset"]} for source, name in (("BMKG", "bmkg"), ("SATELIT", "satellite"))]
     container["env"] += values({"BMKG_RAW_ENABLED": "true", "RAW_PIPELINE_ENABLED": "true", "SATELLITE_HISTORY_ENABLED": "true", "RAW_INPUT_SESSIONS": json.dumps(sessions, separators=(",", ":")), "RAW_INPUT_SCHEMA": "/etc/role1/raw-input.avsc", "INPUT_PAYLOAD_QUOTA_BYTES": config["payload_quota_bytes"], "INGESTION_BASE_URL": "http://ingestion:8080", "AUDIT_ENABLED": "true"})
     for key in ("HISTORY_SERVICE_TOKEN", "INGESTION_SERVICE_TOKEN", "AUDIT_TOKEN", "AUDIT_CURSOR_KEY"):
