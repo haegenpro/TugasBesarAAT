@@ -21,6 +21,7 @@ import (
 )
 
 type output struct {
+	Version                int
 	Position, Count, Bytes int64
 	ID                     string
 	Digest                 *string
@@ -111,7 +112,7 @@ func (e *Engine) executable(ctx context.Context, o output) ([]byte, error) {
 	return json.Marshal(mutations)
 }
 
-func (e *Engine) seal(ctx context.Context, owner canonical.Ownership, o output) (bool, error) {
+func (e *Engine) sealLegacy(ctx context.Context, owner canonical.Ownership, o output) (bool, error) {
 	body, err := e.executable(ctx, o)
 	if err != nil {
 		return false, err
@@ -150,7 +151,9 @@ func (e *Engine) seal(ctx context.Context, owner canonical.Ownership, o output) 
 	if bytes+int64(len(body)) > e.Config.StagingBytes {
 		return false, &Pending{"sealed output staging quota"}
 	}
-	end := min(chunks, cursor+e.Config.PageRows)
+	// A pre-upgrade partial seal retains its original complete-body digest.
+	// Convert its bounded remaining body once, instead of rebuilding per page.
+	end := chunks
 	for i := cursor; i < end; i++ {
 		b := body[i*(64<<10) : min(len(body), (i+1)*(64<<10))]
 		key := strconv.FormatInt(o.Position, 10) + ":" + strconv.Itoa(i)
@@ -199,7 +202,7 @@ func (e *Engine) StepDelivery(ctx context.Context, processor, delivery canonical
 		return false, nil
 	}
 	o := output{Position: applied + 1}
-	err := e.Store.Pool.QueryRow(ctx, `SELECT batch_id,output_count,sealed,output_sha256,coalesce(output_bytes,0),coalesce(output_chunks,0),seal_cursor,topology FROM wildfire_jobs WHERE namespace=$1 AND position=$2 AND phase='active'`, e.Config.Namespace, o.Position).Scan(&o.ID, &o.Count, &o.Sealed, &o.Digest, &o.Bytes, &o.Chunks, &o.Cursor, &o.Topology)
+	err := e.Store.Pool.QueryRow(ctx, `SELECT batch_id,output_count,sealed,output_sha256,coalesce(output_bytes,0),coalesce(output_chunks,0),seal_cursor,topology,finalization_version FROM wildfire_jobs WHERE namespace=$1 AND position=$2 AND phase='active'`, e.Config.Namespace, o.Position).Scan(&o.ID, &o.Count, &o.Sealed, &o.Digest, &o.Bytes, &o.Chunks, &o.Cursor, &o.Topology, &o.Version)
 	if err != nil {
 		return false, err
 	}
@@ -212,7 +215,10 @@ func (e *Engine) StepDelivery(ctx context.Context, processor, delivery canonical
 	}
 	if o.Count > 0 {
 		if !o.Sealed {
-			return e.seal(ctx, processor, o)
+			if o.Version == 1 {
+				return e.sealLegacy(ctx, processor, o)
+			}
+			return e.sealPaged(ctx, processor, o)
 		}
 		if o.Digest == nil || o.Bytes < 1 || o.Bytes > e.Config.PreparedBytes {
 			return false, canonical.Unavailable()

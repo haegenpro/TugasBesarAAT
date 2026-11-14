@@ -45,6 +45,15 @@ func analyticsTestServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 			io.WriteString(w, `{"error":{"code":"temporarily_unavailable","message":"fixture storage paused"}}`)
 			return
 		}
+		if mode.Load() == 3 || mode.Load() == 4 {
+			status, code := 429, "overloaded"
+			if mode.Load() == 4 {
+				status, code = 503, "analytics_quota"
+			}
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": code, "message": "budget exceeded"}, "private_credential": "server-only-analytics"})
+			return
+		}
 		result := previewAnalytics(mode.Load() == 1)
 		if r.URL.Query().Get("interval") == "hour" {
 			result["filters"].(map[string]string)["interval"] = "hour"
@@ -107,6 +116,28 @@ func analyticsTestServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	server := httptest.NewServer(app.router())
 	t.Cleanup(server.Close)
 	return server, mode
+}
+
+func TestAnalyticsBudgetErrorsStayPrivate(t *testing.T) {
+	server, mode := analyticsTestServer(t)
+	for _, tc := range []struct {
+		mode   int32
+		status int
+		code   string
+	}{{3, 429, "overloaded"}, {4, 503, "analytics_quota"}} {
+		mode.Store(tc.mode)
+		req, _ := http.NewRequest("GET", server.URL+"/analytics/summary", nil)
+		req.Header.Set("Authorization", "Bearer fixture-access")
+		r, e := http.DefaultClient.Do(req)
+		if e != nil {
+			t.Fatal(e)
+		}
+		body, _ := io.ReadAll(r.Body)
+		r.Body.Close()
+		if r.StatusCode != tc.status || !strings.Contains(string(body), tc.code) || strings.Contains(string(body), "server-only-analytics") || strings.Contains(string(body), "private_credential") {
+			t.Fatalf("unsafe budget response: %d %s", r.StatusCode, body)
+		}
+	}
 }
 func TestAnalyticsAuthenticatedAggregateBoundary(t *testing.T) {
 	server, mode := analyticsTestServer(t)

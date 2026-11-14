@@ -14,10 +14,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"net/http"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 
 type Engine struct {
+	workingPeak atomic.Int64
 	Store       *store.Store
 	Config      Config
 	provinces   []wildfire.Province
@@ -26,11 +28,25 @@ type Engine struct {
 	Fault            func(context.Context, string) error
 	transactionFault func(context.Context, pgx.Tx) error
 }
+
+func (e *Engine) working(n int64) error {
+	if n > e.Config.CacheBytes {
+		return &Pending{"working cache quota"}
+	}
+	for {
+		old := e.workingPeak.Load()
+		if n <= old || e.workingPeak.CompareAndSwap(old, n) {
+			return nil
+		}
+	}
+}
+
 type Pending struct{ Reason string }
 
 func (p *Pending) Error() string { return "wildfire pending: " + p.Reason }
 
 type checkpoint struct {
+	Final                    *finalCursor
 	Old, New                 string
 	Targets                  []string
 	Target                   int
@@ -73,6 +89,11 @@ func New(s *store.Store, c Config) (*Engine, error) {
 	return &Engine{Store: s, Config: c, provinces: p, fingerprint: fp}, nil
 }
 func (e *Engine) Check(ctx context.Context) error {
+	for _, sql := range []string{`SELECT member_position,member_sha256,header_sha256 FROM wildfire_fire_versions LIMIT 0`, `SELECT member_key FROM wildfire_memberships LIMIT 0`, `SELECT related_id FROM wildfire_lineage LIMIT 0`, `SELECT charged_bytes FROM wildfire_finalize LIMIT 0`, `SELECT finalization_version,seal_after,seal_hash FROM wildfire_jobs LIMIT 0`} {
+		if _, err := e.Store.Pool.Exec(ctx, sql); err != nil {
+			return err
+		}
+	}
 	for _, sql := range []string{`SELECT config_sha256,prepared_through,applied_through FROM wildfire_runs LIMIT 0`, `SELECT phase,checkpoint,state_sha256,sealed FROM wildfire_jobs LIMIT 0`, `SELECT route_key,payload,sha256 FROM wildfire_state LIMIT 0`, `SELECT node_key,component,done FROM wildfire_work LIMIT 0`, `SELECT ordinal,payload,sha256 FROM wildfire_output_chunks LIMIT 0`} {
 		if _, err := e.Store.Pool.Exec(ctx, sql); err != nil {
 			return err
@@ -130,6 +151,9 @@ func (e *Engine) page(ctx context.Context, q queryer, kind string, pos int64, af
 		if bytes > e.Config.CacheBytes/2 {
 			return nil, &Pending{"page cache quota"}
 		}
+		if err = e.working(bytes); err != nil {
+			return nil, err
+		}
 		if rawinput.Hash(r.Payload) != hash {
 			return nil, fmt.Errorf("state integrity failed")
 		}
@@ -155,6 +179,9 @@ func (e *Engine) put(ctx context.Context, tx pgx.Tx, j *job, kind, key string, v
 	if tag.RowsAffected() > 0 {
 		j.Records++
 		j.Bytes += size
+		if f, ok := value.(wildfire.Fire); ok && kind == "fire" && f.Members != nil {
+			return e.indexLegacyFire(ctx, tx, j.Position, f)
+		}
 		return nil
 	}
 	err = tx.QueryRow(ctx, `SELECT sha256 FROM wildfire_state WHERE route_key=wildfire_route($1,$2,$3) AND namespace=$1 AND kind=$2 AND entity_key=$3 AND position=$4`, e.Config.Namespace, kind, key, j.Position).Scan(&old)
@@ -189,6 +216,9 @@ func (e *Engine) input(ctx context.Context, q queryer, pos int64) (rawinput.Enve
 	}
 	if int64(len(b)+len(payload)) > e.Config.CacheBytes/2 {
 		return env, wildfire.Operation{}, &Pending{"input cache quota"}
+	}
+	if err = e.working(int64(len(b) + len(payload))); err != nil {
+		return env, wildfire.Operation{}, err
 	}
 	if err = json.Unmarshal(b, &env); err != nil {
 		return env, wildfire.Operation{}, err
@@ -265,7 +295,7 @@ func (e *Engine) Step(ctx context.Context, owner canonical.Ownership) (worked bo
 		return false, nil
 	}
 	j := job{Position: prepared + 1, Phase: "start", Topology: topology, Clock: clock, Watermark: watermark}
-	_, err = tx.Exec(ctx, `INSERT INTO wildfire_jobs(namespace,position,phase,topology,batch_id) VALUES($1,$2,'start',$3,$4) ON CONFLICT DO NOTHING`, e.Config.Namespace, j.Position, topology, wildfire.BatchIdentity(e.Config.Namespace, j.Position))
+	_, err = tx.Exec(ctx, `INSERT INTO wildfire_jobs(namespace,position,phase,topology,batch_id,finalization_version) VALUES($1,$2,'start',$3,$4,2) ON CONFLICT DO NOTHING`, e.Config.Namespace, j.Position, topology, wildfire.BatchIdentity(e.Config.Namespace, j.Position))
 	if err != nil {
 		return false, err
 	}
@@ -303,7 +333,7 @@ func (e *Engine) Step(ctx context.Context, owner canonical.Ownership) (worked bo
 	case "graph":
 		err = e.graph(ctx, tx, &j)
 	case "resolve":
-		err = e.resolve(ctx, tx, &j)
+		err = e.finalize(ctx, tx, &j)
 	case "verify", "verify_nodes":
 		err = e.verify(ctx, tx, &j)
 	case "activate":
@@ -401,6 +431,14 @@ func (e *Engine) Fires(ctx context.Context, after string, limit int) ([]wildfire
 		var f wildfire.Fire
 		if err = json.Unmarshal(r.Payload, &f); err != nil {
 			return nil, err
+		}
+		if m, find := e.fireMeta(ctx, e.Store.Pool, r.Key, pos); find == nil {
+			f, err = e.completeFire(ctx, e.Store.Pool, m, pos)
+			if err != nil {
+				return nil, err
+			}
+		} else if find != pgx.ErrNoRows {
+			return nil, find
 		}
 		out = append(out, f)
 	}

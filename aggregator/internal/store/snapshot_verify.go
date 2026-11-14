@@ -78,7 +78,7 @@ func (s *Store) verifySnapshotPage(ctx context.Context, token CaptureToken, u *s
 	if next.Verified && (next.VerifyCount != u.Count || hex.EncodeToString(h.Sum(nil)) != u.Sum) {
 		return fmt.Errorf("snapshot destination count/digest mismatch")
 	}
-	tx, e := s.Pool.Begin(ctx)
+	tx, e := s.beginAuditDestination(ctx, "verification")
 	if e != nil {
 		return e
 	}
@@ -91,7 +91,11 @@ func (s *Store) verifySnapshotPage(ctx context.Context, token CaptureToken, u *s
 		return e
 	}
 	if e = tx.Commit(ctx); e != nil {
-		return canonical.Unavailable()
+		call, stop := context.WithTimeout(context.Background(), canonical.Deadline)
+		defer stop()
+		if s.confirmRecord(call, `SELECT EXISTS(SELECT 1 FROM audit_snapshot_units u JOIN platform_audit_captures c USING(capture_id) WHERE u.capture_id=$1 AND source_shard=$2 AND verify_count=$3 AND verify_hash=$4 AND verified=$5 AND verify_time IS NOT DISTINCT FROM $6::timestamptz AND verify_id IS NOT DISTINCT FROM $7::uuid AND c.epoch=$8 AND c.holder=$9 AND c.state='building' AND c.owner_expires_at>clock_timestamp() AND c.copy_deadline>clock_timestamp())`, token.ID, u.ID, next.VerifyCount, next.VerifyHash, next.Verified, next.VerifyTime, nullableID(next.VerifyID), token.Epoch, token.Holder) != nil {
+			return canonical.Unavailable()
+		}
 	}
 	*u = next
 	return nil

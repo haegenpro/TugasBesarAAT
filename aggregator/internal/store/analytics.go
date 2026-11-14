@@ -226,9 +226,8 @@ func (s *Store) AnalyticsSummary(ctx context.Context, q analytics.Query) (analyt
 		} else {
 			out.Freshness = map[string]any{"endpoints": freshness, "SATELIT": "policy_unavailable", "SENSOR_PANTAI": "policy_unavailable"}
 		}
-		body, e := json.Marshal(out)
-		if e != nil || len(body) > analytics.MaxResponse {
-			return canonical.Fail(503, "analytics_quota", "response budget exceeded")
+		if e = analyticsResponseBudget(out); e != nil {
+			return e
 		}
 		if release != nil {
 			return release(true)
@@ -245,6 +244,14 @@ func (s *Store) AnalyticsSummary(ctx context.Context, q analytics.Query) (analyt
 		return analytics.Result{}, err
 	}
 	return out, nil
+}
+
+func analyticsResponseBudget(out analytics.Result) error {
+	body, e := json.Marshal(out)
+	if e != nil || len(body) > analytics.MaxResponse {
+		return canonical.Fail(503, "analytics_quota", "response budget exceeded")
+	}
+	return nil
 }
 
 var _ analytics.Repository = (*Store)(nil)

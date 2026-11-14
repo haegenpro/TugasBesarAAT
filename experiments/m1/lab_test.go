@@ -136,6 +136,28 @@ func TestRunIDValidation(t *testing.T) {
 		t.Fatal("valid ID rejected")
 	}
 }
+
+func TestHardeningSelectorsKeepProfilesAndBudgets(t *testing.T) {
+	t.Setenv("M3_NATS_IMAGE", "example.invalid/nats@sha256:"+strings.Repeat("a", 64))
+	for _, suite := range []string{"input-faults", "audit-hardening", "snapshot-replies", "analytics-budgets", "wildfire-finalization"} {
+		if !validSuite(suite) || !hardeningSuite(suite) {
+			t.Fatal("missing named selector", suite)
+		}
+		l := newLab(t.TempDir(), "test", suite, "secret", "image", nil)
+		cfg := l.composeConfig()
+		services := cfg["services"].(map[string]any)
+		want := 4
+		if suite == "input-faults" {
+			want = 7
+		}
+		if len(services) != want {
+			t.Fatalf("%s: %d services, expected %d", suite, len(services), want)
+		}
+	}
+	if !validSuite("local-hardening") || validSuite("hardening-unknown") {
+		t.Fatal("invalid aggregate selection")
+	}
+}
 func TestCommandCancellation(t *testing.T) {
 	if len(os.Args) > 1 && os.Args[len(os.Args)-1] == "m1-helper-sleep" {
 		for {

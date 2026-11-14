@@ -15,11 +15,21 @@ import (
 )
 
 type InputOptions struct {
+	testBeforeCommit func(context.Context, string, pgx.Tx) error
 	// Explicitly configured sessions only. New namespace is never inferred from
 	// a caller or reconnect; the operator provisions its first offset.
 	Starts       map[string]int64
 	Resolver     rawinput.Resolver
 	PayloadQuota int64
+}
+
+func (s *Store) inputCommit(ctx context.Context, stage string, tx pgx.Tx) error {
+	if hook := s.Inputs.testBeforeCommit; hook != nil {
+		if err := hook(ctx, stage, tx); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func InputSession(source, namespace string) string {
@@ -135,7 +145,7 @@ func (s *Store) AppendHistory(ctx context.Context, req rawinput.AppendRequest) (
 	if err != nil {
 		return out, err
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = s.inputCommit(ctx, "receipt", tx); err != nil {
 		return out, canonical.Unavailable()
 	}
 	if err = s.confirmRecord(ctx, `SELECT EXISTS(SELECT 1 FROM input_sessions WHERE source=$1 AND namespace=$2 AND received_through>=$3)`, first.Source, first.Namespace, received); err != nil {

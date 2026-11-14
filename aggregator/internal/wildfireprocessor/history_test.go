@@ -177,7 +177,7 @@ func TestM6PopulatedHistoryUpgradePreservesPendingWork(t *testing.T) {
 			l.append(t, op)
 			// Recreate the recognized previous journal boundary in this unique lab DB;
 			// no application or unrelated database is accessed.
-			_, err := l.c.Exec(ctx, `DROP TABLE wildfire_output_chunks,wildfire_work,wildfire_state,wildfire_jobs,wildfire_runs; DROP FUNCTION wildfire_route(text,text,text); DELETE FROM canonical_schema_migrations WHERE version='0009_wildfire_processor.sql'`)
+			_, err := l.c.Exec(ctx, `DROP TABLE wildfire_finalize,wildfire_lineage,wildfire_memberships,wildfire_fire_versions; DELETE FROM canonical_schema_migrations WHERE version='0011_wildfire_finalization.sql'; DROP TABLE wildfire_output_chunks,wildfire_work,wildfire_state,wildfire_jobs,wildfire_runs; DROP FUNCTION wildfire_route(text,text,text); DELETE FROM canonical_schema_migrations WHERE version='0009_wildfire_processor.sql'`)
 			require.NoError(t, err)
 			var bytesBefore, bytesAfter []byte
 			var envelopeBefore, envelopeAfter string

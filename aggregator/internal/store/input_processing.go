@@ -250,7 +250,7 @@ func (s *Store) PrepareBMKG(ctx context.Context, owner canonical.Ownership, name
 	if _, err = tx.Exec(ctx, `UPDATE input_sessions SET prepared_through=$2 WHERE source='BMKG' AND namespace=$1`, namespace, position); err != nil {
 		return false, err
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = s.inputCommit(ctx, "preparation", tx); err != nil {
 		return false, canonical.Unavailable()
 	}
 	if err = s.confirmRecord(ctx, `SELECT EXISTS(SELECT 1 FROM input_sessions WHERE source='BMKG' AND namespace=$1 AND prepared_through>=$2)`, namespace, position); err != nil {
@@ -411,7 +411,7 @@ func (s *Store) ApplyInputOutput(ctx context.Context, processor, delivery canoni
 			return false, err
 		}
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = s.inputCommit(ctx, "application-progress", tx); err != nil {
 		return false, canonical.Unavailable()
 	}
 	if err = s.confirmRecord(ctx, `SELECT EXISTS(SELECT 1 FROM input_history WHERE route_key=$1 AND source='BMKG' AND namespace=$2 AND position=$3 AND state IN ('prepared','applied'))`, route, namespace, position); err != nil {

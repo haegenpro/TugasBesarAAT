@@ -29,6 +29,24 @@ func (l *Lab) m34(ctx context.Context, d map[string]any) error {
 		}
 		args = []string{"-C", filepath.Join(root, "aggregator"), "test", "-mod=readonly", "-count=1", "-p=1", "-timeout=240s", "-v", "./internal/store", "-run", pattern}
 	}
+	if hardeningSuite(l.Suite) {
+		pattern = map[string]string{"input-faults": "^TestM3Hardening", "audit-hardening": "^(TestM8Hardening|TestM9Hardening)", "snapshot-replies": "^TestM8Hardening", "analytics-budgets": "^TestM9Hardening", "wildfire-finalization": "^TestM6Hardening(EndToEnd|Scale|Upgrade|Fixtures|PartialSeal|CheckpointRestart)"}[l.Suite]
+		if selected := os.Getenv("ROLE1_HARDENING_TEST_FILTER"); selected != "" {
+			pattern = selected
+		}
+		packages := []string{"./internal/store"}
+		timeout := "240s"
+		if l.Suite == "input-faults" {
+			packages = append(packages, "./internal/ingestion", "./internal/pipeline", "./internal/wildfireprocessor")
+		}
+		if l.Suite == "wildfire-finalization" {
+			packages = []string{"./internal/wildfireprocessor"}
+			timeout = "540s"
+		}
+		args = []string{"-C", filepath.Join(root, "aggregator"), "test", "-mod=readonly", "-count=1", "-p=1", "-timeout=" + timeout, "-v"}
+		args = append(args, packages...)
+		args = append(args, "-run", pattern)
+	}
 	if l.Suite == "recovery-core" {
 		pattern = "^(TestM7|TestM4MissingWorkerPreservesContinuation)"
 		args = []string{"-C", filepath.Join(root, "aggregator"), "test", "-mod=readonly", "-count=1", "-p=1", "-timeout=150s", "-v", "./internal/store", "-run", pattern}
@@ -53,7 +71,7 @@ func (l *Lab) m34(ctx context.Context, d map[string]any) error {
 	}
 	command := exec.CommandContext(ctx, "go", args...)
 	command.Env = append(os.Environ(), "M2_DATABASE_URL="+l.DSN["coord"], "M2_WORKER1_URL="+l.DSN["worker1"], "M2_WORKER2_URL="+l.DSN["worker2"], "M2_EVIDENCE_DIR="+l.Dir, "DB_MAX_OPEN_CONNS=6")
-	if l.Suite == "m3" {
+	if brokerProfile(l.Suite) {
 		version, versionErr := l.compose(ctx, "exec", "-T", "broker1", "nats-server", "--version")
 		if versionErr != nil {
 			return versionErr
@@ -74,6 +92,12 @@ func (l *Lab) m34(ctx context.Context, d map[string]any) error {
 	err := command.Run()
 	redacted := strings.ReplaceAll(string(output.b), l.Password, "[redacted]")
 	_ = os.WriteFile(filepath.Join(l.Dir, l.Suite+"-tests.log"), []byte(redacted), 0600)
+	if hardeningSuite(l.Suite) && !strings.Contains(redacted, "=== RUN   Test") {
+		return fmt.Errorf("requested hardening scenarios did not execute")
+	}
+	if hardeningSuite(l.Suite) && strings.Contains(redacted, "--- SKIP:") {
+		return fmt.Errorf("blocked: requested hardening scenario skipped; inspect test log")
+	}
 	if l.Suite == "recovery-core" && strings.Contains(redacted, "RECOVERY_BLOCKED:") {
 		return fmt.Errorf("blocked: pinned Citus online movement unavailable; see redacted test log")
 	}
@@ -87,7 +111,7 @@ func (l *Lab) m34(ctx context.Context, d map[string]any) error {
 		return fmt.Errorf("requested wildfire scenarios did not execute; inspect test log")
 	}
 	d["command"] = "go -C aggregator test -mod=readonly -count=1 -p=1 -timeout=180s -v ./internal/store ./internal/ingestion ./internal/pipeline -run " + pattern
-	if l.Suite == "audit-analytics" || l.Suite == "recovery-core" {
+	if l.Suite == "audit-analytics" || l.Suite == "recovery-core" || hardeningSuite(l.Suite) {
 		d["command"] = "go -C aggregator " + strings.Join(args[2:], " ")
 	}
 	if wildfireSuite(l.Suite) {

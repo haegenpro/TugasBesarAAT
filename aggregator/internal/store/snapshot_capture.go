@@ -294,6 +294,9 @@ func (s *Store) SnapshotStatus(ctx context.Context, id string) (audit.Session, e
 		return v, e
 	}
 	if v.Status == "ready" {
+		if e = s.confirmCapture(ctx, id, "ready"); e != nil {
+			return v, canonical.Unavailable()
+		}
 		if e = s.TouchSnapshot(ctx, id); e != nil {
 			return v, canonical.Fail(400, "cursor_expired", "snapshot expired")
 		}
@@ -402,6 +405,9 @@ func (s *Store) copySnapshot(parent context.Context, token CaptureToken, units [
 	if e != nil { // Resolve original identity; never recapture after an unknown reply.
 		check, done := context.WithTimeout(context.Background(), canonical.Deadline)
 		v, err := s.snapshotStatus(check, token.ID)
+		if err == nil && v.Status == "ready" {
+			err = s.confirmCapture(check, token.ID, "ready")
+		}
 		done()
 		if err != nil || v.Status != "ready" {
 			reason = "snapshot publication unresolved"
@@ -484,7 +490,11 @@ func (s *Store) copySnapshotPage(ctx context.Context, token CaptureToken, u *sna
 	if e != nil {
 		return e
 	}
-	tx, e := s.Pool.Begin(ctx)
+	stage := "copy-page"
+	if !byteBound && len(batch) < 100 {
+		stage = "copy-final"
+	}
+	tx, e := s.beginAuditDestination(ctx, stage)
 	if e != nil {
 		return e
 	}
@@ -523,13 +533,26 @@ func (s *Store) copySnapshotPage(ctx context.Context, token CaptureToken, u *sna
 	if e = tx.Commit(ctx); e != nil { // Reconcile checkpoint after a lost reply while views remain alive.
 		call, stop := context.WithTimeout(context.Background(), canonical.Deadline)
 		defer stop()
-		var count int64
-		var sum string
-		if s.Pool.QueryRow(call, `SELECT record_count,sha256 FROM audit_snapshot_units WHERE capture_id=$1 AND source_shard=$2`, token.ID, u.ID).Scan(&count, &sum) != nil || count != next.Count || sum != next.Sum {
+		if s.reconcileSnapshotCopy(call, token, &next) != nil {
 			return canonical.Unavailable()
 		}
 	}
 	*u = next
+	return nil
+}
+
+func (s *Store) reconcileSnapshotCopy(ctx context.Context, token CaptureToken, next *snapshotUnit) error {
+	if err := s.confirmRecord(ctx, `SELECT EXISTS(SELECT 1 FROM audit_snapshot_units u JOIN platform_audit_captures c USING(capture_id)
+ WHERE u.capture_id=$1 AND u.source_shard=$2 AND u.record_count=$3 AND u.sha256=$4 AND u.last_time IS NOT DISTINCT FROM $5::timestamptz
+ AND u.last_id IS NOT DISTINCT FROM $6::uuid AND u.complete=$7 AND c.epoch=$8 AND c.holder=$9 AND c.state='building'
+ AND c.owner_expires_at>clock_timestamp() AND c.copy_deadline>clock_timestamp())`, token.ID, next.ID, next.Count, next.Sum, next.Last, nullableID(next.LastID), next.Complete, token.Epoch, token.Holder); err != nil {
+		return err
+	}
+	// Confirm the distributed marker separately: correlating it to the local
+	// manifest requires an unsupported Citus local/distributed subquery.
+	if next.Complete {
+		return s.confirmRecord(ctx, `SELECT EXISTS(SELECT 1 FROM audit_snapshot_markers WHERE route_key=$1 AND capture_id=$2 AND source_shard=$3 AND record_count=$4 AND sha256=$5)`, next.Route, token.ID, next.ID, next.Count, next.Sum)
+	}
 	return nil
 }
 func nullableID(id string) any {

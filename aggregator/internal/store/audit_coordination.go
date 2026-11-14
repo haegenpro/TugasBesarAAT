@@ -221,7 +221,7 @@ func (s *Store) PublishCapture(ctx context.Context, token CaptureToken, complete
 	if complete == nil {
 		return canonical.Unavailable()
 	}
-	tx, err := s.Pool.Begin(ctx)
+	tx, err := s.beginAuditDestination(ctx, "publication")
 	if err != nil {
 		return err
 	}
@@ -241,6 +241,13 @@ func (s *Store) PublishCapture(ctx context.Context, token CaptureToken, complete
 		return err
 	}
 	return s.confirmCapture(ctx, token.ID, "ready")
+}
+
+func (s *Store) beginAuditDestination(ctx context.Context, stage string) (pgx.Tx, error) {
+	if s.auditTestBegin != nil {
+		return s.auditTestBegin(ctx, stage)
+	}
+	return s.Pool.Begin(ctx)
 }
 
 func (s *Store) confirmCapture(ctx context.Context, id, state string) error {

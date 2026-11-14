@@ -123,10 +123,10 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 	}
 	// Three 1-GiB DB limits plus 128-MiB etcd members and 256 MiB VM headroom.
 	need := uint64(3456 << 20)
-	if suite != "core" && suite != "m2" && suite != "m4" && suite != "audit-analytics" && suite != "recovery-core" && !wildfireSuite(suite) {
+	if suite != "core" && suite != "m2" && suite != "m4" && suite != "audit-analytics" && suite != "recovery-core" && !hardeningSuite(suite) && suite != "local-hardening" && !wildfireSuite(suite) {
 		need = 3712 << 20
 	}
-	if suite == "m3" {
+	if brokerProfile(suite) || suite == "local-hardening" {
 		if !regexp.MustCompile(`^[a-z0-9./:_-]+@sha256:[a-f0-9]{64}$`).MatchString(os.Getenv("M3_NATS_IMAGE")) {
 			return nil, errors.New("blocked: M3_NATS_IMAGE requires the actual immutable NATS image digest")
 		}
@@ -160,7 +160,7 @@ func doctor(ctx context.Context, root, suite string) (map[string]any, error) {
 		if suite == "all" && (s == "m3" || s == "m4" || s == "wildfire") {
 			continue
 		}
-		if suite != "all" && suite != s && !(suite == "m2" && s == "core") && !(suite == "audit-analytics" && s == "m4") && !(suite == "recovery" && (s == "core" || s == "ha")) && !(suite == "recovery-core" && s == "core") && !(suite == "recovery-ha" && s == "ha") && !(wildfireSuite(suite) && s == "wildfire") {
+		if suite != "all" && suite != s && !(suite == "m2" && s == "core") && !(suite == "audit-analytics" && s == "m4") && !(suite == "recovery" && (s == "core" || s == "ha")) && !(suite == "recovery-core" && s == "core") && !(suite == "recovery-ha" && s == "ha") && !(wildfireSuite(suite) && s == "wildfire") && !(suite == "local-hardening" && (s == "m3" || s == "core")) && !(hardeningSuite(suite) && s == "core") && !(suite == "input-faults" && s == "m3") {
 			continue
 		}
 		lab := newLab(root, "doctor", s, "doctor-only", "role1-m1-doctor", nil)
@@ -216,7 +216,7 @@ func (l *Lab) composeConfig() map[string]any {
 		}
 		services[name] = map[string]any{"image": l.Image, "labels": labels, "mem_limit": "1g", "mem_reservation": "512m", "stop_grace_period": "5s", "healthcheck": map[string]any{"disable": true}, "ports": []string{"127.0.0.1::5432"}, "volumes": []string{name + ":/var/lib/postgresql/data"}, "environment": map[string]string{"M1_NAME": name, "M1_SCOPE": l.Project, "M1_SUITE": profile, "M1_GROUP": fmt.Sprint(group), "M1_ETCD": strings.Join(hosts, ","), "M1_PASSWORD": l.Password}}
 	}
-	if l.Suite == "m3" {
+	if brokerProfile(l.Suite) {
 		for i := 1; i <= 3; i++ {
 			name := fmt.Sprintf("broker%d", i)
 			l.Services = append(l.Services, name)
@@ -237,10 +237,10 @@ func (l *Lab) start(ctx context.Context) error {
 	if err := os.MkdirAll(l.Dir, 0700); err != nil {
 		return err
 	}
-	if l.Suite == "m3" {
+	if brokerProfile(l.Suite) {
 		for i := 1; i <= 3; i++ {
 			name := fmt.Sprintf("broker%d", i)
-			config := fmt.Sprintf("server_name: %s\nport: 4222\nhttp_port: 8222\nauthorization {user: raw,password: %s}\njetstream {store_dir: /data,max_memory_store: 64MB,max_file_store: 8GB,sync_interval: always}\ncluster {name: %s,listen: 0.0.0.0:6222,routes: [nats://broker1:6222,nats://broker2:6222,nats://broker3:6222]}\n", name, l.Password, l.Project)
+			config := fmt.Sprintf("server_name: %s\nport: 4222\nhttp_port: 8222\nauthorization {user: raw,password: %q}\njetstream {store_dir: /data,max_memory_store: 64MB,max_file_store: 8GB,sync_interval: always}\ncluster {name: %s,listen: 0.0.0.0:6222,routes: [nats://broker1:6222,nats://broker2:6222,nats://broker3:6222]}\n", name, l.Password, l.Project)
 			if err := os.WriteFile(filepath.Join(l.Dir, name+".conf"), []byte(config), 0600); err != nil {
 				return err
 			}
@@ -430,7 +430,7 @@ func (l *Lab) fault(ctx context.Context, action, service string) error {
 		}
 		u := url.URL{Scheme: "postgres", User: url.UserPassword("postgres", l.Password), Host: host, Path: "/m1", RawQuery: "sslmode=disable&connect_timeout=2"}
 		l.DSN[service] = u.String()
-		if l.Suite == "m3" || l.Suite == "m4" {
+		if brokerProfile(l.Suite) || l.Suite == "m4" || hardeningSuite(l.Suite) {
 			// A restarted single-copy Patroni member can accept connections while
 			// still read-only. Do not release the next component test before its
 			// own storage owner is writable again.
@@ -503,6 +503,9 @@ func (l *Lab) result(ctx context.Context, name string, fn func(context.Context, 
 	if wildfireSuite(l.Suite) {
 		budget = 12 * time.Minute
 	}
+	if hardeningSuite(l.Suite) {
+		budget = 9 * time.Minute
+	}
 	caseCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	details := map[string]any{}
@@ -513,6 +516,9 @@ func (l *Lab) result(ctx context.Context, name string, fn func(context.Context, 
 		status = "failed"
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "blocked:") {
 			status = "blocked"
+		}
+		if hardeningSuite(l.Suite) && errors.Is(caseCtx.Err(), context.DeadlineExceeded) {
+			status = "failed"
 		}
 	}
 	r := Result{Name: name, Status: status, DurationMS: time.Since(start).Milliseconds(), Details: details, Error: errString(err)}
@@ -578,15 +584,55 @@ func runLab(ctx context.Context, root, suite string) error {
 	if suite == "recovery" {
 		suites = []string{"recovery-core", "recovery-ha"}
 	}
+	if suite == "local-hardening" {
+		suites = []string{"input-faults", "audit-hardening", "wildfire-finalization"}
+	}
+	if suite == "local-hardening" || hardeningSuite(suite) {
+		budget := 20 * time.Minute
+		if remaining := os.Getenv("ROLE1_HARDENING_BUDGET"); remaining != "" {
+			var parse error
+			budget, parse = time.ParseDuration(remaining)
+			if parse != nil || budget <= 30*time.Second || budget > 20*time.Minute {
+				err := errors.New("hardening budget must be greater than 30s and at most 20m")
+				report.Results = append(report.Results, Result{Name: "hardening_budget", Status: "failed", Error: err.Error()})
+				return err
+			}
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
 	for _, s := range suites {
 		if ctx.Err() != nil {
-			report.Results = append(report.Results, Result{Name: s + "_startup", Status: "blocked", Error: ctx.Err().Error()})
-			break
+			status, reason := "blocked", ctx.Err().Error()
+			if hardeningSuite(s) {
+				status, reason = "skipped", "aggregate execution budget exhausted before startup"
+			}
+			report.Results = append(report.Results, Result{Name: s + "_startup", Status: status, Error: reason})
+			continue
 		}
 		lab := newLab(root, id, s, password, image, report)
-		err = lab.start(ctx)
+		call := ctx
+		finish := func() {}
+		if hardeningSuite(s) {
+			budget := 5 * time.Minute
+			if s == "wildfire-finalization" {
+				budget = 10 * time.Minute
+			}
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < budget {
+				budget = time.Until(deadline)
+			}
+			call, finish = context.WithTimeout(ctx, max(time.Second, budget-30*time.Second))
+		}
+		err = lab.start(call)
 		if err != nil {
-			report.Results = append(report.Results, Result{Name: s + "_startup", Status: "blocked", Error: errString(err)})
+			status := "blocked"
+			if hardeningSuite(s) && call.Err() == context.DeadlineExceeded {
+				status = "failed"
+			}
+			report.Results = append(report.Results, Result{Name: s + "_startup", Status: status, Error: errString(err)})
+		} else if hardeningSuite(s) {
+			lab.result(call, s+"_component_integration", lab.m34)
 		} else if s == "recovery-ha" {
 			lab.result(ctx, "empty_member_recovery", lab.recoveryHA)
 		} else if s == "recovery-core" {
@@ -600,7 +646,12 @@ func runLab(ctx context.Context, root, suite string) error {
 		} else {
 			lab.result(ctx, "durable_failover", lab.ha)
 		}
-		cleanup, c := context.WithTimeout(context.Background(), 90*time.Second)
+		finish()
+		cleanupBudget := 90 * time.Second
+		if hardeningSuite(s) {
+			cleanupBudget = 30 * time.Second
+		}
+		cleanup, c := context.WithTimeout(context.Background(), cleanupBudget)
 		lab.collect(cleanup)
 		stopErr := lab.stop(cleanup)
 		c()
@@ -624,7 +675,7 @@ func downRun(ctx context.Context, root, id string) error {
 	if !runPattern.MatchString(id) {
 		return errors.New("down requires the exact --run ID printed by run")
 	}
-	for _, suite := range []string{"core", "ha", "m2", "m3", "m4", "audit-analytics", "recovery-core", "recovery-ha", "wildfire", "wildfire-replay", "wildfire-late", "wildfire-replies", "wildfire-crashes", "wildfire-history", "wildfire-boundaries", "wildfire-migrations"} {
+	for _, suite := range []string{"core", "ha", "m2", "m3", "m4", "audit-analytics", "recovery-core", "recovery-ha", "input-faults", "audit-hardening", "snapshot-replies", "analytics-budgets", "wildfire-finalization", "wildfire", "wildfire-replay", "wildfire-late", "wildfire-replies", "wildfire-crashes", "wildfire-history", "wildfire-boundaries", "wildfire-migrations"} {
 		l := newLab(root, id, suite, "", "", nil)
 		data, err := os.ReadFile(filepath.Join(l.Dir, "compose.json"))
 		if os.IsNotExist(err) {

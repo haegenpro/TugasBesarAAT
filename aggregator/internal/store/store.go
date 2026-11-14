@@ -22,6 +22,8 @@ import (
 )
 
 type Store struct {
+	// In-process destination-transaction seam for protocol fault tests only.
+	auditTestBegin         func(context.Context, string) (pgx.Tx, error)
 	Pool                   *pgxpool.Pool
 	logger                 *slog.Logger
 	control                *pgxpool.Pool
