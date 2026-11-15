@@ -1,7 +1,10 @@
 """Run-owned libvirt VMs and pinned k3s bootstrap; no shell interpolation locally."""
 from contextlib import contextmanager
 import base64
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Offline render/tests on Windows; live controller is Linux.
+    fcntl = None
 import hashlib
 import json
 import os
@@ -20,7 +23,14 @@ from .inventory import fingerprint, health_rbac, k3s_config, memory_budget, owne
 LABEL = "aat.platform.cluster"
 
 
-class Cluster:
+def Cluster(cfg):
+    if cfg.get("version") == 2:
+        from .multihost import MultiHostCluster
+        return MultiHostCluster(cfg)
+    return LocalCluster(cfg)
+
+
+class LocalCluster:
     def __init__(self, cfg):
         self.cfg = cfg
         self.state = Path(cfg["state_dir"])
@@ -76,6 +86,7 @@ class Cluster:
 
     @contextmanager
     def locked(self, allow_resize=False):
+        require(fcntl is not None, "live controller operations require Linux")
         require(not self.state.is_symlink(), "state directory must not be a symlink")
         self.state.mkdir(parents=True, exist_ok=True, mode=0o755)
         require(self.state.stat().st_uid == os.geteuid(), "state directory must belong to the invoking user")
@@ -389,15 +400,15 @@ class Cluster:
         self.verify()
         first = self.cfg["nodes"][0]
         agent = next(n for n in self.cfg["nodes"] if n["role"] == "agent")
-        self.assert_resource(self.virsh("dumpxml", first["name"]).stdout.decode(), first["name"])
+        self.vm_state(first)  # validates provider ownership before fault injection
         result = {"scenario": "first-server VM pause", "node": first["name"],
                   "scope": "Kubernetes API/agent continuity only; not canonical database durability", "passed": False}
         started = time.monotonic()
         try:
-            require(self.virsh("domstate", first["name"]).stdout.decode().strip() == "running", "first VM must be running before the fault")
+            require(self.vm_state(first) == "running", "first VM must be running before the fault")
             print(f"Testing API continuity while {first['name']} is paused", flush=True)
-            self.virsh("suspend", first["name"])
-            require(self.virsh("domstate", first["name"]).stdout.decode().strip() == "paused", "first VM did not pause")
+            self.vm_action(first, "pause")
+            require(self.vm_state(first) == "paused", "first VM did not pause")
             deadline = time.monotonic() + 60
             while True:
                 reply = self.kubectl("get", "--raw=/readyz", "--request-timeout=5s", check=False, timeout=10)
@@ -420,12 +431,12 @@ class Cluster:
             self.kubectl("delete", "configmap", probe, "-n", self.cfg["namespace"], "--request-timeout=5s")
             result.update({"agent_renewed_while_first_server_paused": True, "control_plane_write_succeeded": True})
         finally:
-            state = self.virsh("domstate", first["name"]).stdout.decode().strip()
+            state = self.vm_state(first)
             print(f"Restoring {first['name']}", flush=True)
             if state == "paused":
-                self.virsh("resume", first["name"])
+                self.vm_action(first, "resume")
             elif state == "shut off":
-                self.virsh("start", first["name"])
+                self.vm_action(first, "start")
             result["elapsed_seconds"] = round(time.monotonic() - started, 3)
             (self.state / "evidence" / "api-failover.json").write_text(json.dumps(result, indent=2) + "\n")
         self.ready_server(first)
@@ -448,6 +459,15 @@ class Cluster:
             value = json.loads(inspect.stdout)[0]
             require((value["Config"].get("Labels") or {}).get(LABEL) == self.cfg["cluster_id"], "refusing to stop an unowned proxy")
             self.docker("stop", name)
+
+    def vm_state(self, node):
+        self.assert_resource(self.virsh("dumpxml", node["name"]).stdout.decode(), node["name"])
+        return self.virsh("domstate", node["name"]).stdout.decode().strip()
+
+    def vm_action(self, node, action):
+        self.vm_state(node)
+        verb = {"start": "start", "stop": "shutdown", "pause": "suspend", "resume": "resume"}[action]
+        self.virsh(verb, node["name"])
 
     def resize(self, previous):
         validate_resize(previous, self.cfg)

@@ -5,6 +5,14 @@ three control-plane/server nodes that also run workloads, plus one agent node.
 It installs the assignment's unchanged pinned Tester Agent. It does not yet
 deploy the Citus/Patroni formation or the application stack.
 
+The original workflow below is inventory **version 1**, using local libvirt/NAT.
+For a fresh Linux/KVM + Windows/VirtualBox formation on wired Ethernet, use
+[inventory v2](inventory.multihost.example.json) and the
+[two-host operator/evidence guide](../../docs/Platform-Multihost-and-Bonus.md).
+The v2 example has placeholder LAN/SSH/adapter values and requires independent
+capacity checks. It does not modify the old formation or establish the physical-host
+bonus until real-network/application/demo evidence is collected.
+
 ## Prerequisites and review
 
 Linux x86-64 with KVM, system libvirt access, Docker access, Python 3.11+,

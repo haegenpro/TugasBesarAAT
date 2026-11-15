@@ -25,6 +25,9 @@ def https_url(value):
 
 
 def validate(cfg):
+    if cfg.get("version") == 2:
+        from .multihost_inventory import validate as validate_multi
+        return validate_multi(cfg)
     require(cfg.get("version") == 1, "inventory version must be 1")
     cluster = cfg.get("cluster_id", "")
     require(re.fullmatch(r"aat-[a-z0-9](?:[a-z0-9-]{0,22}[a-z0-9])?", cluster), "cluster_id must be a short aat- DNS label")
@@ -147,7 +150,8 @@ def network_xml(cfg):
 
 
 def domain_xml(cfg, node):
-    state = Path(cfg["state_dir"])
+    host = next((h for h in cfg.get("hosts", []) if h["id"] == node["physical_host"]), None)
+    state = Path(host["state_dir"] if host else cfg["state_dir"])
     root = ET.Element("domain", {"type": "kvm"})
     ET.SubElement(root, "name").text = node["name"]
     ET.SubElement(root, "uuid").text = resource_uuid(cfg, node["name"])
@@ -175,9 +179,9 @@ def domain_xml(cfg, node):
     ET.SubElement(seed, "source", {"file": str(state / "seeds" / node["name"] / "seed.iso")})
     ET.SubElement(seed, "target", {"dev": "sda", "bus": "sata"})
     ET.SubElement(seed, "readonly")
-    nic = ET.SubElement(devices, "interface", {"type": "network"})
+    nic = ET.SubElement(devices, "interface", {"type": "bridge" if host else "network"})
     ET.SubElement(nic, "mac", {"address": node["mac"]})
-    ET.SubElement(nic, "source", {"network": cfg["network"]["name"]})
+    ET.SubElement(nic, "source", {"bridge": host["bridge"]} if host else {"network": cfg["network"]["name"]})
     ET.SubElement(nic, "model", {"type": "virtio"})
     serial = ET.SubElement(devices, "serial", {"type": "pty"})
     ET.SubElement(serial, "target", {"port": "0"})
@@ -189,7 +193,7 @@ def domain_xml(cfg, node):
 
 def cloud_config(cfg, node, public_key):
     require(public_key.startswith("ssh-ed25519 ") and "\n" not in public_key.strip(), "an ed25519 public key is required")
-    return {
+    result = {
         "hostname": node["name"], "manage_etc_hosts": True,
         "ssh_pwauth": False, "disable_root": True,
         "users": [{"name": cfg["ssh_user"], "shell": "/bin/bash", "lock_passwd": True,
@@ -203,11 +207,22 @@ def cloud_config(cfg, node, public_key):
         "runcmd": [["modprobe", "overlay"], ["modprobe", "br_netfilter"], ["sysctl", "--system"],
                    ["sh", "-c", "findmnt /var/lib/aat && mkdir -p /var/lib/aat/local-pv"]],
     }
+    if cfg.get("version") == 2:
+        host = next(h for h in cfg["hosts"] if h["id"] == node["physical_host"])
+        if host["provider"] == "virtualbox":
+            # VirtualBox SATA root/data disks are sda/sdb, not virtio vda/vdb.
+            result["disk_setup"] = {"/dev/sdb": result["disk_setup"]["/dev/vdb"]}
+            result["fs_setup"][0]["device"] = "/dev/sdb1"
+    return result
 
 
-def node_network(node):
-    return {"version": 2, "ethernets": {"aatnic": {"match": {"macaddress": node["mac"]},
-            "set-name": "eth0", "dhcp4": True, "dhcp6": False}}}
+def node_network(node, cfg=None):
+    nic = {"match": {"macaddress": node["mac"]}, "set-name": "eth0", "dhcp4": True, "dhcp6": False}
+    if cfg and cfg.get("version") == 2:
+        net = cfg["network"]
+        nic.update({"dhcp4": False, "addresses": [node["address"] + "/" + net["cidr"].split("/")[1]],
+                    "routes": [{"to": "default", "via": net["gateway"]}], "nameservers": {"addresses": net["dns"]}})
+    return {"version": 2, "ethernets": {"aatnic": nic}}
 
 
 def k3s_config(cfg, node, token, first=False):
@@ -265,8 +280,19 @@ def health_rbac(cfg):
 
 def render(cfg, output, public_key):
     output = Path(output)
+    if cfg.get("version") == 2 and output.exists() and list(output.iterdir()):
+        prior = output / "inventory.sha256"
+        require(prior.is_file() and prior.read_text().strip() == fingerprint(cfg), "v2 preview directory belongs to a different/unmarked inventory")
     output.mkdir(parents=True, exist_ok=True)
-    (output / "network.xml").write_text(network_xml(cfg))
+    if cfg.get("version") == 2:
+        # Journal scope before partial preview writes so interrupted rendering is resumable.
+        (output / "inventory.sha256").write_text(fingerprint(cfg) + "\n")
+    if cfg.get("version") == 1:
+        (output / "network.xml").write_text(network_xml(cfg))
+    else:
+        (output / "network-plan.json").write_text(json.dumps({"mode": "existing-bridged-lan", "hosts": [
+            {k: h[k] for k in ("id", "provider", "bridge")} for h in cfg["hosts"]],
+            "note": "Prepare Ethernet bridges/firewalls externally; this render changes no physical NIC."}, indent=2))
     (output / "haproxy.cfg").write_text(haproxy_config(cfg))
     namespace = {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": cfg["namespace"],
                  "labels": {"app.kubernetes.io/part-of": cfg["cluster_id"]}}}
@@ -274,10 +300,12 @@ def render(cfg, output, public_key):
     for node in cfg["nodes"]:
         directory = output / node["name"]
         directory.mkdir(exist_ok=True)
-        (directory / "domain.xml").write_text(domain_xml(cfg, node))
+        host = next((h for h in cfg.get("hosts", []) if h["id"] == node["physical_host"]), None)
+        if not host or host["provider"] == "libvirt":
+            (directory / "domain.xml").write_text(domain_xml(cfg, node))
         (directory / "user-data").write_text("#cloud-config\n" + json.dumps(cloud_config(cfg, node, public_key), indent=2) + "\n")
         (directory / "meta-data").write_text(json.dumps({"instance-id": resource_uuid(cfg, node["name"]), "local-hostname": node["name"]}) + "\n")
-        (directory / "network-config").write_text(json.dumps(node_network(node), indent=2) + "\n")
+        (directory / "network-config").write_text(json.dumps(node_network(node, cfg), indent=2) + "\n")
         # Review examples contain no real cluster token.
         (directory / "k3s.example.json").write_text(json.dumps(k3s_config(cfg, node, "<generated-private-token>", first=node == cfg["nodes"][0]), indent=2) + "\n")
     (output / "inventory.sha256").write_text(fingerprint(cfg) + "\n")

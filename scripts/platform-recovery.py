@@ -21,6 +21,7 @@ ROOT=Path(__file__).resolve().parent.parent
 
 
 def recovery_plan(inventory,storage,node_name):
+    require(inventory.get("version") == 1, "v2 disk replacement is blocked before mutation; provider-specific empty-member recovery is not implemented")
     require(storage==plan(inventory,storage["mode"],storage["image"]),"storage plan differs from inventory")
     target=next((n for n in inventory["nodes"] if n["name"]==node_name),None)
     require(target,"replacement target is not an owned node")
@@ -49,6 +50,7 @@ def validate_config(storage,config):
 
 class Recovery:
     def __init__(self,inventory,storage,config,target):
+        require(inventory.get("version") == 1, "v2 disk replacement is not implemented")
         # Offline plans/checks also run on Windows; libvirt's Linux-only locking
         # dependency is needed only when constructing the mutating executor.
         from platform_lib.cluster import Cluster

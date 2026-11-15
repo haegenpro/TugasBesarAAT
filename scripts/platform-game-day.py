@@ -81,10 +81,10 @@ def run(args,inventory):
                         if action=="scale":mutate("scale","deployment/"+deployment,"--replicas="+str(value))
                         elif action=="rollout":mutate("set","image","deployment/"+deployment,"aggregator="+args.image)
                         elif action=="pause":
-                            require(cluster.virsh("domstate",args.node).stdout.decode().strip()=="running","node must be running before pause")
-                            cluster.assert_resource(cluster.virsh("dumpxml",args.node).stdout.decode(),args.node)
-                            cluster.virsh("suspend",args.node);paused=True
-                        elif action=="resume":cluster.virsh("resume",args.node);paused=False
+                            target=next(n for n in inventory["nodes"] if n["name"]==args.node)
+                            require(cluster.vm_state(target)=="running","node must be running before pause")
+                            cluster.vm_action(target,"pause");paused=True
+                        elif action=="resume":cluster.vm_action(next(n for n in inventory["nodes"] if n["name"]==args.node),"resume");paused=False
                         event(action,value=value)
                     if elapsed>=sample*15:snapshot("sample-"+str(sample));sample+=1
                     time.sleep(.5)
@@ -101,7 +101,7 @@ def run(args,inventory):
             try:workload.wait(timeout=10)
             except subprocess.TimeoutExpired:workload.kill();workload.wait()
         if paused:
-            try:cluster.virsh("resume",args.node);event("cleanup-resume")
+            try:cluster.vm_action(next(n for n in inventory["nodes"] if n["name"]==args.node),"resume");event("cleanup-resume")
             except Exception:report["cleanup_required"]="resume owned VM "+args.node
         # Record original configuration; do not roll back an explicitly requested
         # rollout or scale behind the operator's back after the load window.

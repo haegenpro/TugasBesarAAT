@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parent.parent
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inventory", type=Path, default=ROOT / "deployment/platform/inventory.example.json")
-    parser.add_argument("command", choices=["doctor", "render", "up", "bootstrap", "install-tester", "verify", "verify-failover", "status", "stop", "resize"])
+    parser.add_argument("command", choices=["doctor", "render", "up", "bootstrap", "install-tester", "verify", "verify-failover", "verify-network", "status", "stop", "resize"])
+    parser.add_argument("--probe-image", help="immutable image containing python3 for cross-node DNS/pod/service validation")
     parser.add_argument("--output", type=Path, help="render destination")
     parser.add_argument("--public-key-file", type=Path, help="ed25519 public key for preview rendering")
     parser.add_argument("--previous-inventory", type=Path, help="exact prior inventory for a stopped CPU/RAM-only resize")
@@ -38,8 +39,19 @@ def main():
             print(json.dumps(report, indent=2))
             return 0 if report["ready"] else 1
         elif args.command == "status":
-            print(cluster.virsh("list", "--all").stdout.decode(), end="")
+            if cfg["version"] == 2:
+                print(json.dumps(cluster.status(), indent=2))
+            else:
+                print(cluster.virsh("list", "--all").stdout.decode(), end="")
         else:
+            if args.command == "verify-network":
+                if not args.probe_image:
+                    parser.error("verify-network requires --probe-image with an actual immutable Python3 image")
+                from platform_lib.pod_probe import verify_network
+                with cluster.locked():
+                    cluster.verify()
+                    print(json.dumps(verify_network(cluster, args.probe_image), indent=2))
+                return 0
             if args.command == "resize" and not args.previous_inventory:
                 parser.error("resize requires --previous-inventory")
             with cluster.locked(allow_resize=args.command == "resize"):

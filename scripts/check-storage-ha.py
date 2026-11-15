@@ -204,11 +204,11 @@ class Checks:
         require(entity["event"]["attributes"].get("platform_validation_run") == self.holder, "canonical fixture content differs")
 
     def pause(self, name):
-        self.cluster.assert_resource(self.cluster.virsh("dumpxml", name).stdout.decode(), name)
-        require(self.cluster.virsh("domstate", name).stdout.decode().strip() == "running", "fault target must already be running")
+        node = next(n for n in self.cluster.cfg["nodes"] if n["name"] == name)
+        require(self.cluster.vm_state(node) == "running", "fault target must already be running")
         self.paused.append(name)  # include in cleanup even if interrupted during virsh
-        self.cluster.virsh("suspend", name)
-        require(self.cluster.virsh("domstate", name).stdout.decode().strip() == "paused", "VM did not pause")
+        self.cluster.vm_action(node, "pause")
+        require(self.cluster.vm_state(node) == "paused", "VM did not pause")
         self.excluded.add(name)
         self.event("vm-paused", node=name)
 
@@ -216,10 +216,11 @@ class Checks:
         failures = []
         for name in reversed(self.paused):
             try:
-                state = self.cluster.virsh("domstate", name).stdout.decode().strip()
+                node = next(n for n in self.cluster.cfg["nodes"] if n["name"] == name)
+                state = self.cluster.vm_state(node)
                 if state == "paused":
-                    self.cluster.virsh("resume", name)
-                require(self.cluster.virsh("domstate", name).stdout.decode().strip() == "running", "VM was not restored to running")
+                    self.cluster.vm_action(node, "resume")
+                require(self.cluster.vm_state(node) == "running", "VM was not restored to running")
                 self.event("vm-restored", node=name)
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
                 failures.append(f"{name}: {exc}")

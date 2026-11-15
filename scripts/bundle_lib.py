@@ -85,4 +85,7 @@ def inspect(bundle_path,inventory):
     for node in inventory["nodes"]:
         if fixed[node["name"]]>node["memory_mib"]-bundle["node_reserve_mib"]:blocked.append("fixed workloads exceed memory on "+node["name"])
     blocked+=bundle.get("unresolved",[])
-    return {"version":1,"ready_for_apply":not blocked,"blocked":blocked,"stages":planned,"workloads":objects,"memory_requests_mib":total,"estimated_available_mib":available,"fixed_requests_mib":fixed,"required_existing_secrets":sorted(external-supplied),"apps":sorted(apps),"note":"Offline lower-bound capacity estimate. Live resources, CPU/disk, scheduling, rollout surge and failover headroom still need verification."},snapshots
+    hosts={h["id"]:{"guest_memory_mib":sum(n["memory_mib"]for n in inventory["nodes"]if n["physical_host"]==h["id"]),
+           "fixed_requests_mib":sum(fixed[n["name"]]for n in inventory["nodes"]if n["physical_host"]==h["id"]),
+           "host_reserve_mib":h["reserve_mib"]}for h in inventory.get("hosts",[])}
+    return {"version":1,"ready_for_apply":not blocked,"blocked":blocked,"stages":planned,"workloads":objects,"memory_requests_mib":total,"estimated_available_mib":available,"fixed_requests_mib":fixed,"physical_hosts":hosts,"required_existing_secrets":sorted(external-supplied),"apps":sorted(apps),"note":"Offline lower-bound capacity estimate. Live resources, CPU/disk, scheduling, rollout surge and failover headroom still need verification."},snapshots
