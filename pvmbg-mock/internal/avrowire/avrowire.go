@@ -119,6 +119,10 @@ func (c *Client) request(ctx context.Context, method, path string, body any, out
 // Register applies the compatibility rule before submitting a version.
 // Successful IDs are cached, so an outage does not affect known schemas.
 func (c *Client) Register(ctx context.Context, subject, schemaText string) (*Schema, error) {
+	return c.RegisterWith(ctx, subject, schemaText, "FULL_TRANSITIVE")
+}
+
+func (c *Client) RegisterWith(ctx context.Context, subject, schemaText, compatibility string) (*Schema, error) {
 	key := subject + "\x00" + schemaText
 	c.mu.RLock()
 	cached := c.bySubject[key]
@@ -135,7 +139,7 @@ func (c *Client) Register(ctx context.Context, subject, schemaText string) (*Sch
 		return nil, err
 	}
 	part := url.PathEscape(subject)
-	if err := c.request(ctx, http.MethodPut, "/config/"+part, map[string]string{"compatibility": "FULL_TRANSITIVE"}, nil); err != nil {
+	if err := c.request(ctx, http.MethodPut, "/config/"+part, map[string]string{"compatibility": compatibility}, nil); err != nil {
 		return nil, err
 	}
 	var result struct {

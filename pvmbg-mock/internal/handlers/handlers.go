@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"net/http"
@@ -158,11 +161,11 @@ func (h *Handler) VolcanicReports(c *gin.Context) {
 		c.Header("X-Source-Sequence", strconv.FormatInt(head, 10))
 	}
 	since := parseSince(c)
-	showConfidence := h.Toggles.ShowConfidence()
+	mode := h.Toggles.Mode()
 	out := make([]domain.VolcanicReport, 0, len(h.Reports))
 	for _, r := range h.Reports {
 		if since.IsZero() || !r.ReportedAt.Time.Before(since) {
-			out = append(out, r.WireCopy(showConfidence))
+			out = append(out, r.WireCopy(mode == state.ModeV2))
 		}
 	}
 	if c.GetHeader("Accept") == avrowire.MediaType {
@@ -170,12 +173,20 @@ func (h *Handler) VolcanicReports(c *gin.Context) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registry unavailable")})
 			return
 		}
-		data, err := h.encodeVolcanic(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), out, showConfidence)
+		data, err := h.encodeVolcanic(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), out, mode)
 		if err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registry unavailable")})
 			return
 		}
 		c.Data(http.StatusOK, avrowire.MediaType, data)
+		return
+	}
+	if mode.Incompatible() {
+		wire := make([]map[string]any, len(out))
+		for i, r := range out {
+			wire[i] = wireRecord(r, mode)
+		}
+		c.JSON(http.StatusOK, wire)
 		return
 	}
 	c.JSON(http.StatusOK, out)
@@ -187,39 +198,82 @@ func Health(c *gin.Context) {
 
 type schemaVersionResponse struct {
 	SchemaVersion          string `json:"schema_version"`
+	Mode                   string `json:"mode"`
 	ConfidenceLevelVisible bool   `json:"confidence_level_visible"`
+}
+
+func requestedMode(c *gin.Context, current state.Mode) (state.Mode, bool) {
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 4096))
+	if err != nil {
+		return "", false
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		if current == state.ModeV2 {
+			return state.ModeV1, true
+		}
+		return state.ModeV2, true
+	}
+	var req struct {
+		Mode state.Mode `json:"mode"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&req) != nil || !req.Mode.Valid() {
+		return "", false
+	}
+	return req.Mode, true
+}
+
+func (h *Handler) registerMode(ctx context.Context, mode state.Mode) error {
+	if !mode.Incompatible() {
+		if _, err := h.Registry.Register(ctx, volcanicSubject, volcanicV1); err != nil {
+			return err
+		}
+		if _, err := h.Registry.Register(ctx, volcanicSubject, volcanicV2()); err != nil {
+			return err
+		}
+		for _, m := range []state.Mode{state.ModeV1, state.ModeV2} {
+			text, err := volcanicHistorySchema(m)
+			if err == nil {
+				_, err = h.Registry.Register(ctx, volcanicHistorySubject, text)
+			}
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if _, err := h.Registry.RegisterWith(ctx, incompatibleSubject, liveSchema(mode), "NONE"); err != nil {
+		return err
+	}
+	text, err := volcanicHistorySchema(mode)
+	if err == nil {
+		_, err = h.Registry.RegisterWith(ctx, incompatibleHistorySubject, text, "NONE")
+	}
+	return err
 }
 
 func (h *Handler) AdminSchemaVersion(c *gin.Context) {
 	h.schemaMu.Lock()
 	defer h.schemaMu.Unlock()
+	current := h.Toggles.Mode()
+	mode, ok := requestedMode(c, current)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": platform.ProblemStatus(http.StatusBadRequest, "mode must be v1, v2, rename, type_change or missing_required")})
+		return
+	}
 	if h.Registry != nil {
-		// Register v1 first so the registry checks v2 against it. A failed
-		// registration leaves the source's visible schema unchanged.
 		registryCtx := avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c))
-		if _, err := h.Registry.Register(registryCtx, volcanicSubject, volcanicV1); err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registry unavailable")})
-			return
-		}
-		if _, err := h.Registry.Register(registryCtx, volcanicSubject, volcanicV2()); err != nil {
+		if err := h.registerMode(registryCtx, mode); err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "schema registration failed")})
 			return
 		}
-		for _, visible := range []bool{false, true} {
-			text, err := volcanicHistorySchema(visible)
-			if err == nil {
-				_, err = h.Registry.Register(registryCtx, volcanicHistorySubject, text)
-			}
-			if err != nil {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "history schema registration failed")})
-				return
-			}
-		}
 	}
-	visible := !h.Toggles.ShowConfidence()
-	version := "v1"
-	if visible {
-		version = "v2"
+	visible := mode == state.ModeV2
+	version := string(mode)
+	if mode == current {
+		c.JSON(http.StatusOK, schemaVersionResponse{SchemaVersion: version, Mode: version, ConfidenceLevelVisible: visible})
+		return
 	}
 	// A schema toggle changes serialization, not the source records. A new
 	// report makes v2 observable immediately without rewriting historic IDs.
@@ -242,8 +296,8 @@ func (h *Handler) AdminSchemaVersion(c *gin.Context) {
 		h.Reports = append(h.Reports, *added)
 		h.activations++
 	}
-	h.Toggles.ToggleSchema()
-	c.JSON(http.StatusOK, schemaVersionResponse{SchemaVersion: version, ConfidenceLevelVisible: visible})
+	h.Toggles.SetMode(mode)
+	c.JSON(http.StatusOK, schemaVersionResponse{SchemaVersion: version, Mode: version, ConfidenceLevelVisible: visible})
 }
 
 type outageRequest struct {
