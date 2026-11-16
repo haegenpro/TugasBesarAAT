@@ -102,6 +102,11 @@ func run() error {
 			return err
 		}
 	}
+	if enabled["coastal"] {
+		if err = require("PANTAI_BASE_URL", "PANTAI_AUTH_TOKEN", "COASTAL_NAMESPACE", "COASTAL_WARNING_SCHEMA", "AGGREGATOR_BASE_URL", "CANONICAL_SERVICE_TOKEN"); err != nil {
+			return err
+		}
+	}
 	if os.Getenv("INGESTION_DATABASE_URL") == os.Getenv("DATABASE_URL") {
 		return fmt.Errorf("ingestion requires its own database")
 	}
@@ -181,6 +186,9 @@ func run() error {
 	if enabled["field-reports"] {
 		streams = append(streams, rawinput.Reports)
 	}
+	if enabled["coastal"] {
+		streams = append(streams, rawinput.Coastal, rawinput.Critical)
+	}
 	ensure := func(ctx context.Context) (map[string]jetstream.Consumer, error) {
 		consumers := map[string]jetstream.Consumer{}
 		for _, s := range streams {
@@ -230,6 +238,11 @@ func run() error {
 		go ledger.RunOutbox(ctx)
 		go consumer.Run(ctx)
 		fieldreport.HTTP{Ledger: ledger, Token: reportToken}.Register(r)
+	}
+	if enabled["coastal"] {
+		if err = startCoastal(ctx, r, coordinator, db, durability, authority, sender, registry, rawReader, consumers, replicas, js, token); err != nil {
+			return err
+		}
 	}
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
 	r.GET("/ready", func(c *gin.Context) {

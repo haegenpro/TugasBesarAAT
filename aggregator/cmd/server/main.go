@@ -154,6 +154,10 @@ func main() {
 		}
 	}
 	a := api.New(st, status, deps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
+	if url := os.Getenv("COASTAL_STATUS_URL"); url != "" {
+		a.Coastal = &api.CoastalStatus{URL: url, Token: os.Getenv("INGESTION_SERVICE_TOKEN"), Client: platform.Client(time.Second), Interval: platform.Duration("COASTAL_STATUS_INTERVAL", time.Second), MaxAge: platform.Duration("COASTAL_STATUS_MAX_AGE", 10*time.Second)}
+		go a.Coastal.Run(ctx)
+	}
 	router := server.New(logger, a)
 	if cfg.CanonicalEnabled {
 		adapter := canonical.HTTP{Repository: st, Token: cfg.CanonicalToken}

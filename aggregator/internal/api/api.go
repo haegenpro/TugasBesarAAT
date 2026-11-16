@@ -35,6 +35,7 @@ type API struct {
 	Deps           *Dependencies
 	BMKGFreshness  time.Duration
 	PVMBGFreshness time.Duration
+	Coastal        *CoastalStatus
 }
 
 func New(s Repository, status *poller.PVMBGStatus, deps *Dependencies, bmkgFreshness, pvmbgFreshness time.Duration) *API {

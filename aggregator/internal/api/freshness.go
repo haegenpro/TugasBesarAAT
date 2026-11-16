@@ -30,12 +30,21 @@ func (a *API) statuses(ctx context.Context) (map[string]sourceStatus, error) {
 		ss := statusAt(p, now, ttl)
 		out[key] = ss
 	}
+	if a.Coastal != nil {
+		out[string(domain.SourceSensorPantai)] = a.Coastal.Get()
+	}
 	return out, nil
 }
 func (a *API) recordMetadata(events []domain.HazardEvent, status map[string]sourceStatus, out map[string]domain.RecordMetadata) map[string]domain.RecordMetadata {
 	now := domain.Now()
 	for _, e := range events {
 		m := out[e.HazardID]
+		if coastal, known := status[string(domain.SourceSensorPantai)]; known && e.Source == domain.SourceSensorPantai {
+			m.State = coastal.State
+			m.AssessmentState = "complete"
+			out[e.HazardID] = m
+			continue
+		}
 		if e.Source != domain.SourceBMKG && e.Source != domain.SourcePVMBG {
 			m.State = "unavailable"
 			m.AssessmentState = "unavailable"
