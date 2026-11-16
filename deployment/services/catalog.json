@@ -214,7 +214,8 @@
         "CLIENT_API_MAX_INFLIGHT": "128",
         "CLIENT_API_MAX_INFLIGHT_PER_CLIENT": "32",
         "CLIENT_API_FIELD_RESERVED": "32",
-        "CLIENT_API_AUTH_MAX_INFLIGHT": "32"
+        "CLIENT_API_AUTH_MAX_INFLIGHT": "32",
+        "INGESTION_BASE_URL": "http://ingestion:8080"
       },
       "ready": {
         "path": "/ready",
@@ -275,7 +276,10 @@
         "NOTIFIER_PORT": "8092",
         "NATS_URL": "nats://broker:4222",
         "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",
+        "WARNING_STREAM": "BNPB_CRITICAL",
+        "WARNING_SUBJECT": "bnpb.warning.coastal",
+        "WARNING_DURABLE": "tim-lapangan-v1"
       },
       "ready": {
         "path": "/ready",
