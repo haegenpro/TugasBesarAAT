@@ -61,6 +61,9 @@ This document covers what Reliable Ingestion & Delivery adds for M2 and how to o
 | Aggregator | `COASTAL_STATUS_URL` | `http://coastal-processor:8080`. Enables `SENSOR_PANTAI` in `source_status`. |
 | client-api | `INGESTION_BASE_URL`, `FIELD_REPORT_SERVICE_TOKEN` | Enable `POST /field-reports` and `GET /field-reports/{receipt_id}`. |
 | consumer-notifier | `WARNING_STREAM`, `WARNING_SUBJECT`, `WARNING_DURABLE` | `BNPB_CRITICAL`, `bnpb.warning.coastal`, `tim-lapangan-v1`. Notifier role only. |
+| consumer-notifier | `WARNING_EXPECTATIONS_URL`, `COASTAL_SLO_TOKEN` | Base URL `http://coastal-processor:8080` and a dedicated read-only accounting token shared with coastal-processor. Required when warnings are enabled. |
+| consumer-notifier | `WARNING_SLO_MAX_EXPECTATIONS` | `100000`: maximum identities evaluated in one SLO window; narrow `since` if exceeded. |
+| Aggregator | `FAILED_INPUT_QUOTA_BYTES` | `268435456`: storage quota for complete oversized failed response bodies. Capture rolls back explicitly on quota/read failure and source progress stays unchanged. |
 | consumer-notifier | `WARNING_BACKLOG_AFTER`, `WARNING_FRESH_QUOTA` | `1m`, `3`: a warning older than this is backlog; deliver up to 3 fresh warnings per backlog warning. |
 
 ### Kubernetes
@@ -78,9 +81,9 @@ Add an `r3` block to a copy of `deployment/role1/config.example.json`:
 ```
 
 Setup steps:
-1. Add `FIELD_REPORT_SERVICE_TOKEN`, `SATELLITE_FEED_TOKEN` and `CANONICAL_SERVICE_TOKEN` to the role1 runtime Secret, and `FIELD_REPORT_SERVICE_TOKEN` to `client-api-runtime`.
+1. Add `FIELD_REPORT_SERVICE_TOKEN`, `SATELLITE_FEED_TOKEN`, `CANONICAL_SERVICE_TOKEN` and a distinct `COASTAL_SLO_TOKEN` to the role1 runtime Secret. Add `FIELD_REPORT_SERVICE_TOKEN` to `client-api-runtime` and the same `COASTAL_SLO_TOKEN` to `notifier-runtime`.
 2. Generic NetworkPolicy cannot name a host, so allow the satellite feed explicitly with `scripts/platform-isolation.py --extra-flows`, for example `{"app":"ingestion","cidr":"<feed address>/32","ports":[443]}`.
-3. Run `raw-ingestion migrate --offline REPOSITORY_ROOT RUNTIME_ROLE` once with the administrator migration credential to create the ingestion R3 tables, including `0003_source_envelopes.sql`. This additive migration must also be applied to databases that already ran `0002_r3.sql`. The Aggregator schema needs `store/migrations/0012_legacy_replay.sql`.
+3. Run `raw-ingestion migrate --offline REPOSITORY_ROOT RUNTIME_ROLE` with the administrator migration credential to apply the ingestion R3 tables through `0004_coastal_accounting.sql`, including upgrades from `0002_r3.sql` or `0003_source_envelopes.sql`. Run the canonical offline migration command to apply `store/migrations/0013_failure_payloads.sql` to the Aggregator-owned database before starting the new image. Never edit existing migration files or checksums.
 
 ## Schema change policy (P3)
 
@@ -143,7 +146,8 @@ curl "$API/hazards?hazard_type=COASTAL" -H "Authorization: Bearer $FIELD" -w '%{
 curl http://coastal-processor:8080/metrics | grep coastal_
 ```
 
-- Client reads keep returning the last stored COASTAL events promptly. `source_status.SENSOR_PANTAI` becomes `stale` and then `unavailable`.
+- Client reads keep returning the last stored COASTAL events promptly. `source_status.SENSOR_PANTAI` becomes `stale`; it is `unavailable` before any successful check or when the status authority cannot be reached beyond the Aggregator cache lifetime.
+- Every coastal replica reads the same persisted status. Acquisition updates are fenced, timestamps and expiry use the ingestion database clock, and a replacement leader restores the last-known state. Repeated old observations do not refresh the last-new-observation clock.
 - `coastal_observations_breaker_state` reports 2 (open) and `coastal_observations_short_circuited_total` grows, while calls to the sensor stay bounded.
 - Restoring the sensor closes the breaker after one successful half-open probe, with no manual step.
 
@@ -154,11 +158,17 @@ curl "http://consumer-notifier:8092/records?view=warnings"
 curl "http://consumer-notifier:8092/warnings/slo?since=2026-11-20T00:00:00Z"
 ```
 
-The SLO report gives:
-- delivered count and on-time count (≤ 5 s from first BNPB acquisition to recipient commit);
-- the p95 and the maximum;
-- conflicts;
-- `error_budget_used` against the 95% target.
+The SLO report reconciles paginated acquisition-side expected warning IDs with notifier-owned receipts, without sharing database credentials:
+- `expected`, `delivered`, `pending`, `pending_overdue`, `rejected`, and `receipt_only` counts;
+- `evaluated` includes delivered warnings, rejected critical observations, and pending warnings older than five seconds; still-in-flight younger warnings do not consume the budget yet;
+- `on_time_ratio = on_time / evaluated` and `error_budget_used = (1 - on_time_ratio) / 0.05`;
+- `p95_seconds` and maximum for delivered warnings, labeled `p95_scope=delivered_only`; `p95_complete=false` when unresolved or uncovered data remains;
+- `p95_lower_bound_seconds` also includes the current age of pending warnings, so a fast delivered subset cannot hide a slow unresolved cohort;
+- `coverage_since`, `coverage_complete`, conflicts and negative-clock anomalies.
+
+Expected IDs commit **before raw publication**, so broker/validator/recipient outages remain in the denominator. The source ledger retains the first acquisition time across duplicate observations. If the expected-warning authority fails, the SLO endpoint returns 503; warning consumption continues independently. `COASTAL_SLO_TOKEN` grants only ledger reads, not payload inspection or replay.
+
+Scope is `durably_acquired_critical_observations`. `all_acquired_critical_delivered` does not prove that unseen sensor events were acquired: reconcile separately against the sensor/reference identity set. Latency uses the ingestion and notifier database clocks and requires verified clock synchronization; negative durations are flagged and not counted as on-time. Historical receipt-only windows from before deployment remain explicitly uncovered.
 
 ### Satellite reconnect
 
