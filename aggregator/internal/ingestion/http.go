@@ -293,6 +293,10 @@ func (h HTTP) failurePayload(c *gin.Context) {
 	if _, ok := h.ops(c); !ok {
 		return
 	}
+	if c.Query("namespace") == LegacyNamespace {
+		h.legacyPayload(c)
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), canonical.Deadline)
 	defer cancel()
 	var sum, contentType string
@@ -319,6 +323,39 @@ func (h HTTP) failurePayload(c *gin.Context) {
 		return
 	}
 	h.stream(c, id)
+}
+
+func (h HTTP) legacyPayload(c *gin.Context) {
+	if h.Client == nil || h.LegacyURL == "" || !rawinput.Opaque(c.Param("id")) {
+		rawinput.Error(c, canonical.Unavailable())
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), canonical.Deadline)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(h.LegacyURL, "/")+"/internal/ingestion/legacy-failures/"+url.PathEscape(c.Param("id"))+"/payload", nil)
+	if err != nil {
+		rawinput.Error(c, canonical.Unavailable())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+h.ServiceToken)
+	resp, err := h.Client.Do(req)
+	if err != nil {
+		rawinput.Error(c, canonical.Unavailable())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		rawinput.Error(c, canonical.Fail(resp.StatusCode, "payload_unavailable", "legacy failure payload unavailable"))
+		return
+	}
+	for _, key := range []string{"Content-Type", "Content-Length", "X-Payload-SHA256", "X-Source-Content-Type"} {
+		if value := resp.Header.Get(key); value != "" {
+			c.Header(key, value)
+		}
+	}
+	if _, err = io.CopyBuffer(c.Writer, resp.Body, make([]byte, 64<<10)); err != nil {
+		_ = c.Error(err)
+	}
 }
 
 type replayRequest struct {

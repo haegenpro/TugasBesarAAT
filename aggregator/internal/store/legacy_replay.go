@@ -3,9 +3,12 @@ package store
 import (
 	"aggregator/internal/canonical"
 	"aggregator/internal/clients"
+	"aggregator/internal/platform"
 	"aggregator/internal/rawinput"
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -77,12 +80,29 @@ func (s *Store) RequestLegacyReplay(ctx context.Context, ids []string, adapter s
 
 func (s *Store) NextLegacyReplay(ctx context.Context) (*clients.ParkedPayload, error) {
 	var p clients.ParkedPayload
-	err := s.Pool.QueryRow(ctx, `SELECT message_id::text,entity,raw_payload,truncated FROM failed_ingestions WHERE source='PVMBG' AND status='replaying' ORDER BY received_at,message_id LIMIT 1`).Scan(&p.ID, &p.Entity, &p.Payload, &p.Truncated)
+	var size *int64
+	err := s.Pool.QueryRow(ctx, `SELECT f.message_id::text,f.entity,f.raw_payload,f.truncated,p.size FROM failed_ingestions f LEFT JOIN failed_ingestion_payloads p USING(payload_id) WHERE source='PVMBG' AND status='replaying' ORDER BY received_at,message_id LIMIT 1`).Scan(&p.ID, &p.Entity, &p.Payload, &p.Truncated, &size)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if size != nil {
+		limit := int64(platform.Int("MAX_PAYLOAD_BYTES", 4<<20))
+		if *size > limit {
+			p.Rejection = fmt.Sprintf("complete payload retained (%d bytes); raise MAX_PAYLOAD_BYTES before replay (current %d)", *size, limit)
+		} else {
+			var body bytes.Buffer
+			_, digest, _, err := s.WriteFailurePayload(ctx, p.ID, &body)
+			if err != nil {
+				return nil, err
+			}
+			if rawinput.Hash(body.Bytes()) != digest {
+				return nil, canonical.Unavailable()
+			}
+			p.Payload = body.Bytes()
+		}
 	}
 	return &p, nil
 }

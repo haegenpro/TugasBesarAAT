@@ -133,9 +133,13 @@ type ParkedPayload struct {
 	Entity    string
 	Payload   []byte
 	Truncated bool
+	Rejection string
 }
 
 func (c *PVMBGClient) Reprocess(ctx context.Context, p ParkedPayload) ([]VolcanicReport, error) {
+	if p.Rejection != "" {
+		return nil, fmt.Errorf("%w: %s", ErrContractViolation, p.Rejection)
+	}
 	if p.Truncated || len(p.Payload) == 0 {
 		return nil, fmt.Errorf("%w: original response bytes were not retained completely", ErrContractViolation)
 	}
@@ -242,9 +246,9 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 		return nil, err
 	}
 	defer resp.Body.Close()
-	rawBody, truncated, readErr := platform.ReadPayload(resp.Body)
+	rawBody, truncated, payloadStream, readErr := readFailureBody(resp.Body)
 	defer func() {
-		capture(callCtx, c.CaptureFailure, Failure{Source: "PVMBG", Entity: path, Payload: rawBody, Truncated: truncated, CorrelationID: correlationID}, &retErr)
+		capture(callCtx, c.CaptureFailure, Failure{Source: "PVMBG", Entity: path, Payload: rawBody, PayloadStream: payloadStream, ContentType: resp.Header.Get("Content-Type"), Truncated: truncated, CorrelationID: correlationID}, &retErr)
 	}()
 	if readErr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrContractViolation, readErr)

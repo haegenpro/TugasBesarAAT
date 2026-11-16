@@ -76,7 +76,9 @@ def main():
               "./internal/fieldreport", "./internal/coastal", "./internal/satellite", "./internal/ingestion",
               "./internal/clients", "./internal/poller"], database=True)
         check("pvmbg-replay-database", "aggregator", ["go", "test", "-mod=readonly", "-count=1", "-timeout=90s", "-json",
-              "./internal/store", "-run", "^TestLegacyReplay"], database=True)
+              "./internal/store", "-run", "^TestLegacyReplay|^TestLegacyFailure"], database=True)
+        check("r3-failure-race", "aggregator", ["go", "test", "-mod=readonly", "-count=1", "-race", "-timeout=120s", "-json",
+              "./internal/store", "-run", "^TestLegacyReplay|^TestLegacyFailure"], database=True)
         check("r3-race", "aggregator", ["go", "test", "-mod=readonly", "-count=1", "-race", "-timeout=300s", "-json",
               "./internal/fieldreport", "./internal/coastal", "./internal/satellite", "./internal/ingestion",
               "./internal/clients", "./internal/poller"], database=True)

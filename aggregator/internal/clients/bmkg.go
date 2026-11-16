@@ -90,9 +90,9 @@ func (c *BMKGClient) get(ctx context.Context, correlationID, path string, requir
 		return err
 	}
 	defer resp.Body.Close()
-	rawBody, truncated, readErr := platform.ReadPayload(resp.Body)
+	rawBody, truncated, payloadStream, readErr := readFailureBody(resp.Body)
 	defer func() {
-		capture(callCtx, c.CaptureFailure, Failure{Source: "BMKG", Entity: path, Payload: rawBody, Truncated: truncated, CorrelationID: correlationID}, &retErr)
+		capture(callCtx, c.CaptureFailure, Failure{Source: "BMKG", Entity: path, Payload: rawBody, PayloadStream: payloadStream, ContentType: resp.Header.Get("Content-Type"), Truncated: truncated, CorrelationID: correlationID}, &retErr)
 	}()
 	if readErr != nil {
 		return fmt.Errorf("%w: %v", ErrContractViolation, readErr)

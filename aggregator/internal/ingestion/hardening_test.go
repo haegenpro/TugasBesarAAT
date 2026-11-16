@@ -5,6 +5,7 @@ import (
 	"aggregator/internal/audit"
 	"aggregator/internal/avrowire"
 	"aggregator/internal/canonical"
+	"aggregator/internal/clients"
 	"aggregator/internal/ingestion"
 	"aggregator/internal/ownership"
 	"aggregator/internal/pagecursor"
@@ -33,6 +34,52 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLegacyOversizedInspectionUsesOpsAuthorization(t *testing.T) {
+	if os.Getenv("M2_DATABASE_URL") == "" {
+		t.Skip("isolated database absent")
+	}
+	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(t, err)
+	db := newPathDatabase(t, root, "canonical")
+	ctx := context.Background()
+	raw := append(bytes.Repeat([]byte{0, 1, 2, 255}, 50000), []byte("end")...)
+	require.NoError(t, db.RecordFailure(ctx, clients.Failure{Source: "PVMBG", Entity: "/volcanic-reports", PayloadStream: bytes.NewReader(raw), ContentType: "application/octet-stream", Reason: "oversized"}))
+	var id string
+	require.NoError(t, db.Pool.QueryRow(ctx, `SELECT message_id::text FROM failed_ingestions`).Scan(&id))
+	upstream := gin.New()
+	db.RegisterLegacyFailures(upstream, "metadata-service")
+	server := httptest.NewServer(upstream)
+	defer server.Close()
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if r.Header.Get("X-Internal-Key") != "auth-key" || body["access_token"] != "ops-token" {
+			w.WriteHeader(403)
+			return
+		}
+		_, _ = io.WriteString(w, `{"client_id":"ops","role":"internal"}`)
+	}))
+	defer auth.Close()
+	router := gin.New()
+	ingestion.HTTP{ServiceToken: "metadata-service", LegacyURL: server.URL, AuthURL: auth.URL, AuthKey: "auth-key", Client: http.DefaultClient}.Register(router)
+	path := "/internal/ingestion/failures/" + id + "/payload?namespace=legacy-m1"
+	for _, token := range []string{"", "media-token", "metadata-service", "ops-token"} {
+		request := httptest.NewRequest("GET", path, nil)
+		if token != "" {
+			request.Header.Set("Authorization", "Bearer "+token)
+		}
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if token != "ops-token" {
+			require.Contains(t, []int{401, 403}, response.Code)
+			continue
+		}
+		require.Equal(t, 200, response.Code)
+		require.Equal(t, raw, response.Body.Bytes())
+		require.Equal(t, rawinput.Hash(raw), response.Header().Get("X-Payload-SHA256"))
+	}
+}
 
 func TestM3HardeningReferencesFailuresAndAuthorizedReplay(t *testing.T) {
 	if os.Getenv("M2_DATABASE_URL") == "" {
