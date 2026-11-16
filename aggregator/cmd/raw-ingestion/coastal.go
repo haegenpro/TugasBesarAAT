@@ -36,13 +36,33 @@ func startCoastal(ctx context.Context, r gin.IRoutes, coordinator *acquisition.C
 	client := &coastal.Client{BaseURL: os.Getenv("PANTAI_BASE_URL"), Token: os.Getenv("PANTAI_AUTH_TOKEN"), HTTP: platform.Client(0), Timeout: platform.Duration("COASTAL_REQUEST_TIMEOUT", time.Second), Limiter: &coastal.Limiter{Rate: rate, Burst: rate}, Stations: stations, Observations: observations}
 	status := &coastal.Status{StaleAfter: platform.Duration("COASTAL_STALE_AFTER", time.Minute), Observations: observations, Stations: stations}
 	progress := &ingestion.SourceStore{DB: db, Durability: durability, Fence: authority, Source: coastal.Source, Namespace: os.Getenv("COASTAL_NAMESPACE")}
+	repository := &coastal.Repository{Source: progress, StaleAfter: status.StaleAfter}
 	acquirer := &coastal.Acquirer{Client: client, Progress: progress, Sender: sender, Start: int64(platform.Int("COASTAL_INITIAL_POSITION", 0)), PageSize: platform.Int("COASTAL_PAGE_SIZE", 100), Interval: platform.Duration("COASTAL_POLL_INTERVAL", 500*time.Millisecond), Status: status, Logger: slog.Default()}
+	acquirer.Repository = repository
 	cache := &coastal.StationCache{Client: client, TTL: platform.Duration("COASTAL_STATION_TTL", 5*time.Minute), MissDelay: 10 * time.Second}
 	validator := &coastal.Validator{Stations: cache, Quarantine: progress, Warnings: coastal.Warnings{JS: js, Registry: registry, SchemaText: string(warningSchema)}, Registry: registry, Reader: reader, Skew: platform.Duration("COASTAL_CLOCK_SKEW", 2*time.Minute), Logger: slog.Default()}
+	validator.Repository = repository
 	writer := &coastal.CanonicalWriter{Validator: validator, Store: canonical.Client{BaseURL: os.Getenv("AGGREGATOR_BASE_URL"), Token: os.Getenv("CANONICAL_SERVICE_TOKEN"), HTTP: platform.Client(canonical.Deadline + 500*time.Millisecond)}, Logger: slog.Default()}
-	go coordinator.Run(ctx, coastal.Source, acquirer.Run)
+	go coordinator.Run(ctx, coastal.Source, func(owned context.Context) {
+		owner, err := acquisition.Token(owned, coastal.Source)
+		if err != nil {
+			return
+		}
+		if err = repository.StartCoverage(owned, owner); err != nil {
+			slog.Warn("coastal accounting unavailable", "error", err)
+			return
+		}
+		v, err := repository.Status(owned)
+		if err != nil {
+			slog.Warn("shared coastal status unavailable", "error", err)
+			return
+		}
+		status.Restore(v)
+		acquirer.Run(owned)
+	})
 	go validator.Run(ctx, consumers[rawinput.Coastal.Name])
 	go writer.Run(ctx, canonicalConsumer)
-	coastal.RegisterStatus(r, status, token)
+	coastal.RegisterStatus(r, status, token, repository)
+	coastal.RegisterExpectations(r, repository, os.Getenv("COASTAL_SLO_TOKEN"))
 	return nil
 }

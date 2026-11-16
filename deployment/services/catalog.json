@@ -279,7 +279,8 @@
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",
         "WARNING_STREAM": "BNPB_CRITICAL",
         "WARNING_SUBJECT": "bnpb.warning.coastal",
-        "WARNING_DURABLE": "tim-lapangan-v1"
+        "WARNING_DURABLE": "tim-lapangan-v1",
+        "WARNING_EXPECTATIONS_URL": "http://coastal-processor:8080"
       },
       "ready": {
         "path": "/ready",

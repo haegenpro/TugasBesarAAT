@@ -24,9 +24,11 @@ import (
 const onTime = 5 * time.Second
 
 type warningConfig struct {
-	NATSURL, Stream, Subject, Durable string
-	BacklogAfter                      time.Duration
-	FreshQuota                        int
+	NATSURL, Stream, Subject, Durable  string
+	ExpectationsURL, ExpectationsToken string
+	MaxExpectations                    int
+	BacklogAfter                       time.Duration
+	FreshQuota                         int
 }
 
 func loadWarningConfig(base config) (warningConfig, bool, error) {
@@ -37,11 +39,11 @@ func loadWarningConfig(base config) (warningConfig, bool, error) {
 	if base.Role != "notifier" {
 		return warningConfig{}, false, errors.New("coastal warnings are delivered only by the notifier role")
 	}
-	values, err := requiredEnv("WARNING_STREAM", "WARNING_SUBJECT")
+	values, err := requiredEnv("WARNING_STREAM", "WARNING_SUBJECT", "WARNING_EXPECTATIONS_URL", "COASTAL_SLO_TOKEN")
 	if err != nil {
 		return warningConfig{}, false, err
 	}
-	return warningConfig{NATSURL: base.NATSURL, Stream: values["WARNING_STREAM"], Subject: values["WARNING_SUBJECT"], Durable: durable, BacklogAfter: platform.Duration("WARNING_BACKLOG_AFTER", time.Minute), FreshQuota: platform.Int("WARNING_FRESH_QUOTA", 3)}, true, nil
+	return warningConfig{NATSURL: base.NATSURL, Stream: values["WARNING_STREAM"], Subject: values["WARNING_SUBJECT"], Durable: durable, ExpectationsURL: values["WARNING_EXPECTATIONS_URL"], ExpectationsToken: values["COASTAL_SLO_TOKEN"], MaxExpectations: platform.Int("WARNING_SLO_MAX_EXPECTATIONS", 100000), BacklogAfter: platform.Duration("WARNING_BACKLOG_AFTER", time.Minute), FreshQuota: platform.Int("WARNING_FRESH_QUOTA", 3)}, true, nil
 }
 
 type warning struct {
@@ -322,30 +324,36 @@ func (r *warningRecipient) cycle(ctx context.Context, consumer jetstream.Consume
 }
 
 type warningSLO struct {
-	Window       string   `json:"window"`
-	Delivered    int64    `json:"delivered"`
-	OnTime       int64    `json:"on_time"`
-	OnTimeRatio  *float64 `json:"on_time_ratio"`
-	P95Seconds   *float64 `json:"p95_seconds"`
-	MaxSeconds   *float64 `json:"max_seconds"`
-	Conflicts    int64    `json:"conflicts"`
-	BudgetUsed   *float64 `json:"error_budget_used"`
-	TargetRatio  float64  `json:"target_ratio"`
-	TargetP95Sec float64  `json:"target_p95_seconds"`
+	Window                       string     `json:"window"`
+	Delivered                    int64      `json:"delivered"`
+	OnTime                       int64      `json:"on_time"`
+	OnTimeRatio                  *float64   `json:"on_time_ratio"`
+	P95Seconds                   *float64   `json:"p95_seconds"`
+	MaxSeconds                   *float64   `json:"max_seconds"`
+	Conflicts                    int64      `json:"conflicts"`
+	BudgetUsed                   *float64   `json:"error_budget_used"`
+	TargetRatio                  float64    `json:"target_ratio"`
+	TargetP95Sec                 float64    `json:"target_p95_seconds"`
+	Expected                     int64      `json:"expected"`
+	Evaluated                    int64      `json:"evaluated"`
+	Pending                      int64      `json:"pending"`
+	PendingOverdue               int64      `json:"pending_overdue"`
+	Rejected                     int64      `json:"rejected"`
+	ReceiptOnly                  int64      `json:"receipt_only"`
+	P95Complete                  bool       `json:"p95_complete"`
+	P95LowerBoundSeconds         *float64   `json:"p95_lower_bound_seconds"`
+	P95Scope                     string     `json:"p95_scope"`
+	AllAcquiredDelivered         bool       `json:"all_acquired_critical_delivered"`
+	Scope                        string     `json:"scope"`
+	ClockAnomalies               int64      `json:"clock_anomalies"`
+	ClockBasis                   string     `json:"clock_basis"`
+	SourceReconciliationRequired bool       `json:"source_reconciliation_required"`
+	CoverageSince                *time.Time `json:"coverage_since"`
+	CoverageComplete             bool       `json:"coverage_complete"`
 }
 
 func (r *warningRecipient) slo(ctx context.Context, since time.Time) (warningSLO, error) {
-	out := warningSLO{Window: since.UTC().Format(time.RFC3339) + "/now", TargetRatio: 0.95, TargetP95Sec: onTime.Seconds()}
-	err := r.db.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER (WHERE committed_at-first_received_at<=interval '5 seconds'),percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM committed_at-first_received_at)),max(extract(epoch FROM committed_at-first_received_at)),(SELECT count(*) FROM coastal_warning_conflicts WHERE detected_at>=$1) FROM coastal_warning_receipts WHERE first_received_at>=$1`, since).Scan(&out.Delivered, &out.OnTime, &out.P95Seconds, &out.MaxSeconds, &out.Conflicts)
-	if err != nil {
-		return out, err
-	}
-	if out.Delivered > 0 {
-		ratio := float64(out.OnTime) / float64(out.Delivered)
-		used := (1 - ratio) / (1 - out.TargetRatio)
-		out.OnTimeRatio, out.BudgetUsed = &ratio, &used
-	}
-	return out, nil
+	return r.reconciledSLO(ctx, since)
 }
 
 func (r *warningRecipient) routes(mux *http.ServeMux) {

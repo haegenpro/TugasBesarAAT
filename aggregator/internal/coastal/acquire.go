@@ -21,14 +21,15 @@ const (
 )
 
 type Acquirer struct {
-	Client   *Client
-	Progress *ingestion.SourceStore
-	Sender   rawinput.Sender
-	Start    int64
-	PageSize int
-	Interval time.Duration
-	Status   *Status
-	Logger   *slog.Logger
+	Client     *Client
+	Progress   *ingestion.SourceStore
+	Sender     rawinput.Sender
+	Start      int64
+	PageSize   int
+	Interval   time.Duration
+	Status     *Status
+	Logger     *slog.Logger
+	Repository *Repository
 }
 
 func (a *Acquirer) Run(ctx context.Context) {
@@ -38,7 +39,9 @@ func (a *Acquirer) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		a.Status.Attempt(err)
+		if a.Repository == nil {
+			a.Status.Attempt(err)
+		}
 		delay := a.Interval
 		switch {
 		case err != nil:
@@ -59,10 +62,22 @@ func (a *Acquirer) Run(ctx context.Context) {
 	}
 }
 
-func (a *Acquirer) Step(ctx context.Context) (bool, error) {
+func (a *Acquirer) Step(ctx context.Context) (more bool, retErr error) {
 	owner, err := acquisition.Token(ctx, Source)
 	if err != nil {
 		return false, err
+	}
+	if a.Repository != nil {
+		defer func() {
+			now, err := a.Repository.Now(ctx)
+			if err == nil {
+				a.Status.AttemptAt(now, retErr)
+				err = a.Repository.SaveStatus(ctx, owner, a.Status.SnapshotAt(now))
+			}
+			if err != nil {
+				retErr = errors.Join(retErr, err)
+			}
+		}()
 	}
 	progress, err := a.Progress.Progress(ctx, a.Start)
 	if err != nil {
@@ -76,6 +91,12 @@ func (a *Acquirer) Step(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	received := time.Now().UTC()
+	if a.Repository != nil {
+		received, err = a.Repository.Now(ctx)
+		if err != nil {
+			return false, err
+		}
+	}
 	trace := http.Header{}
 	platform.Inject(ctx, trace)
 	var traceparent *string
@@ -103,8 +124,18 @@ func (a *Acquirer) Step(ctx context.Context) (bool, error) {
 		}
 		e.MessageID = rawinput.ID(e)
 		if len(raw) > MaxObservation {
+			if a.Repository != nil {
+				if err = a.Repository.Expect(ctx, owner, e); err != nil {
+					return false, err
+				}
+			}
 			if err = a.Progress.Quarantine(ctx, e, raw, "observation exceeds the accepted size"); err != nil {
 				return false, err
+			}
+			if a.Repository != nil {
+				if err = a.Repository.Reject(ctx, e, "observation exceeds the accepted size"); err != nil {
+					return false, err
+				}
 			}
 			platform.Add("coastal_observations_quarantined_total", 1)
 			continue
@@ -112,6 +143,11 @@ func (a *Acquirer) Step(ctx context.Context) (bool, error) {
 		e, err = a.Progress.Preserve(ctx, owner, e)
 		if err != nil {
 			return false, err
+		}
+		if a.Repository != nil {
+			if err = a.Repository.Expect(ctx, owner, e); err != nil {
+				return false, err
+			}
 		}
 		if err = a.Sender.Send(ctx, rawinput.Coastal.Subject, e); err != nil {
 			return false, err
@@ -130,7 +166,7 @@ func (a *Acquirer) Step(ctx context.Context) (bool, error) {
 	if clockErr != nil {
 		sensorClock = time.Time{}
 	}
-	a.Status.Page(sensorClock, latest, len(page.Items))
+	a.Status.PageAt(received, sensorClock, latest, len(page.Items))
 	return len(page.Items) >= a.PageSize, nil
 }
 

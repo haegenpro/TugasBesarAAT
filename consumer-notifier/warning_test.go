@@ -119,6 +119,9 @@ func TestWarningReceiptIsTransactionalIdempotentAndAudited(t *testing.T) {
 	if receipts != 1 || inbox != 1 || conflicts != 1 {
 		t.Fatalf("receipts=%d inbox=%d conflicts=%d", receipts, inbox, conflicts)
 	}
+	firstReceived, _ := time.Parse(time.RFC3339Nano, received)
+	authority := expectedServer(t, []expectedWarning{{Sequence: 1, NotificationID: "warning-v1:abc", FirstReceivedAt: firstReceived}}, time.Now().UTC())
+	r.cfg.ExpectationsURL, r.cfg.ExpectationsToken = authority.URL, "slo-test-token"
 	report, err := r.slo(ctx, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -149,6 +152,8 @@ func TestWarningConfigIsNotifierOnly(t *testing.T) {
 	t.Setenv("WARNING_DURABLE", "tim-lapangan-v1")
 	t.Setenv("WARNING_STREAM", "BNPB_CRITICAL")
 	t.Setenv("WARNING_SUBJECT", "bnpb.warning.coastal")
+	t.Setenv("WARNING_EXPECTATIONS_URL", "http://coastal-processor:8080")
+	t.Setenv("COASTAL_SLO_TOKEN", "dedicated-slo")
 	if _, enabled, err := loadWarningConfig(config{Role: "notifier", NATSURL: "nats://x"}); err != nil || !enabled {
 		t.Fatalf("notifier warning config rejected: %v", err)
 	}

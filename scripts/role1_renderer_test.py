@@ -51,6 +51,7 @@ class Role1RendererTests(unittest.TestCase):
         env={v['name']:v for v in container['env']}
         self.assertEqual(env['INGESTION_COMPONENTS']['value'],'coastal')
         self.assertIn('valueFrom',env['PANTAI_AUTH_TOKEN'])
+        self.assertIn('valueFrom',env['COASTAL_SLO_TOKEN'])
         self.assertNotIn('BMKG_API_KEY',env)
         self.assertEqual(container['resources']['limits']['memory'],'256Mi')
         ingestion=next(v for k,v in deployments.items() if k.endswith('-ingestion'))['spec']['template']['spec']['containers'][0]
@@ -65,8 +66,10 @@ class Role1RendererTests(unittest.TestCase):
         schema=next(v for v in result['items'] if v['kind']=='ConfigMap' and v['metadata']['name'].endswith('-raw-schema'))
         self.assertIn('coastal-warning.avsc',schema['data'])
         policies={v['metadata']['name'] for v in result['items'] if v['kind']=='NetworkPolicy'}
-        for name in ('field-reports','client-api-reports','coastal-processor','coastal-status','coastal-storage','coastal-router'):
+        for name in ('field-reports','client-api-reports','coastal-processor','coastal-status','coastal-storage','coastal-router','notifier-coastal-slo'):
             self.assertTrue(any(p.endswith('-role1-'+name) for p in policies),name)
+        coastal_policy=next(v['spec'] for v in result['items'] if v['kind']=='NetworkPolicy' and v['metadata']['name'].endswith('-role1-coastal-processor'))
+        self.assertIn('consumer-notifier',json.dumps(coastal_policy['ingress']))
         bad=copy.deepcopy(config);bad['r3']['satellite_feed_url']='http://plain'
         with self.assertRaises(ValueError):render(self.inventory,self.aggregator,bad,self.image,self.image)
         bad=copy.deepcopy(config);bad['r3']['pvmbg_adapter_version']=3

@@ -26,6 +26,7 @@ type Validator struct {
 	Reader     *avrowire.Reader
 	Skew       time.Duration
 	Logger     *slog.Logger
+	Repository *Repository
 }
 
 type outcome int
@@ -71,6 +72,11 @@ func (v *Validator) handle(ctx context.Context, msg jetstream.Msg) error {
 	case rejected:
 		if err := v.Quarantine.Quarantine(ctx, e, e.Payload, err.Error()); err != nil {
 			return err
+		}
+		if v.Repository != nil {
+			if rejectErr := v.Repository.Reject(ctx, e, err.Error()); rejectErr != nil {
+				return rejectErr
+			}
 		}
 		platform.Add("coastal_observations_quarantined_total", 1)
 		return msg.DoubleAck(ctx)

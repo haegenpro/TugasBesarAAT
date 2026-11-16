@@ -126,11 +126,12 @@ def add_r3(result, config, aggregator, owned, obj, values, secret_env, policy, i
     coastal_pod["topologySpreadConstraints"][0]["labelSelector"] = {"matchLabels": selector}
     coastal = coastal_pod["containers"][0]
     coastal["name"] = "coastal-processor"
-    coastal["env"] = [v for v in base if not v["name"].startswith("BMKG_")] + values({"INGESTION_COMPONENTS": "coastal", "PANTAI_BASE_URL": "http://sensor-pantai:8080", "COASTAL_NAMESPACE": r3["coastal_namespace"], "COASTAL_WARNING_SCHEMA": "/etc/role1/coastal-warning.avsc"}) + [secret_env("CANONICAL_SERVICE_TOKEN", config["runtime_secret"]), secret_env("PANTAI_AUTH_TOKEN", pantai_secret)]
+    coastal["env"] = [v for v in base if not v["name"].startswith("BMKG_")] + values({"INGESTION_COMPONENTS": "coastal", "PANTAI_BASE_URL": "http://sensor-pantai:8080", "COASTAL_NAMESPACE": r3["coastal_namespace"], "COASTAL_WARNING_SCHEMA": "/etc/role1/coastal-warning.avsc"}) + [secret_env("CANONICAL_SERVICE_TOKEN", config["runtime_secret"]), secret_env("PANTAI_AUTH_TOKEN", pantai_secret), secret_env("COASTAL_SLO_TOKEN", config["runtime_secret"])]
     result["items"] += [obj("apps/v1", "Deployment", cluster + "-coastal-processor", spec={"replicas": 2, "selector": {"matchLabels": selector}, "strategy": {"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1}}, "template": {"metadata": {"labels": {**selector, "role": "consumer"}}, "spec": coastal_pod}}), obj("v1", "Service", "coastal-processor", spec={"selector": selector, "ports": [{"name": "http", "port": 8080, "targetPort": "http"}]})]
     policy("field-reports", {"app.kubernetes.io/name": "ingestion"}, [incoming(["client-api"], [8080])])
     policy("client-api-reports", {"app.kubernetes.io/name": "client-api"}, egress=[flow(["ingestion"], [8080])])
-    policy("coastal-processor", selector, [incoming(["aggregator", "prometheus", "alloy"], [8080])], [flow(["aggregator", "schema-registry", "sensor-pantai"], [8080]), flow(["tempo"], [4318]), flow(["broker"], [4222]), group_flow([storage, router], [5432])])
+    policy("coastal-processor", selector, [incoming(["aggregator", "consumer-notifier", "prometheus", "alloy"], [8080])], [flow(["aggregator", "schema-registry", "sensor-pantai"], [8080]), flow(["tempo"], [4318]), flow(["broker"], [4222]), group_flow([storage, router], [5432])])
+    policy("notifier-coastal-slo", {"app.kubernetes.io/name": "consumer-notifier"}, egress=[flow(["coastal-processor"], [8080])])
     policy("coastal-status", {"app.kubernetes.io/name": "aggregator"}, egress=[flow(["coastal-processor"], [8080])])
     policy("coastal-storage", storage, [incoming(["coastal-processor"], [5432])])
     policy("coastal-router", router, [incoming(["coastal-processor"], [5432])])

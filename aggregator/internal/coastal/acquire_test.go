@@ -10,6 +10,7 @@ import (
 	"aggregator/internal/store"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -47,11 +48,15 @@ func (d labDurability) ConfirmRecord(ctx context.Context, q string, args ...any)
 type recorder struct {
 	mu   sync.Mutex
 	msgs []*nats.Msg
+	fail bool
 }
 
 func (r *recorder) PublishMsg(_ context.Context, m *nats.Msg, _ ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.fail {
+		return nil, errors.New("broker unavailable")
+	}
 	r.msgs = append(r.msgs, m)
 	return &jetstream.PubAck{}, nil
 }
@@ -128,22 +133,36 @@ func TestAcquisitionPublishesPagesAndResumesFromDurableCursor(t *testing.T) {
 	b := &Breaker{Name: "observations", Threshold: 3, Cooldown: time.Second}
 	client := &Client{BaseURL: sensorServer.URL, Token: "t", HTTP: http.DefaultClient, Timeout: time.Second, Limiter: &Limiter{}, Stations: &Breaker{Name: "stations"}, Observations: b}
 	progress := &ingestion.SourceStore{DB: db, Durability: labDurability{pool: db.Pool}, Fence: authority, Source: Source, Namespace: "coastal-fixture"}
-	run := func(steps int) *recorder {
-		broker := &recorder{}
+	repository := &Repository{Source: progress, StaleAfter: time.Minute}
+	run := func(steps int, fail bool) *recorder {
+		broker := &recorder{fail: fail}
 		a := &Acquirer{Client: client, Progress: progress, Sender: rawinput.Sender{JS: broker, Registry: avrowire.NewClient(registry.URL), SchemaText: string(schema)}, PageSize: 100, Interval: time.Millisecond, Status: &Status{StaleAfter: time.Minute, Observations: b, Stations: client.Stations}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		a.Repository = repository
 		coordinator, err := acquisition.New(authority, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		require.NoError(t, err)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		coordinator.Run(ctx, Source, func(owned context.Context) {
+			owner, err := acquisition.Token(owned, Source)
+			require.NoError(t, err)
+			require.NoError(t, repository.StartCoverage(owned, owner))
 			for range steps {
 				_, err := a.Step(owned)
-				require.NoError(t, err)
+				if fail {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+				}
 			}
 		})
 		return broker
 	}
-	first := run(1)
+	failed := run(1, true)
+	require.Empty(t, failed.msgs)
+	expected, err := repository.Expectations(context.Background(), time.Now().Add(-time.Hour), 0, 0, time.Time{})
+	require.NoError(t, err)
+	require.Len(t, expected.Items, 1, "a critical publish failure must still be counted as expected")
+	first := run(1, false)
 	require.Len(t, first.msgs, 2)
 	reader, err := avrowire.NewReader(string(schema))
 	require.NoError(t, err)
@@ -153,15 +172,18 @@ func TestAcquisitionPublishesPagesAndResumesFromDurableCursor(t *testing.T) {
 	require.Equal(t, int64(0), *e.Position)
 	require.Equal(t, "2026-11-12T00:30:00Z", *e.EventTime)
 	require.Equal(t, "2026-11-12T00:31:00Z", *e.VirtualNow)
+	received, err := time.Parse(time.RFC3339Nano, e.ReceivedAt)
+	require.NoError(t, err)
+	require.WithinDuration(t, expected.Items[0].FirstReceivedAt, received, time.Microsecond)
 	_, err = db.Pool.Exec(context.Background(), `UPDATE source_progress SET position=0,cursor=NULL`)
 	require.NoError(t, err)
-	replayed := run(1)
+	replayed := run(1, false)
 	require.Equal(t, first.ids(), replayed.ids())
-	later := run(2)
+	later := run(2, false)
 	require.Empty(t, later.msgs)
 	p, err := progress.Progress(context.Background(), 0)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), p.Position)
 	require.Equal(t, "c2", *p.Cursor)
-	require.Equal(t, []string{"", "", "c2", "c2"}, requested)
+	require.Equal(t, []string{"", "", "", "c2", "c2"}, requested)
 }

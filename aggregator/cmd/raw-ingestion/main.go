@@ -108,7 +108,7 @@ func run() error {
 		}
 	}
 	if enabled["coastal"] {
-		if err = require("PANTAI_BASE_URL", "PANTAI_AUTH_TOKEN", "COASTAL_NAMESPACE", "COASTAL_WARNING_SCHEMA", "AGGREGATOR_BASE_URL", "CANONICAL_SERVICE_TOKEN"); err != nil {
+		if err = require("PANTAI_BASE_URL", "PANTAI_AUTH_TOKEN", "COASTAL_NAMESPACE", "COASTAL_WARNING_SCHEMA", "AGGREGATOR_BASE_URL", "CANONICAL_SERVICE_TOKEN", "COASTAL_SLO_TOKEN"); err != nil {
 			return err
 		}
 	}
@@ -133,7 +133,7 @@ func run() error {
 	if reportToken == token {
 		return fmt.Errorf("dedicated field report token required")
 	}
-	for _, key := range []string{"BMKG_API_KEY", "PVMBG_TOKEN", "CANONICAL_SERVICE_TOKEN", "PROCESSOR_SERVICE_TOKEN", "AUDIT_TOKEN", "AGGREGATOR_ADMIN_TOKEN", "FIELD_REPORT_SERVICE_TOKEN", "SATELLITE_FEED_TOKEN", "PANTAI_AUTH_TOKEN"} {
+	for _, key := range []string{"BMKG_API_KEY", "PVMBG_TOKEN", "CANONICAL_SERVICE_TOKEN", "PROCESSOR_SERVICE_TOKEN", "AUDIT_TOKEN", "AGGREGATOR_ADMIN_TOKEN", "FIELD_REPORT_SERVICE_TOKEN", "SATELLITE_FEED_TOKEN", "PANTAI_AUTH_TOKEN", "COASTAL_SLO_TOKEN"} {
 		if token == os.Getenv(key) {
 			return fmt.Errorf("dedicated ingestion token required")
 		}
