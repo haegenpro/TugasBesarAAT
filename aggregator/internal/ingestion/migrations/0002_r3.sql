@@ -19,6 +19,7 @@ CREATE TABLE field_report_ledger (
  submitter text COLLATE "C" NOT NULL, report_id text COLLATE "C" NOT NULL,
  receipt_id uuid NOT NULL UNIQUE, fingerprint text NOT NULL, content_type text NOT NULL, payload bytea NOT NULL,
  position bigint NOT NULL UNIQUE, message_id text COLLATE "C" NOT NULL UNIQUE, received_at timestamptz NOT NULL,
+ correlation_id text NOT NULL, traceparent text,
  state text NOT NULL CHECK(state IN ('pending','accepted','processed','parked')), reason text,
  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
  PRIMARY KEY(submitter,report_id)
