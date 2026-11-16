@@ -2,11 +2,14 @@ package avrowire
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 
 	"github.com/linkedin/goavro/v2"
 )
+
+var ErrIncompatible = errors.New("writer schema incompatible with reader")
 
 // Reader is local policy, never inferred from a message's writer schema ID.
 // Its codec supplies defaults; its plan validates and normalizes resolved data.
@@ -42,11 +45,11 @@ func (c *Client) DecodeWithReader(ctx context.Context, framed []byte, reader *Re
 		return nil, err
 	}
 	if err := checkReadable(writer.plan, reader.plan, "$", map[schemaPair]bool{}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrIncompatible, err)
 	}
 	resolved, present, err := resolve(writer.plan, reader.plan, native, "$", 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrIncompatible, err)
 	}
 	// goavro supplies reader defaults and checks enum symbols/fixed sizes/types.
 	b, err := reader.codec.BinaryFromNative(nil, resolved)

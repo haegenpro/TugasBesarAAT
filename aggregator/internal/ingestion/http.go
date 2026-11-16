@@ -337,7 +337,10 @@ func (h HTTP) replay(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), canonical.Deadline)
 	defer cancel()
 	var req replayRequest
-	if err := canonical.Decode(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20), &req); err != nil || req.RequestID == "" || req.Source != "BMKG" || req.Namespace != h.Store.Namespace || len(req.Messages) < 1 || len(req.Messages) > 1000 || req.Adapter != "bmkg-capture-v1" {
+	err := canonical.Decode(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20), &req)
+	bmkg := req.Source == "BMKG" && req.Namespace == h.Store.Namespace && req.Adapter == "bmkg-capture-v1"
+	legacy := req.Source == "PVMBG" && req.Namespace == LegacyNamespace && strings.HasPrefix(req.Adapter, "pvmbg-adapter-v")
+	if err != nil || req.RequestID == "" || !bmkg && !legacy || len(req.Messages) < 1 || len(req.Messages) > 1000 {
 		rawinput.Error(c, canonical.Fail(400, "invalid_request", "invalid replay scope or adapter"))
 		return
 	}
@@ -363,6 +366,20 @@ func (h HTTP) replay(c *gin.Context) {
 	}
 	if prior != fp {
 		rawinput.Error(c, canonical.Fail(409, "identity_conflict", "replay identity reused"))
+		return
+	}
+	if legacy {
+		if id == newID {
+			if err = h.legacyCall(ctx, "/internal/ingestion/legacy-replays", map[string]any{"message_ids": req.Messages, "adapter_version": req.Adapter}, nil); err != nil {
+				rawinput.Error(c, err)
+				return
+			}
+		}
+		if err = tx.Commit(ctx); err != nil {
+			rawinput.Error(c, canonical.Unavailable())
+			return
+		}
+		c.JSON(202, gin.H{"job_id": id, "status": "pending"})
 		return
 	}
 	if id != newID {
@@ -420,22 +437,18 @@ func (h HTTP) replayStatus(c *gin.Context) {
 		return
 	}
 	counts := map[string]int{"selected": len(ids), "recovered": 0, "retrying": 0, "parked": 0}
-	rows, err := h.Store.DB.Pool.Query(ctx, `SELECT status,count(*) FROM ingestion_failures WHERE namespace=$1 AND message_id=ANY($2) GROUP BY status`, ns, ids)
-	if err != nil {
-		rawinput.Error(c, err)
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var status string
-		var n int
-		if rows.Scan(&status, &n) != nil {
-			rawinput.Error(c, canonical.Unavailable())
+	if ns == LegacyNamespace {
+		var body struct {
+			Counts map[string]int `json:"counts"`
+		}
+		if err = h.legacyCall(ctx, "/internal/ingestion/legacy-replays/status", map[string]any{"message_ids": ids}, &body); err != nil {
+			rawinput.Error(c, err)
 			return
 		}
-		counts[status] = n
-	}
-	if rows.Err() != nil {
+		for k, v := range body.Counts {
+			counts[k] = v
+		}
+	} else if err = h.localCounts(ctx, ns, ids, counts); err != nil {
 		rawinput.Error(c, canonical.Unavailable())
 		return
 	}
@@ -444,4 +457,63 @@ func (h HTTP) replayStatus(c *gin.Context) {
 		status = "completed"
 	}
 	c.JSON(200, gin.H{"job_id": c.Param("id"), "status": status, "counts": counts})
+}
+
+const LegacyNamespace = "legacy-m1"
+
+func (h HTTP) legacyCall(ctx context.Context, path string, body, out any) error {
+	if h.LegacyURL == "" || h.Client == nil {
+		return canonical.Unavailable()
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(h.LegacyURL, "/")+path, bytes.NewReader(b))
+	if err != nil {
+		return canonical.Unavailable()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.ServiceToken)
+	resp, err := h.Client.Do(req)
+	if err != nil {
+		return canonical.Unavailable()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		var problem struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if resp.StatusCode < 500 && json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&problem) == nil && problem.Error.Code != "" {
+			return canonical.Fail(resp.StatusCode, problem.Error.Code, problem.Error.Message)
+		}
+		return canonical.Unavailable()
+	}
+	if out == nil {
+		return nil
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out) != nil {
+		return canonical.Unavailable()
+	}
+	return nil
+}
+
+func (h HTTP) localCounts(ctx context.Context, ns string, ids []string, counts map[string]int) error {
+	rows, err := h.Store.DB.Pool.Query(ctx, `SELECT status,count(*) FROM ingestion_failures WHERE namespace=$1 AND message_id=ANY($2) GROUP BY status`, ns, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status string
+		var n int
+		if err = rows.Scan(&status, &n); err != nil {
+			return err
+		}
+		counts[status] = n
+	}
+	return rows.Err()
 }

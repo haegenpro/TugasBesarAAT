@@ -54,6 +54,10 @@ func main() {
 		logger.Error("invalid tsunami reader schema", "error", err)
 		os.Exit(1)
 	}
+	if err := clients.SetVolcanicAdapter(platform.Int("PVMBG_ADAPTER_VERSION", clients.VolcanicAdapterV1)); err != nil {
+		logger.Error("invalid PVMBG adapter", "error", err)
+		os.Exit(1)
+	}
 	volcanicReader, err := avrowire.LoadSourceReader(cfg.PVMBGReaderSchema, "VolcanicHistoryPage")
 	if err != nil {
 		logger.Error("invalid volcanic reader schema", "error", err)
@@ -258,6 +262,7 @@ func main() {
 		}
 		adapter.Register(router)
 		st.RegisterLegacyFailures(router, os.Getenv("INGESTION_SERVICE_TOKEN"))
+		st.RegisterLegacyReplay(router, os.Getenv("INGESTION_SERVICE_TOKEN"))
 	}
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("aggregator", router)}
 	var workers sync.WaitGroup

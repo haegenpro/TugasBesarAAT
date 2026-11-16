@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"aggregator/internal/avrowire"
 	"aggregator/internal/platform"
 	"context"
 	"errors"
@@ -26,7 +27,7 @@ func capture(ctx context.Context, record FailureRecorder, f Failure, err *error)
 		return
 	}
 	f.Reason = (*err).Error()
-	f.Retryable = !errors.Is(*err, ErrContractViolation)
+	f.Retryable = !errors.Is(*err, ErrContractViolation) && !errors.Is(*err, avrowire.ErrIncompatible)
 	if f.Truncated {
 		f.Retryable = false
 	}

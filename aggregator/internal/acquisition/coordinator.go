@@ -48,7 +48,7 @@ func Source(endpoint string) (string, bool) {
 	switch endpoint {
 	case "BMKG", "BMKG_TSUNAMI", "history:seismic-events", "history:tsunami-warnings":
 		return "BMKG", true
-	case "PVMBG", "history:volcanic-reports", "mapping:volcanic":
+	case "PVMBG", "history:volcanic-reports", "mapping:volcanic", "replay:volcanic":
 		return "PVMBG", true
 	default:
 		return "", false

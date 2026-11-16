@@ -34,7 +34,7 @@ func (s *Store) RegisterLegacyFailures(r gin.IRoutes, token string) {
 			}
 			after = t
 		}
-		rows, err := s.Pool.Query(ctx, `SELECT message_id::text,source,received_at,reason,status='retrying',attempts,status FROM failed_ingestions WHERE ($1='' OR source=$1) AND ($2='' OR status=$2) AND ($3::timestamptz IS NULL OR (received_at,message_id::text COLLATE "C",'legacy-m1'::text COLLATE "C")>($3,$4::text COLLATE "C",$5::text COLLATE "C")) ORDER BY received_at,message_id::text COLLATE "C" LIMIT $6`, c.Query("source"), c.Query("status"), after, c.Query("after_id"), c.Query("after_namespace"), limit)
+		rows, err := s.Pool.Query(ctx, `SELECT message_id::text,source,received_at,reason,status IN ('retrying','replaying'),attempts,CASE WHEN status='replaying' THEN 'retrying' ELSE status END FROM failed_ingestions WHERE status<>'recovered' AND ($1='' OR source=$1) AND ($2='' OR status=$2 OR $2='retrying' AND status='replaying') AND ($3::timestamptz IS NULL OR (received_at,message_id::text COLLATE "C",'legacy-m1'::text COLLATE "C")>($3,$4::text COLLATE "C",$5::text COLLATE "C")) ORDER BY received_at,message_id::text COLLATE "C" LIMIT $6`, c.Query("source"), c.Query("status"), after, c.Query("after_id"), c.Query("after_namespace"), limit)
 		if err != nil {
 			rawinput.Error(c, canonical.Unavailable())
 			return
