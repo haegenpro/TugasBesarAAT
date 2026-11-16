@@ -17,7 +17,7 @@ test('dotenv handles comments, quoted # and shell text as data; rejects duplicat
 test('environment generator creates matching random credentials and preserves existing files', t => {
   const root = mkdtempSync(join(tmpdir(), 'm1-setup-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const setup = () => execFileSync('python3', [join(scriptRoot, 'setup-env.py'), '--output-root', root], { encoding: 'utf8' });
+  const setup = () => execFileSync(process.platform === 'win32' ? 'python' : 'python3', [join(scriptRoot, 'setup-env.py'), '--output-root', root], { encoding: 'utf8' });
   setup();
   const read = name => parseEnv(readFileSync(join(root, name, '.env'), 'utf8'));
   const agg = read('aggregator'), auth = read('auth-service'), store = read('store'), reg = read('registry');
@@ -31,7 +31,7 @@ test('environment generator creates matching random credentials and preserves ex
   assert.equal(auth.ACCESS_TOKEN_TTL_SEC, '60');
   assert.equal(read('consumer-notifier').NATS_DURABLE, 'notifier-v1');
   assert.equal(read('consumer-dashboard').NATS_DURABLE, 'dashboard-v1');
-  assert.equal(readdirSync(root, { recursive: true }).filter(p => p === '.env' || p.endsWith('/.env')).length, 20);
+  assert.equal(readdirSync(root, { recursive: true }).filter(p => p === '.env' || p.replaceAll('\\', '/').endsWith('/.env')).length, 20);
   assert.match(setup(), /preserved/);
   assert.equal(read('auth-service').FIELD_CLIENT_SECRET, auth.FIELD_CLIENT_SECRET);
   rmSync(join(root, 'store', '.env'));

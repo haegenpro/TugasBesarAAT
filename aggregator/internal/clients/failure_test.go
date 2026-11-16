@@ -54,3 +54,24 @@ func TestSourceUnavailabilityIsClassifiedRetryable(t *testing.T) {
 		t.Fatalf("wrong transient failure classification: %+v %v", captured, err)
 	}
 }
+
+func TestOversizedFailureStreamRetainsEveryOriginalByte(t *testing.T) {
+	t.Setenv("MAX_PAYLOAD_BYTES", "32")
+	raw := append(bytes.Repeat([]byte("0123456789abcdef"), 10000), []byte("END\xff")...)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(raw) }))
+	defer srv.Close()
+	c := NewPVMBGClient(srv.URL, "key", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var kept []byte
+	c.CaptureFailure = func(ctx context.Context, f Failure) error {
+		if len(f.Payload) != 32 || f.PayloadStream == nil {
+			t.Fatalf("unbounded or missing stream: %+v", f)
+		}
+		var err error
+		kept, err = io.ReadAll(f.PayloadStream)
+		return err
+	}
+	_, err := c.FetchVolcanicReports(context.Background(), "oversized", time.Time{})
+	if !errors.Is(err, ErrContractViolation) || !bytes.Equal(raw, kept) {
+		t.Fatalf("original response lost bytes: input=%d kept=%d err=%v", len(raw), len(kept), err)
+	}
+}

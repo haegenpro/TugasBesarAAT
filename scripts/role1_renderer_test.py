@@ -39,6 +39,56 @@ class Role1RendererTests(unittest.TestCase):
                 keys={v['name'] for v in container['env']};self.assertIn('INGESTION_DATABASE_URL',keys);self.assertNotIn('DATABASE_URL',keys)
         original=plan(self.inventory,'postgres',self.image);owned=plan(self.inventory,'postgres',self.image,'ingestion')
         self.assertNotEqual(original['formation'],owned['formation']);self.assertEqual(owned['groups'][0]['dsn_env'],'INGESTION_GROUP_0_URL')
+    def test_r3_components_are_explicit_and_isolated(self):
+        config=copy.deepcopy(self.config)
+        config['r3']={'field_reports_namespace':'field-reports-v1','coastal_namespace':'coastal-v1','satellite_feed_url':'https://satellite.example','pvmbg_adapter_version':2}
+        result=render(self.inventory,self.aggregator,config,self.image,self.image)
+        deployments={v['metadata']['name']:v for v in result['items'] if v['kind']=='Deployment'}
+        self.assertEqual(len(deployments),3)
+        coastal=next(v for k,v in deployments.items() if k.endswith('-coastal-processor'))
+        self.assertEqual(coastal['spec']['template']['metadata']['labels']['role'],'consumer')
+        container=coastal['spec']['template']['spec']['containers'][0]
+        env={v['name']:v for v in container['env']}
+        self.assertEqual(env['INGESTION_COMPONENTS']['value'],'coastal')
+        self.assertIn('valueFrom',env['PANTAI_AUTH_TOKEN'])
+        self.assertIn('valueFrom',env['COASTAL_SLO_TOKEN'])
+        self.assertNotIn('BMKG_API_KEY',env)
+        self.assertEqual(container['resources']['limits']['memory'],'256Mi')
+        ingestion=next(v for k,v in deployments.items() if k.endswith('-ingestion'))['spec']['template']['spec']['containers'][0]
+        env={v['name']:v for v in ingestion['env']}
+        self.assertEqual(env['INGESTION_COMPONENTS']['value'],'bmkg,field-reports,satellite')
+        self.assertEqual(env['SATELLITE_NAMESPACE']['value'],config['satellite_namespace'])
+        self.assertIn('valueFrom',env['SATELLITE_FEED_TOKEN'])
+        aggregator=next(v for k,v in deployments.items() if not k.endswith(('-ingestion','-coastal-processor')))['spec']['template']['spec']['containers'][0]
+        env={v['name']:v for v in aggregator['env']}
+        self.assertEqual(env['PVMBG_ADAPTER_VERSION']['value'],'2')
+        self.assertEqual(env['PVMBG_READER_SCHEMA']['value'],'/schemas/volcanic-adapter-v2.avsc')
+        schema=next(v for v in result['items'] if v['kind']=='ConfigMap' and v['metadata']['name'].endswith('-raw-schema'))
+        self.assertIn('coastal-warning.avsc',schema['data'])
+        policies={v['metadata']['name'] for v in result['items'] if v['kind']=='NetworkPolicy'}
+        for name in ('field-reports','client-api-reports','coastal-processor','coastal-status','coastal-storage','coastal-router','notifier-coastal-slo'):
+            self.assertTrue(any(p.endswith('-role1-'+name) for p in policies),name)
+        coastal_policy=next(v['spec'] for v in result['items'] if v['kind']=='NetworkPolicy' and v['metadata']['name'].endswith('-role1-coastal-processor'))
+        self.assertIn('consumer-notifier',json.dumps(coastal_policy['ingress']))
+        bad=copy.deepcopy(config);bad['r3']['satellite_feed_url']='http://plain'
+        with self.assertRaises(ValueError):render(self.inventory,self.aggregator,bad,self.image,self.image)
+        bad=copy.deepcopy(config);bad['r3']['pvmbg_adapter_version']=3
+        with self.assertRaises(ValueError):render(self.inventory,self.aggregator,bad,self.image,self.image)
+    def test_ops_introspection_is_allowed_in_both_directions(self):
+        result=render(self.inventory,self.aggregator,self.config,self.image,self.image)
+        policies=[p['spec'] for p in result['items'] if p['kind']=='NetworkPolicy']
+        def permits(app, direction, peer, port):
+            for policy in policies:
+                if policy['podSelector']['matchLabels'].get('app.kubernetes.io/name')!=app:
+                    continue
+                for rule in policy[direction]:
+                    if any(p.get('port')==port for p in rule.get('ports',[])) and any(
+                        p.get('podSelector',{}).get('matchLabels',{}).get('app.kubernetes.io/name')==peer
+                        for p in rule.get('to' if direction=='egress' else 'from',[])):
+                        return True
+            return False
+        self.assertTrue(permits('ingestion','egress','auth-service',8083))
+        self.assertTrue(permits('auth-service','ingress','ingestion',8083))
     def test_refuse_mutable_images_and_unvalidated_quota(self):
         with self.assertRaises(ValueError):render(self.inventory,self.aggregator,self.config,'aat:latest',self.image)
         with self.assertRaises(ValueError):render(self.inventory,self.aggregator,self.config,self.image,'aat:latest')

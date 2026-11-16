@@ -293,10 +293,27 @@ func (h HTTP) failurePayload(c *gin.Context) {
 	if _, ok := h.ops(c); !ok {
 		return
 	}
+	if c.Query("namespace") == LegacyNamespace {
+		h.legacyPayload(c)
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), canonical.Deadline)
 	defer cancel()
+	var sum, contentType string
+	var body []byte
+	err := h.Store.DB.Pool.QueryRow(ctx, `SELECT content_type,payload,sha256 FROM ingestion_failure_payloads WHERE namespace=$1 AND message_id=$2`, c.Query("namespace"), c.Param("id")).Scan(&contentType, &body, &sum)
+	if err == nil {
+		c.Header("X-Payload-SHA256", sum)
+		c.Header("X-Source-Content-Type", contentType)
+		c.Data(200, "application/octet-stream", body)
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		rawinput.Error(c, canonical.Unavailable())
+		return
+	}
 	var id string
-	err := h.Store.DB.Pool.QueryRow(ctx, `SELECT c.payload_id FROM ingestion_failures f JOIN ingestion_captures c USING(namespace,position) WHERE f.namespace=$1 AND f.message_id=$2`, c.Query("namespace"), c.Param("id")).Scan(&id)
+	err = h.Store.DB.Pool.QueryRow(ctx, `SELECT c.payload_id FROM ingestion_failures f JOIN ingestion_captures c USING(namespace,position) WHERE f.namespace=$1 AND f.message_id=$2`, c.Query("namespace"), c.Param("id")).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		rawinput.Error(c, canonical.Fail(404, "not_found", "unknown failure"))
 		return
@@ -306,6 +323,39 @@ func (h HTTP) failurePayload(c *gin.Context) {
 		return
 	}
 	h.stream(c, id)
+}
+
+func (h HTTP) legacyPayload(c *gin.Context) {
+	if h.Client == nil || h.LegacyURL == "" || !rawinput.Opaque(c.Param("id")) {
+		rawinput.Error(c, canonical.Unavailable())
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), canonical.Deadline)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(h.LegacyURL, "/")+"/internal/ingestion/legacy-failures/"+url.PathEscape(c.Param("id"))+"/payload", nil)
+	if err != nil {
+		rawinput.Error(c, canonical.Unavailable())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+h.ServiceToken)
+	resp, err := h.Client.Do(req)
+	if err != nil {
+		rawinput.Error(c, canonical.Unavailable())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		rawinput.Error(c, canonical.Fail(resp.StatusCode, "payload_unavailable", "legacy failure payload unavailable"))
+		return
+	}
+	for _, key := range []string{"Content-Type", "Content-Length", "X-Payload-SHA256", "X-Source-Content-Type"} {
+		if value := resp.Header.Get(key); value != "" {
+			c.Header(key, value)
+		}
+	}
+	if _, err = io.CopyBuffer(c.Writer, resp.Body, make([]byte, 64<<10)); err != nil {
+		_ = c.Error(err)
+	}
 }
 
 type replayRequest struct {
@@ -324,7 +374,10 @@ func (h HTTP) replay(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), canonical.Deadline)
 	defer cancel()
 	var req replayRequest
-	if err := canonical.Decode(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20), &req); err != nil || req.RequestID == "" || req.Source != "BMKG" || req.Namespace != h.Store.Namespace || len(req.Messages) < 1 || len(req.Messages) > 1000 || req.Adapter != "bmkg-capture-v1" {
+	err := canonical.Decode(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20), &req)
+	bmkg := req.Source == "BMKG" && req.Namespace == h.Store.Namespace && req.Adapter == "bmkg-capture-v1"
+	legacy := req.Source == "PVMBG" && req.Namespace == LegacyNamespace && strings.HasPrefix(req.Adapter, "pvmbg-adapter-v")
+	if err != nil || req.RequestID == "" || !bmkg && !legacy || len(req.Messages) < 1 || len(req.Messages) > 1000 {
 		rawinput.Error(c, canonical.Fail(400, "invalid_request", "invalid replay scope or adapter"))
 		return
 	}
@@ -350,6 +403,20 @@ func (h HTTP) replay(c *gin.Context) {
 	}
 	if prior != fp {
 		rawinput.Error(c, canonical.Fail(409, "identity_conflict", "replay identity reused"))
+		return
+	}
+	if legacy {
+		if id == newID {
+			if err = h.legacyCall(ctx, "/internal/ingestion/legacy-replays", map[string]any{"message_ids": req.Messages, "adapter_version": req.Adapter}, nil); err != nil {
+				rawinput.Error(c, err)
+				return
+			}
+		}
+		if err = tx.Commit(ctx); err != nil {
+			rawinput.Error(c, canonical.Unavailable())
+			return
+		}
+		c.JSON(202, gin.H{"job_id": id, "status": "pending"})
 		return
 	}
 	if id != newID {
@@ -407,22 +474,18 @@ func (h HTTP) replayStatus(c *gin.Context) {
 		return
 	}
 	counts := map[string]int{"selected": len(ids), "recovered": 0, "retrying": 0, "parked": 0}
-	rows, err := h.Store.DB.Pool.Query(ctx, `SELECT status,count(*) FROM ingestion_failures WHERE namespace=$1 AND message_id=ANY($2) GROUP BY status`, ns, ids)
-	if err != nil {
-		rawinput.Error(c, err)
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var status string
-		var n int
-		if rows.Scan(&status, &n) != nil {
-			rawinput.Error(c, canonical.Unavailable())
+	if ns == LegacyNamespace {
+		var body struct {
+			Counts map[string]int `json:"counts"`
+		}
+		if err = h.legacyCall(ctx, "/internal/ingestion/legacy-replays/status", map[string]any{"message_ids": ids}, &body); err != nil {
+			rawinput.Error(c, err)
 			return
 		}
-		counts[status] = n
-	}
-	if rows.Err() != nil {
+		for k, v := range body.Counts {
+			counts[k] = v
+		}
+	} else if err = h.localCounts(ctx, ns, ids, counts); err != nil {
 		rawinput.Error(c, canonical.Unavailable())
 		return
 	}
@@ -431,4 +494,63 @@ func (h HTTP) replayStatus(c *gin.Context) {
 		status = "completed"
 	}
 	c.JSON(200, gin.H{"job_id": c.Param("id"), "status": status, "counts": counts})
+}
+
+const LegacyNamespace = "legacy-m1"
+
+func (h HTTP) legacyCall(ctx context.Context, path string, body, out any) error {
+	if h.LegacyURL == "" || h.Client == nil {
+		return canonical.Unavailable()
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(h.LegacyURL, "/")+path, bytes.NewReader(b))
+	if err != nil {
+		return canonical.Unavailable()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+h.ServiceToken)
+	resp, err := h.Client.Do(req)
+	if err != nil {
+		return canonical.Unavailable()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		var problem struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if resp.StatusCode < 500 && json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&problem) == nil && problem.Error.Code != "" {
+			return canonical.Fail(resp.StatusCode, problem.Error.Code, problem.Error.Message)
+		}
+		return canonical.Unavailable()
+	}
+	if out == nil {
+		return nil
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out) != nil {
+		return canonical.Unavailable()
+	}
+	return nil
+}
+
+func (h HTTP) localCounts(ctx context.Context, ns string, ids []string, counts map[string]int) error {
+	rows, err := h.Store.DB.Pool.Query(ctx, `SELECT status,count(*) FROM ingestion_failures WHERE namespace=$1 AND message_id=ANY($2) GROUP BY status`, ns, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status string
+		var n int
+		if err = rows.Scan(&status, &n); err != nil {
+			return err
+		}
+		counts[status] = n
+	}
+	return rows.Err()
 }

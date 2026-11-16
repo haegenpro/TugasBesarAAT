@@ -452,7 +452,10 @@ func (s *Store) assessVolcanic(ctx context.Context, tx pgx.Tx, r clients.Volcani
 		_, err = tx.Exec(ctx, `UPDATE report_notices SET payload=$1 WHERE notice_id=$2`, b, n.NoticeID)
 		return err
 	}
-	raw := map[string]any{"report_id": r.ReportID, "volcano_id": r.VolcanoID, "alert_level": r.AlertLevel, "reported_at": r.ReportedAt, "eruption_count_24h": r.EruptionCount24h, "ash_column_height_m": r.AshColumnHeightM}
+	raw := map[string]any{"report_id": r.ReportID, "volcano_id": r.VolcanoID, "alert_level": r.AlertLevel, "reported_at": r.ReportedAt, "eruption_count_24h": r.EruptionCount24h}
+	if r.AshColumnHeightM != nil {
+		raw["ash_column_height_m"] = *r.AshColumnHeightM
+	}
 	for k, v := range r.Attributes {
 		raw[k] = v
 	}

@@ -24,6 +24,8 @@ type config struct {
 	PriorityEnabled      bool
 	FieldReserved        int
 	AuthMaxInFlight      int
+	IngestionURL         string
+	FieldReportToken     string
 }
 
 func loadConfig() (config, error) {
@@ -55,6 +57,19 @@ func loadConfig() (config, error) {
 	cfg.AnalyticsToken = os.Getenv("ANALYTICS_SERVICE_TOKEN")
 	if cfg.AnalyticsEnabled && (cfg.AnalyticsToken == "" || cfg.AnalyticsToken == cfg.AuthInternalKey) {
 		return config{}, fmt.Errorf("dedicated ANALYTICS_SERVICE_TOKEN required")
+	}
+	if raw := os.Getenv("INGESTION_BASE_URL"); raw != "" {
+		settings, err := requiredEnv("INGESTION_BASE_URL", "FIELD_REPORT_SERVICE_TOKEN")
+		if err != nil {
+			return config{}, err
+		}
+		if err = envURL(settings, "INGESTION_BASE_URL", "http", "https"); err != nil {
+			return config{}, err
+		}
+		cfg.IngestionURL, cfg.FieldReportToken = settings["INGESTION_BASE_URL"], settings["FIELD_REPORT_SERVICE_TOKEN"]
+		if cfg.FieldReportToken == cfg.AuthInternalKey || cfg.FieldReportToken == cfg.AnalyticsToken {
+			return config{}, fmt.Errorf("dedicated FIELD_REPORT_SERVICE_TOKEN required")
+		}
 	}
 	if raw := os.Getenv("CLIENT_API_PRIORITY_ENABLED"); raw != "" && raw != "false" && raw != "true" {
 		return config{}, fmt.Errorf("CLIENT_API_PRIORITY_ENABLED must be true or false")

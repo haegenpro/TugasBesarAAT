@@ -119,6 +119,8 @@ func Validate(e Envelope) error {
 		allowed = e.Operation == "detection" || e.Operation == "update" || e.Operation == "retract" || e.Operation == "heartbeat"
 	case "BMKG", "PVMBG", "SENSOR_PANTAI":
 		allowed = e.Operation == "create" || e.Operation == "update" || e.Operation == "retract"
+	case "FIELD_REPORT":
+		allowed = e.Operation == "create"
 	}
 	if !allowed || e.MessageID != ID(e) || e.Size < 0 {
 		return bad()

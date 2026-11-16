@@ -1,10 +1,21 @@
 // Requires the local env files used by Compose; starts no containers.
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+// Generate isolated current env files, so a developer's older .env does not
+// affect this configuration test or need to be overwritten.
+const fixture = mkdtempSync(join(tmpdir(), 'aat-port-config-'));
+after(() => rmSync(fixture, { recursive: true, force: true }));
+copyFileSync(join(root, 'docker-compose.yml'), join(fixture, 'docker-compose.yml'));
+const setup = spawnSync(process.platform === 'win32' ? 'python' : 'python3',
+  [join(root, 'scripts', 'setup-env.py'), '--output-root', fixture], { encoding: 'utf8' });
+assert.equal(setup.status, 0, setup.stderr);
 const names = ['BMKG_PORT', 'PVMBG_PORT', 'AGGREGATOR_PORT', 'AUTH_PORT', 'CLIENT_API_PORT',
   'DASHBOARD_PORT', 'NOTIFIER_PORT', 'DEMO_CONSUMER_PORT', 'NATS_PORT', 'NATS_MONITOR_PORT',
   'SCHEMA_REGISTRY_PORT', 'SCHEMA_REGISTRY_MANAGEMENT_PORT', 'POSTGRES_PORT', 'REGISTRY_DB_PORT',
@@ -13,7 +24,7 @@ const ports = Object.fromEntries(names.map((key, i) => [key, String(24000 + i)])
 function config(overrides = {}) {
   return spawnSync('docker', ['compose', '--profile', 'demo', '--profile', 'consumer-demo',
     '--profile', 'tools', '--profile', 'monitoring', 'config', '--format', 'json'], {
-    cwd: root, env: { ...process.env, ...ports, ...overrides }, encoding: 'utf8', maxBuffer: 4 << 20,
+    cwd: fixture, env: { ...process.env, ...ports, ...overrides }, encoding: 'utf8', maxBuffer: 4 << 20,
   });
 }
 

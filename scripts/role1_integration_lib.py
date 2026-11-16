@@ -91,10 +91,47 @@ def render(inventory, aggregator_config, config, aggregator_image, ingestion_ima
     def group_peer(labels): return {"podSelector": {"matchLabels": labels}}
     def group_flow(labels, ports, direction="to"): return {direction: [group_peer(label) for label in labels], "ports": [{"protocol": "TCP", "port": port} for port in ports]}
     policy("ingestion", selector, [incoming(["aggregator", "prometheus", "alloy"], [8080])], [flow(["aggregator", "schema-registry", "tempo"], [8080, 4318]), flow(["auth-service"], [8083]), flow(["broker"], [4222]), flow(["bmkg-mock"], [8081]), group_flow([storage, router], [5432])])
+    policy("ingestion-auth", {"app.kubernetes.io/name": "auth-service"}, [incoming(["ingestion"], [8083])])
     policy("bmkg", {"app.kubernetes.io/name": "bmkg-mock"}, [incoming(["ingestion"], [8081])])
     api_egress = [{"to": [{"ipBlock": {"cidr": inventory["service_cidr"]}}], "ports": [{"protocol": "TCP", "port": 443}]}, {"to": [{"ipBlock": {"cidr": n["address"] + "/32"}} for n in inventory["nodes"]], "ports": [{"protocol": "TCP", "port": 6443}]}]
     policy("aggregator", {"app.kubernetes.io/name": "aggregator"}, [incoming(["ingestion"], [8080])], [flow(["ingestion"], [8080]), group_flow([{"platform.aat/formation": cluster + "-storage", "component": "storage-postgres"}], [8008])] + api_egress)
     policy("owned-postgres", storage, [incoming(["ingestion", "ingestion-migrate"], [5432]), group_flow([storage, router], [5432, 8008], "from")], [group_flow([storage], [5432, 8008]), group_flow([etcd], [2379])])
     policy("owned-router", router, [incoming(["ingestion", "ingestion-migrate"], [5432])], [group_flow([storage], [5432, 8008])])
     policy("owned-etcd", etcd, [group_flow([storage, etcd], [2379], "from"), group_flow([etcd], [2380], "from")], [group_flow([etcd], [2379, 2380])])
+    if "r3" in config:
+        add_r3(result, config, container, owned, obj, values, secret_env, policy, incoming, flow, group_flow, storage, router, cluster)
     return result
+
+
+def add_r3(result, config, aggregator, owned, obj, values, secret_env, policy, incoming, flow, group_flow, storage, router, cluster):
+    r3 = config["r3"]
+    require(isinstance(r3, dict), "r3 requires explicit ingestion settings")
+    for key in ("field_reports_namespace", "coastal_namespace"):
+        require(isinstance(r3.get(key), str) and r3[key] and "\x00" not in r3[key], "explicit R3 namespace required")
+    require(isinstance(r3.get("satellite_feed_url"), str) and r3["satellite_feed_url"].startswith("https://"), "https satellite feed URL required")
+    adapter = r3.get("pvmbg_adapter_version", 1)
+    require(adapter in (1, 2), "pvmbg_adapter_version must be 1 or 2")
+    pantai_secret = r3.get("pantai_secret", "pantai-runtime")
+    require(isinstance(pantai_secret, str) and re.fullmatch(r"[a-z0-9][a-z0-9.-]*", pantai_secret), "named Sensor Pantai Secret required")
+    aggregator["env"] += values({"PVMBG_ADAPTER_VERSION": adapter, "COASTAL_STATUS_URL": "http://coastal-processor:8080"})
+    if adapter == 2:
+        aggregator["env"] = [v for v in aggregator["env"] if v["name"] != "PVMBG_READER_SCHEMA"] + values({"PVMBG_READER_SCHEMA": "/schemas/volcanic-adapter-v2.avsc"})
+    schema = next(x for x in result["items"] if x["kind"] == "ConfigMap" and x["metadata"]["name"] == cluster + "-raw-schema")
+    schema["data"]["coastal-warning.avsc"] = (Path(__file__).resolve().parent.parent / "docs/fixtures/coastal-warning-v1.avsc").read_text(encoding="utf-8")
+    ingestion = owned["containers"][0]
+    base = copy.deepcopy(ingestion["env"])
+    ingestion["env"] += values({"INGESTION_COMPONENTS": "bmkg,field-reports,satellite", "FIELD_REPORT_NAMESPACE": r3["field_reports_namespace"], "SATELLITE_FEED_URL": r3["satellite_feed_url"], "SATELLITE_NAMESPACE": config["satellite_namespace"], "SATELLITE_INITIAL_OFFSET": config["satellite_initial_offset"]}) + [secret_env(key, config["runtime_secret"]) for key in ("FIELD_REPORT_SERVICE_TOKEN", "SATELLITE_FEED_TOKEN")]
+    coastal_pod = copy.deepcopy(owned)
+    selector = {"app.kubernetes.io/name": "coastal-processor", "platform.aat/cluster": cluster}
+    coastal_pod["topologySpreadConstraints"][0]["labelSelector"] = {"matchLabels": selector}
+    coastal = coastal_pod["containers"][0]
+    coastal["name"] = "coastal-processor"
+    coastal["env"] = [v for v in base if not v["name"].startswith("BMKG_")] + values({"INGESTION_COMPONENTS": "coastal", "PANTAI_BASE_URL": "http://sensor-pantai:8080", "COASTAL_NAMESPACE": r3["coastal_namespace"], "COASTAL_WARNING_SCHEMA": "/etc/role1/coastal-warning.avsc"}) + [secret_env("CANONICAL_SERVICE_TOKEN", config["runtime_secret"]), secret_env("PANTAI_AUTH_TOKEN", pantai_secret), secret_env("COASTAL_SLO_TOKEN", config["runtime_secret"])]
+    result["items"] += [obj("apps/v1", "Deployment", cluster + "-coastal-processor", spec={"replicas": 2, "selector": {"matchLabels": selector}, "strategy": {"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1}}, "template": {"metadata": {"labels": {**selector, "role": "consumer"}}, "spec": coastal_pod}}), obj("v1", "Service", "coastal-processor", spec={"selector": selector, "ports": [{"name": "http", "port": 8080, "targetPort": "http"}]})]
+    policy("field-reports", {"app.kubernetes.io/name": "ingestion"}, [incoming(["client-api"], [8080])])
+    policy("client-api-reports", {"app.kubernetes.io/name": "client-api"}, egress=[flow(["ingestion"], [8080])])
+    policy("coastal-processor", selector, [incoming(["aggregator", "consumer-notifier", "prometheus", "alloy"], [8080])], [flow(["aggregator", "schema-registry", "sensor-pantai"], [8080]), flow(["tempo"], [4318]), flow(["broker"], [4222]), group_flow([storage, router], [5432])])
+    policy("notifier-coastal-slo", {"app.kubernetes.io/name": "consumer-notifier"}, egress=[flow(["coastal-processor"], [8080])])
+    policy("coastal-status", {"app.kubernetes.io/name": "aggregator"}, egress=[flow(["coastal-processor"], [8080])])
+    policy("coastal-storage", storage, [incoming(["coastal-processor"], [5432])])
+    policy("coastal-router", router, [incoming(["coastal-processor"], [5432])])

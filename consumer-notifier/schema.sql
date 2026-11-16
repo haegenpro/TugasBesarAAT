@@ -13,3 +13,6 @@ CREATE TABLE IF NOT EXISTS notice_records (notice_id TEXT PRIMARY KEY, revision 
 CREATE TABLE IF NOT EXISTS source_status_records (endpoint TEXT PRIMARY KEY, revision BIGINT NOT NULL, payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS notifications (event_id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, processed_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS consumer_control (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS coastal_warning_receipts (notification_id TEXT PRIMARY KEY, digest TEXT NOT NULL, observation_id TEXT NOT NULL, observed_at TIMESTAMPTZ NOT NULL, first_received_at TIMESTAMPTZ NOT NULL, committed_at TIMESTAMPTZ NOT NULL);
+CREATE INDEX IF NOT EXISTS coastal_warning_receipts_received ON coastal_warning_receipts(first_received_at);
+CREATE TABLE IF NOT EXISTS coastal_warning_conflicts (notification_id TEXT NOT NULL, digest TEXT NOT NULL, payload BYTEA NOT NULL, detected_at TIMESTAMPTZ NOT NULL, PRIMARY KEY(notification_id, digest));

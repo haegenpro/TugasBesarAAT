@@ -36,7 +36,8 @@ func Migrate(ctx context.Context, c *pgx.Conn, repositoryRoot, role string) erro
 	if _, err = tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS ingestion_migrations(version text PRIMARY KEY,checksum text NOT NULL)`); err != nil {
 		return err
 	}
-	names := []string{"0001_ingestion.sql", "0004_ownership.sql", "0005_replication_probe.sql"}
+	names := []string{"0001_ingestion.sql", "0004_ownership.sql", "0005_replication_probe.sql", "0002_r3.sql", "0003_source_envelopes.sql", "0004_coastal_accounting.sql"}
+	embedded := map[string]bool{"0001_ingestion.sql": true, "0002_r3.sql": true, "0003_source_envelopes.sql": true, "0004_coastal_accounting.sql": true}
 	var count int
 	if err = tx.QueryRow(ctx, `SELECT count(*) FROM ingestion_migrations WHERE version<>ALL($1)`, names).Scan(&count); err != nil {
 		return err
@@ -46,7 +47,7 @@ func Migrate(ctx context.Context, c *pgx.Conn, repositoryRoot, role string) erro
 	}
 	for _, name := range names {
 		var b []byte
-		if name == names[0] {
+		if embedded[name] {
 			b, err = schema.ReadFile("migrations/" + name)
 		} else {
 			b, err = os.ReadFile(filepath.Join(repositoryRoot, "store", "migrations", name))
@@ -80,7 +81,7 @@ func Migrate(ctx context.Context, c *pgx.Conn, repositoryRoot, role string) erro
 	}
 	if role != "" {
 		q := pgx.Identifier{role}.Sanitize()
-		_, err = tx.Exec(ctx, `GRANT USAGE ON SCHEMA public TO `+q+`; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO `+q+`; REVOKE ALL ON ingestion_migrations,platform_storage_identity FROM `+q+`; GRANT EXECUTE ON FUNCTION platform_replication_status() TO `+q)
+		_, err = tx.Exec(ctx, `GRANT USAGE ON SCHEMA public TO `+q+`; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO `+q+`; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO `+q+`; REVOKE ALL ON ingestion_migrations,platform_storage_identity FROM `+q+`; GRANT EXECUTE ON FUNCTION platform_replication_status() TO `+q)
 		if err != nil {
 			return err
 		}

@@ -101,6 +101,9 @@ func (p *Poller) runSource(ctx context.Context, source string) {
 		}); ok && source == "PVMBG" {
 			launch("mapping:volcanic", func(c context.Context, id string, _ time.Time) error { return p.retryVolcanicMapping(c, id) })
 		}
+		if st, ok := p.Store.(LegacyReplayStore); ok && source == "PVMBG" {
+			launch("replay:volcanic", func(c context.Context, id string, _ time.Time) error { return p.replayParkedVolcanic(c, st, id) })
+		}
 	}
 	if !p.DisableReplay {
 		if _, ok := p.Store.(RecoveryStore); ok {

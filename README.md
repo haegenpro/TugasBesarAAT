@@ -110,6 +110,29 @@ stopping recovery. Both consumers apply versioned corrections through the added
 procedures below describe storage and delivery; the test runbook includes the
 preliminary-report and recovery checks.
 
+## M2 ingestion and delivery
+
+The `raw-ingestion` binary runs the components named in `INGESTION_COMPONENTS`:
+`bmkg`, `field-reports`, `satellite` and `coastal`. Kubernetes runs them as two
+workloads, `ingestion` and `coastal-processor`.
+
+- **Field reports.** `POST /field-reports` (Tim Lapangan only) returns 202 after
+  the report is durable in JetStream. Retries with the same `Idempotency-Key`
+  return the same receipt.
+- **Satellite.** The connector streams the satellite feed into the wildfire
+  pipeline without gaps or duplicates.
+- **Sensor Pantai.** Acquisition sits behind circuit breakers. Critical
+  observations are delivered to the notifier's `tim-lapangan-v1` consumer, and
+  `GET /warnings/slo` reports the delivery SLO.
+- **PVMBG schemas.** The mock gains incompatible schema modes. Parked PVMBG
+  failures replay through the Ops replay API after `PVMBG_ADAPTER_VERSION=2` is
+  rolled out.
+
+Configuration, scenario triggers and metrics are in
+[R3 Ingestion and Delivery](docs/R3-Ingestion-and-Delivery.md). The sensor's
+observed behaviour is in
+[Sensor Pantai Characterization](docs/Sensor-Pantai-Characterization.md).
+
 ## Repository layout
 
 ```text
