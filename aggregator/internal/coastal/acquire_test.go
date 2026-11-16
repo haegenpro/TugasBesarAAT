@@ -101,7 +101,7 @@ func database(t *testing.T) *store.Store {
 func TestAcquisitionPublishesPagesAndResumesFromDurableCursor(t *testing.T) {
 	db := database(t)
 	pages := map[string]string{
-		"":         `{"generated_at":"2026-11-12T00:31:00Z","items":[` + observation + `,{"critical":false,"observation_id":"obs-000121","observed_at":"2026-11-12T00:30:15Z","quality":"suspect","sea_level_anomaly_m":0.1,"station_id":"stn-padang-01","wave_height_m":0.9}],"next_cursor":"c2"}`,
+		"":   `{"generated_at":"2026-11-12T00:31:00Z","items":[` + observation + `,{"critical":false,"observation_id":"obs-000121","observed_at":"2026-11-12T00:30:15Z","quality":"suspect","sea_level_anomaly_m":0.1,"station_id":"stn-padang-01","wave_height_m":0.9}],"next_cursor":"c2"}`,
 		"c2": `{"generated_at":"2026-11-12T00:31:15Z","items":[],"next_cursor":null}`,
 	}
 	var mu sync.Mutex

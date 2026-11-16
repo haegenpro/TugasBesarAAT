@@ -102,6 +102,11 @@ func run() error {
 			return err
 		}
 	}
+	if enabled["satellite"] {
+		if err = require("SATELLITE_FEED_URL", "SATELLITE_FEED_TOKEN", "SATELLITE_NAMESPACE", "SATELLITE_INITIAL_OFFSET"); err != nil {
+			return err
+		}
+	}
 	if enabled["coastal"] {
 		if err = require("PANTAI_BASE_URL", "PANTAI_AUTH_TOKEN", "COASTAL_NAMESPACE", "COASTAL_WARNING_SCHEMA", "AGGREGATOR_BASE_URL", "CANONICAL_SERVICE_TOKEN"); err != nil {
 			return err
@@ -189,6 +194,9 @@ func run() error {
 	if enabled["coastal"] {
 		streams = append(streams, rawinput.Coastal, rawinput.Critical)
 	}
+	if enabled["satellite"] {
+		streams = append(streams, rawinput.Satellite)
+	}
 	ensure := func(ctx context.Context) (map[string]jetstream.Consumer, error) {
 		consumers := map[string]jetstream.Consumer{}
 		for _, s := range streams {
@@ -238,6 +246,11 @@ func run() error {
 		go ledger.RunOutbox(ctx)
 		go consumer.Run(ctx)
 		fieldreport.HTTP{Ledger: ledger, Token: reportToken}.Register(r)
+	}
+	if enabled["satellite"] {
+		if err = startSatellite(ctx, coordinator, db, durability, authority, sender); err != nil {
+			return err
+		}
 	}
 	if enabled["coastal"] {
 		if err = startCoastal(ctx, r, coordinator, db, durability, authority, sender, registry, rawReader, consumers, replicas, js, token); err != nil {

@@ -41,9 +41,9 @@ type Ledger struct {
 type entry struct {
 	Receipt
 	submitter, fingerprint, contentType, messageID, correlationID, state string
-	traceparent                                                       *string
-	payload                                                           []byte
-	position                                                          int64
+	traceparent                                                          *string
+	payload                                                              []byte
+	position                                                             int64
 }
 
 var errPending = canonical.Fail(503, "acceptance_pending", "report acceptance is not yet confirmed; retry with the same Idempotency-Key")
