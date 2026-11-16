@@ -130,7 +130,7 @@ Konsep lain:
 
 - **Zero loss:** tidak ada operasi kritis yang hilang. Dicek dengan rekonsiliasi `observation_id` kritis di sumber terhadap `coastal_warning_receipts`.
 - **Ketepatan waktu:** ≥ 95% peringatan kritis sampai dalam ≤ 5 detik, diukur dari akuisisi pertama BNPB sampai *commit* di penerima, selama jendela game day.
-- **Error budget:** 5% operasi kritis boleh terlambat. Pemakaiannya dilaporkan oleh `GET /warnings/slo` (`error_budget_used`). Operasi yang masih tertunda di akhir jendela dihitung terlambat.
+- **Error budget:** 5% operasi kritis boleh terlambat. `GET /warnings/slo` menghitung `error_budget_used` hanya dari receipt yang sudah terkirim. Operasi tertunda belum masuk denominator endpoint ini; rekonsiliasi terpisah dengan identitas kritis dari sumber wajib dilakukan, dan yang melewati batas lima detik harus dihitung terlambat. Endpoint ini sendiri belum membuktikan zero loss atau error budget seluruh jalur.
 
 ### Perilaku menyimpang sensor
 

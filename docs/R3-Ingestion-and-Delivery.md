@@ -37,7 +37,7 @@ This document covers what Reliable Ingestion & Delivery adds for M2 and how to o
 | `SATELLITE_FROM_EXCLUSIVE` | `false` | Set to `true` if the feed's `from` excludes the given offset. |
 | `SATELLITE_IDLE_TIMEOUT` | `30s` | Reconnect when no event or heartbeat arrives in this time. |
 | `SATELLITE_FLUSH_EVERY`, `SATELLITE_FLUSH_AFTER` | `256`, `1s` | Progress is committed after this many events or this much time. |
-| `SATELLITE_MAX_EVENT_BYTES` | `262144` | Largest accepted SSE line. |
+| `SATELLITE_MAX_EVENT_BYTES` | `262144` | Maximum SSE event size, also enforced per line. |
 | `PANTAI_BASE_URL`, `PANTAI_AUTH_TOKEN` | — | Sensor Pantai endpoint and token (Secret). |
 | `COASTAL_NAMESPACE` | — | Stable namespace for coastal RawInput identities. |
 | `COASTAL_WARNING_SCHEMA` | — | Path to `docs/fixtures/coastal-warning-v1.avsc`. |
@@ -80,7 +80,7 @@ Add an `r3` block to a copy of `deployment/role1/config.example.json`:
 Setup steps:
 1. Add `FIELD_REPORT_SERVICE_TOKEN`, `SATELLITE_FEED_TOKEN` and `CANONICAL_SERVICE_TOKEN` to the role1 runtime Secret, and `FIELD_REPORT_SERVICE_TOKEN` to `client-api-runtime`.
 2. Generic NetworkPolicy cannot name a host, so allow the satellite feed explicitly with `scripts/platform-isolation.py --extra-flows`, for example `{"app":"ingestion","cidr":"<feed address>/32","ports":[443]}`.
-3. Run `raw-ingestion migrate --offline` once to create the ingestion R3 tables. The Aggregator schema needs `store/migrations/0012_legacy_replay.sql`.
+3. Run `raw-ingestion migrate --offline REPOSITORY_ROOT RUNTIME_ROLE` once with the administrator migration credential to create the ingestion R3 tables, including `0003_source_envelopes.sql`. This additive migration must also be applied to databases that already ran `0002_r3.sql`. The Aggregator schema needs `store/migrations/0012_legacy_replay.sql`.
 
 ## Schema change policy (P3)
 
@@ -185,6 +185,19 @@ curl "$AGG/internal/satellite/history?namespace=<satellite namespace>&limit=1000
 ## Verification
 
 Go is built in Docker. Integration tests need a throwaway PostgreSQL on loopback:
+
+For reproducible Windows/Linux local checks that create and remove their own test containers, run:
+
+```sh
+python scripts/test-r3-local.py
+python scripts/test-r3-local.py --broker-only
+```
+
+The first command runs all Go modules, vet, focused PostgreSQL integration and R3 race checks. The second uses a pinned real JetStream broker for report acceptance, warning receipts and existing consumer/broker tests. JSON test events and skip counts are saved under `evidence/r3-review/<run-id>`. These single-node checks do not establish Kubernetes failover, zero critical loss or the live-feed throughput target. See [the review and remaining gaps](R3-Review-2026-11-16.md).
+
+Satellite and coastal acquisition now persist each original envelope before publishing. Reacquisition reuses its original timestamp, correlation context and ownership provenance so canonical-history fingerprints remain identical after the broker deduplication window. Receipts are retired in the fenced cursor transaction after PubAck; they are not an indefinite duplicate copy of history.
+
+Manual targeted checks:
 
 ```sh
 docker run -d --name r3-pg -e POSTGRES_USER=lab -e POSTGRES_PASSWORD=lab postgres:16-alpine3.24
