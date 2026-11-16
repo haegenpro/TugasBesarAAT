@@ -55,6 +55,14 @@ func Source(endpoint string) (string, bool) {
 	}
 }
 
+func Supported(source string) bool {
+	switch source {
+	case "BMKG", "PVMBG", "SATELIT", "SENSOR_PANTAI":
+		return true
+	}
+	return false
+}
+
 type guardKey struct{}
 
 type guard struct {
@@ -116,7 +124,7 @@ func RequireRequest(ctx context.Context, source string) error {
 // Run elects one owner for this source and drains its work before releasing or
 // reacquiring. Other sources use independent Run calls and can have other owners.
 func (c *Coordinator) Run(ctx context.Context, source string, work func(context.Context)) {
-	if source != "BMKG" && source != "PVMBG" {
+	if !Supported(source) {
 		c.logger.Error("unsupported acquisition source", "source", source)
 		return
 	}

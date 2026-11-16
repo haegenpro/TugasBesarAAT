@@ -295,8 +295,21 @@ func (h HTTP) failurePayload(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), canonical.Deadline)
 	defer cancel()
+	var sum, contentType string
+	var body []byte
+	err := h.Store.DB.Pool.QueryRow(ctx, `SELECT content_type,payload,sha256 FROM ingestion_failure_payloads WHERE namespace=$1 AND message_id=$2`, c.Query("namespace"), c.Param("id")).Scan(&contentType, &body, &sum)
+	if err == nil {
+		c.Header("X-Payload-SHA256", sum)
+		c.Header("X-Source-Content-Type", contentType)
+		c.Data(200, "application/octet-stream", body)
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		rawinput.Error(c, canonical.Unavailable())
+		return
+	}
 	var id string
-	err := h.Store.DB.Pool.QueryRow(ctx, `SELECT c.payload_id FROM ingestion_failures f JOIN ingestion_captures c USING(namespace,position) WHERE f.namespace=$1 AND f.message_id=$2`, c.Query("namespace"), c.Param("id")).Scan(&id)
+	err = h.Store.DB.Pool.QueryRow(ctx, `SELECT c.payload_id FROM ingestion_failures f JOIN ingestion_captures c USING(namespace,position) WHERE f.namespace=$1 AND f.message_id=$2`, c.Query("namespace"), c.Param("id")).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		rawinput.Error(c, canonical.Fail(404, "not_found", "unknown failure"))
 		return

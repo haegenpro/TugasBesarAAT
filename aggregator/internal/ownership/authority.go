@@ -58,7 +58,7 @@ func (a *Authority) accepts(scope string) bool {
 		return scope == "processor:SATELIT" || scope == "processor:BMKG"
 	}
 	if a.prefix == "acquisition:" {
-		return scope == "acquisition:BMKG" || scope == "acquisition:PVMBG"
+		return scope == "acquisition:BMKG" || scope == "acquisition:PVMBG" || scope == "acquisition:SATELIT" || scope == "acquisition:SENSOR_PANTAI"
 	}
 	return scope == "canonical:BMKG" || scope == "canonical:PVMBG" || scope == "canonical:SATELIT" || scope == "canonical:SENSOR_PANTAI"
 }
