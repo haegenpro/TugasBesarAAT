@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/linkedin/goavro/v2"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 func scheduled(items ...delivery) []string {
@@ -102,8 +105,11 @@ func TestWarningReceiptIsTransactionalIdempotentAndAudited(t *testing.T) {
 	received := time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano)
 	first := deliverFrame(warningFrame(t, schema, received, 1.11))
 	repeat := deliverFrame(warningFrame(t, schema, received, 1.11))
+	// Reacquiring the same observation on a later sensor page changes transport
+	// provenance, but must not turn a logical duplicate into a payload conflict.
+	reacquired := deliverFrame(warningFrame(t, schema, time.Now().UTC().Format(time.RFC3339Nano), 1.11))
 	changed := deliverFrame(warningFrame(t, schema, received, 9.99))
-	if first.ackCalls != 1 || repeat.ackCalls != 1 || changed.ackCalls != 1 {
+	if first.ackCalls != 1 || repeat.ackCalls != 1 || reacquired.ackCalls != 1 || changed.ackCalls != 1 {
 		t.Fatalf("every delivery must be acknowledged after commit: %d %d %d", first.ackCalls, repeat.ackCalls, changed.ackCalls)
 	}
 	var receipts, inbox, conflicts int
@@ -148,5 +154,79 @@ func TestWarningConfigIsNotifierOnly(t *testing.T) {
 	}
 	if _, _, err := loadWarningConfig(config{Role: "dashboard"}); err == nil {
 		t.Fatal("dashboard accepted coastal warning delivery")
+	}
+}
+
+func TestWarningDeliveryThroughRealBroker(t *testing.T) {
+	url := os.Getenv("TEST_NATS_URL")
+	if url == "" {
+		t.Skip("TEST_NATS_URL required for real warning transport")
+	}
+	db, err := openDB(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	cfg := warningConfig{Stream: "WARNING_TEST_" + suffix, Subject: "warnings.test." + suffix, Durable: "recipient", BacklogAfter: time.Minute, FreshQuota: 3}
+	_, err = js.CreateStream(ctx, jetstream.StreamConfig{Name: cfg.Stream, Subjects: []string{cfg.Subject}, Storage: jetstream.FileStorage, Retention: jetstream.InterestPolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), cfg.Stream) })
+	schema := warningSchema(t)
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"schema": schema})
+	}))
+	defer registry.Close()
+	recipient := &warningRecipient{cfg: cfg, db: db, schemas: newSchemaClient(registry.URL, db)}
+	consumer, err := recipient.consumer(ctx, js)
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err = js.Publish(ctx, cfg.Subject, warningFrame(t, schema, received, 1.11)); err != nil {
+		t.Fatal(err)
+	}
+	if err = recipient.cycle(ctx, consumer); err != nil {
+		t.Fatal(err)
+	}
+	// Recreate the recipient and its durable subscription, then deliver the
+	// same logical warning with a later acquisition timestamp.
+	recipient = &warningRecipient{cfg: cfg, db: db, schemas: newSchemaClient(registry.URL, db)}
+	consumer, err = recipient.consumer(ctx, js)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = js.Publish(ctx, cfg.Subject, warningFrame(t, schema, time.Now().UTC().Format(time.RFC3339Nano), 1.11)); err != nil {
+		t.Fatal(err)
+	}
+	if err = recipient.cycle(ctx, consumer); err != nil {
+		t.Fatal(err)
+	}
+	var receipts, inbox, conflicts int
+	if err = db.QueryRow(`SELECT (SELECT count(*) FROM coastal_warning_receipts),(SELECT count(*) FROM notifications WHERE kind='coastal_warning'),(SELECT count(*) FROM coastal_warning_conflicts)`).Scan(&receipts, &inbox, &conflicts); err != nil {
+		t.Fatal(err)
+	}
+	if receipts != 1 || inbox != 1 || conflicts != 0 {
+		t.Fatalf("receipts=%d inbox=%d conflicts=%d", receipts, inbox, conflicts)
+	}
+	info, err := consumer.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.NumAckPending != 0 {
+		t.Fatalf("unacknowledged warnings: %d", info.NumAckPending)
 	}
 }

@@ -66,3 +66,38 @@ func TestQuarantineKeepsOriginalBytesOnce(t *testing.T) {
 	require.NoError(t, s.DB.Pool.QueryRow(ctx, `SELECT payload FROM ingestion_failure_payloads WHERE message_id=$1`, e.MessageID).Scan(&kept))
 	require.Equal(t, payload, kept)
 }
+
+func TestSourceReceiptSurvivesReacquisitionUntilCursorCommit(t *testing.T) {
+	s, owner := sourceLab(t, "SATELIT")
+	ctx := context.Background()
+	position := int64(5)
+	payload := []byte(`{"offset":5,"kind":"heartbeat"}`)
+	e := rawinput.Envelope{Version: 1, Source: s.Source, Namespace: s.Namespace, Position: &position, Operation: "heartbeat", ReceivedAt: "2026-11-16T00:00:00Z", Payload: payload, Size: int64(len(payload)), Digest: rawinput.Hash(payload), ContentType: "application/json", CorrelationID: "first-attempt", OwnershipScope: owner.Scope, OwnershipEpoch: owner.Epoch, OwnershipHolder: owner.Holder}
+	e.MessageID = rawinput.ID(e)
+	first, err := s.Preserve(ctx, owner, e)
+	require.NoError(t, err)
+	// Model a publish that committed but whose reply/cursor commit was lost,
+	// followed by a different instance taking over after the dedup window.
+	a := s.Fence.(*ownership.Authority)
+	require.NoError(t, a.Release(ctx, owner))
+	lease, err := a.Acquire(ctx, canonical.AcquireOwnership{Scope: owner.Scope, Holder: "replacement"})
+	require.NoError(t, err)
+	retry := e
+	retry.ReceivedAt = "2026-11-16T00:05:00Z"
+	retry.CorrelationID = "reconnect"
+	retry.OwnershipEpoch, retry.OwnershipHolder = lease.Ownership.Epoch, lease.Ownership.Holder
+	kept, err := s.Preserve(ctx, lease.Ownership, retry)
+	require.NoError(t, err)
+	require.Equal(t, rawinput.Fingerprint(first), rawinput.Fingerprint(kept))
+	_, err = s.Preserve(ctx, owner, retry)
+	require.Error(t, err, "a stale instance must not reserve receipts")
+	changed := retry
+	changed.Payload = []byte(`{"offset":5,"changed":true}`)
+	changed.Size, changed.Digest = int64(len(changed.Payload)), rawinput.Hash(changed.Payload)
+	_, err = s.Preserve(ctx, lease.Ownership, changed)
+	require.ErrorContains(t, err, "identity_conflict")
+	require.NoError(t, s.Advance(ctx, lease.Ownership, Progress{Position: 6}))
+	var pending int
+	require.NoError(t, s.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM source_envelopes`).Scan(&pending))
+	require.Zero(t, pending, "confirmed offsets must not retain an unbounded receipt ledger")
+}

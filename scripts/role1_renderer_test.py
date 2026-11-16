@@ -71,6 +71,21 @@ class Role1RendererTests(unittest.TestCase):
         with self.assertRaises(ValueError):render(self.inventory,self.aggregator,bad,self.image,self.image)
         bad=copy.deepcopy(config);bad['r3']['pvmbg_adapter_version']=3
         with self.assertRaises(ValueError):render(self.inventory,self.aggregator,bad,self.image,self.image)
+    def test_ops_introspection_is_allowed_in_both_directions(self):
+        result=render(self.inventory,self.aggregator,self.config,self.image,self.image)
+        policies=[p['spec'] for p in result['items'] if p['kind']=='NetworkPolicy']
+        def permits(app, direction, peer, port):
+            for policy in policies:
+                if policy['podSelector']['matchLabels'].get('app.kubernetes.io/name')!=app:
+                    continue
+                for rule in policy[direction]:
+                    if any(p.get('port')==port for p in rule.get('ports',[])) and any(
+                        p.get('podSelector',{}).get('matchLabels',{}).get('app.kubernetes.io/name')==peer
+                        for p in rule.get('to' if direction=='egress' else 'from',[])):
+                        return True
+            return False
+        self.assertTrue(permits('ingestion','egress','auth-service',8083))
+        self.assertTrue(permits('auth-service','ingress','ingestion',8083))
     def test_refuse_mutable_images_and_unvalidated_quota(self):
         with self.assertRaises(ValueError):render(self.inventory,self.aggregator,self.config,'aat:latest',self.image)
         with self.assertRaises(ValueError):render(self.inventory,self.aggregator,self.config,self.image,'aat:latest')

@@ -109,6 +109,10 @@ func (a *Acquirer) Step(ctx context.Context) (bool, error) {
 			platform.Add("coastal_observations_quarantined_total", 1)
 			continue
 		}
+		e, err = a.Progress.Preserve(ctx, owner, e)
+		if err != nil {
+			return false, err
+		}
 		if err = a.Sender.Send(ctx, rawinput.Coastal.Subject, e); err != nil {
 			return false, err
 		}

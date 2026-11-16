@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,9 @@ func fields(raw []byte) (map[string]json.RawMessage, error) {
 	var m map[string]json.RawMessage
 	if err := d.Decode(&m); err != nil || m == nil {
 		return nil, unreadable("event data is not a JSON object")
+	}
+	if err := d.Decode(new(any)); err != io.EOF {
+		return nil, unreadable("event data is not a single JSON object")
 	}
 	return m, nil
 }
@@ -177,18 +181,25 @@ func clock(m map[string]json.RawMessage) *time.Time {
 }
 
 func Normalize(namespace string, e Event) (Normalized, error) {
+	// The SSE id remains usable for quarantine even if the JSON is truncated.
+	n := Normalized{Offset: -1, Kind: e.Type}
+	if offset, err := offsetOf(e, nil); err == nil {
+		n.Offset = offset
+	}
 	m, err := fields(e.Data)
 	if err != nil {
 		if e.Type == "heartbeat" && len(bytes.TrimSpace(e.Data)) == 0 {
 			m = map[string]json.RawMessage{}
 		} else {
-			return Normalized{}, err
+			return n, err
 		}
 	}
-	n := Normalized{Kind: e.Type, VirtualNow: clock(m)}
-	if n.Offset, err = offsetOf(e, m); err != nil {
+	n.VirtualNow = clock(m)
+	offset, err := offsetOf(e, m)
+	if err != nil {
 		return n, err
 	}
+	n.Offset = offset
 	op := map[string]any{"version": 1, "namespace": namespace, "offset": n.Offset, "kind": n.Kind, "payload": e.Data}
 	if n.VirtualNow != nil {
 		op["virtual_now"] = n.VirtualNow.Format(time.RFC3339Nano)

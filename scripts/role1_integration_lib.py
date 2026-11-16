@@ -91,6 +91,7 @@ def render(inventory, aggregator_config, config, aggregator_image, ingestion_ima
     def group_peer(labels): return {"podSelector": {"matchLabels": labels}}
     def group_flow(labels, ports, direction="to"): return {direction: [group_peer(label) for label in labels], "ports": [{"protocol": "TCP", "port": port} for port in ports]}
     policy("ingestion", selector, [incoming(["aggregator", "prometheus", "alloy"], [8080])], [flow(["aggregator", "schema-registry", "tempo"], [8080, 4318]), flow(["auth-service"], [8083]), flow(["broker"], [4222]), flow(["bmkg-mock"], [8081]), group_flow([storage, router], [5432])])
+    policy("ingestion-auth", {"app.kubernetes.io/name": "auth-service"}, [incoming(["ingestion"], [8083])])
     policy("bmkg", {"app.kubernetes.io/name": "bmkg-mock"}, [incoming(["ingestion"], [8081])])
     api_egress = [{"to": [{"ipBlock": {"cidr": inventory["service_cidr"]}}], "ports": [{"protocol": "TCP", "port": 443}]}, {"to": [{"ipBlock": {"cidr": n["address"] + "/32"}} for n in inventory["nodes"]], "ports": [{"protocol": "TCP", "port": 6443}]}]
     policy("aggregator", {"app.kubernetes.io/name": "aggregator"}, [incoming(["ingestion"], [8080])], [flow(["ingestion"], [8080]), group_flow([{"platform.aat/formation": cluster + "-storage", "component": "storage-postgres"}], [8008])] + api_egress)

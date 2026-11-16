@@ -19,7 +19,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -193,4 +195,61 @@ func mustReader(t *testing.T) *avrowire.Reader {
 	r, err := avrowire.NewReader(rawSchema(t))
 	require.NoError(t, err)
 	return r
+}
+
+func TestAcceptedHTTPReportSurvivesReceiverReplacementWithRealBroker(t *testing.T) {
+	url := os.Getenv("TEST_NATS_URL")
+	if url == "" {
+		t.Skip("TEST_NATS_URL required for report transport integration")
+	}
+	l, _ := ledgerLab(t)
+	nc, err := nats.Connect(url)
+	require.NoError(t, err)
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	stream, err := rawinput.Ensure(ctx, js, rawinput.Reports, 1)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = js.DeleteStream(context.Background(), rawinput.Reports.Name) })
+	l.Sender.JS = js
+	router := gin.New()
+	HTTP{Ledger: l, Token: "test-service"}.Register(router)
+	server := httptest.NewServer(router)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/internal/field-reports", strings.NewReader(validReport))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer test-service")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Submitter-ID", "field-demo")
+	req.Header.Set("Idempotency-Key", "receiver-replacement")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusAccepted, resp.StatusCode)
+	var accepted Receipt
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&accepted))
+	resp.Body.Close()
+	server.Close()
+	// Processing was stopped throughout acceptance. Replace the HTTP receiver
+	// and ledger object, then consume the work already persisted in JetStream.
+	replacement := &Ledger{DB: l.DB, Durability: l.Durability, Sender: l.Sender, Namespace: l.Namespace, Holder: "replacement"}
+	consumer := &Consumer{Ledger: replacement, Registry: l.Sender.Registry, Reader: mustReader(t), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	batch, err := stream.Fetch(1, jetstream.FetchMaxWait(time.Second))
+	require.NoError(t, err)
+	for msg := range batch.Messages() {
+		require.NoError(t, consumer.handle(ctx, msg))
+	}
+	require.NoError(t, batch.Error())
+	status, err := replacement.Status(ctx, accepted.ReceiptID, "field-demo")
+	require.NoError(t, err)
+	require.Equal(t, "processed", status.Status)
+	repeated, err := replacement.Accept(ctx, submission("receiver-replacement", validReport))
+	require.NoError(t, err)
+	require.Equal(t, accepted.ReceiptID, repeated.ReceiptID)
+	var count int
+	require.NoError(t, l.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM field_reports`).Scan(&count))
+	require.Equal(t, 1, count)
+	info, err := stream.Info(ctx)
+	require.NoError(t, err)
+	require.Zero(t, info.NumAckPending)
 }

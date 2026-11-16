@@ -99,3 +99,23 @@ func TestUnreadableEventPlaceholderKeepsOffsetsContiguous(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, data, op.Payload)
 }
+
+func TestMalformedEventPreservesItsSSEOffset(t *testing.T) {
+	n, err := Normalize("session-a", Event{ID: "9", Type: "detection", Data: []byte(`{"broken":`)})
+	require.Error(t, err)
+	require.Equal(t, int64(9), n.Offset, "quarantine must not reset a known offset to zero")
+	n, err = Normalize("session-a", Event{Type: "detection", Data: []byte(`not-json`)})
+	require.Error(t, err)
+	require.Equal(t, int64(-1), n.Offset, "an unknown offset must not be treated as an old duplicate")
+}
+
+func TestStreamBoundsMultilineEventSize(t *testing.T) {
+	body := "id: 1\nevent: detection\n" + strings.Repeat("data: "+strings.Repeat("x", 30)+"\n", 100) + "\n"
+	_, err := NewStream(strings.NewReader(body), 128).Next()
+	require.Error(t, err, "short data lines must not bypass the event size limit")
+}
+
+func TestNormalizeRejectsTrailingJSON(t *testing.T) {
+	_, err := Normalize("session-a", Event{ID: "9", Type: "heartbeat", Data: []byte(`{}]`)})
+	require.Error(t, err)
+}

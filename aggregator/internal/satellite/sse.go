@@ -19,6 +19,7 @@ type Stream struct {
 }
 
 var ErrLineTooLong = errors.New("server-sent event line exceeds the accepted size")
+var ErrEventTooLong = errors.New("server-sent event exceeds the accepted size")
 
 func NewStream(r io.Reader, maxLine int) *Stream {
 	return &Stream{r: bufio.NewReaderSize(r, 64<<10), maxLine: maxLine}
@@ -45,6 +46,7 @@ func (s *Stream) Next() (Event, error) {
 	var e Event
 	var data [][]byte
 	seen := false
+	size := 0
 	for {
 		line, err := s.line()
 		if err != nil {
@@ -65,6 +67,10 @@ func (s *Stream) Next() (Event, error) {
 		}
 		if line[0] == ':' {
 			continue
+		}
+		size += len(line) + 1
+		if size > s.maxLine {
+			return Event{}, ErrEventTooLong
 		}
 		seen = true
 		field, value, _ := bytes.Cut(line, []byte{':'})

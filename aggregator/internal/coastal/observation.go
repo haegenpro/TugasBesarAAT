@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strings"
 	"time"
@@ -50,7 +51,10 @@ func Parse(raw []byte, virtualNow *time.Time, skew time.Duration) (Observation, 
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.UseNumber()
 	var fields map[string]any
-	if err := d.Decode(&fields); err != nil || d.More() {
+	if err := d.Decode(&fields); err != nil {
+		return o, violation("payload is not a single JSON object")
+	}
+	if err := d.Decode(new(any)); err != io.EOF {
 		return o, violation("payload is not a single JSON object")
 	}
 	text := func(name string) (string, error) {

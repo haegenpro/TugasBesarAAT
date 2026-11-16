@@ -175,9 +175,8 @@ func (c *Connector) connect(ctx context.Context) error {
 			return err
 		}
 		n, normErr := Normalize(c.Progress.Namespace, e)
-		if normErr != nil && n.Offset == 0 && e.ID == "" {
-			c.Logger.Warn("satellite event without offset ignored", "type", e.Type, "error", normErr)
-			continue
+		if n.Offset < 0 {
+			return normErr
 		}
 		if n.Offset < next {
 			platform.Add("satellite_feed_duplicates_total", 1)
@@ -229,6 +228,11 @@ func (c *Connector) publish(ctx context.Context, owner canonical.Ownership, e Ev
 	}
 	env.Payload, env.Size, env.Digest = operation, int64(len(operation)), rawinput.Hash(operation)
 	env.MessageID = rawinput.ID(env)
+	var err error
+	env, err = c.Progress.Preserve(ctx, owner, env)
+	if err != nil {
+		return err
+	}
 	if err := c.Sender.Send(ctx, rawinput.Satellite.Subject, env); err != nil {
 		return err
 	}

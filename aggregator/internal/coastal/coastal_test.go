@@ -94,6 +94,11 @@ func TestParseEnforcesTheBasicContract(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestParseRejectsTrailingClosingDelimiter(t *testing.T) {
+	_, err := Parse([]byte(observation+"]"), nil, 0)
+	require.Error(t, err, "the entire payload must be a single JSON object")
+}
+
 func sensor(t *testing.T, handler http.HandlerFunc) (*Client, *atomic.Int64) {
 	t.Helper()
 	calls := &atomic.Int64{}

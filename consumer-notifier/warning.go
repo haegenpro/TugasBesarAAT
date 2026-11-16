@@ -216,6 +216,16 @@ func (r *warningRecipient) deliver(ctx context.Context, d delivery) error {
 		platform.Add("coastal_warnings_rejected_total", 1)
 		return d.msg.Term()
 	}
+	// Receipt identity covers the logical warning. A repeated source observation
+	// can have a later acquisition position/timestamp and a different trace.
+	// Keep those original inbox fields without treating the retry as corruption.
+	logical := d.warning
+	logical.Position, logical.FirstReceivedAt, logical.CorrelationID, logical.Traceparent = 0, "", "", nil
+	content, err := json.Marshal(logical)
+	if err != nil {
+		return err
+	}
+	d.digest = digestOf(content)
 	outcome, err := r.commit(ctx, d)
 	if err != nil {
 		return err
