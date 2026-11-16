@@ -31,7 +31,6 @@ func unreadable(format string, args ...any) error {
 
 func fields(raw []byte) (map[string]json.RawMessage, error) {
 	d := json.NewDecoder(bytes.NewReader(raw))
-	d.UseNumber()
 	var m map[string]json.RawMessage
 	if err := d.Decode(&m); err != nil || m == nil {
 		return nil, unreadable("event data is not a JSON object")

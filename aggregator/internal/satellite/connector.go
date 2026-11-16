@@ -221,7 +221,6 @@ func (c *Connector) publish(ctx context.Context, owner canonical.Ownership, e Ev
 		}
 		platform.Add("satellite_events_quarantined_total", 1)
 	}
-	env.VirtualNow = nil
 	if normErr == nil && n.VirtualNow != nil {
 		v := n.VirtualNow.Format(time.RFC3339Nano)
 		env.VirtualNow = &v

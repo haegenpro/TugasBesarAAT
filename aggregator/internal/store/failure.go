@@ -87,8 +87,7 @@ func (s *Store) recordFailureStream(ctx context.Context, f clients.Failure) erro
 	if f.Retryable {
 		status = "retrying"
 	}
-	var retained string
-	err = tx.QueryRow(ctx, `INSERT INTO failed_ingestions(message_id,source,entity,digest,raw_payload,truncated,retryable,reason,status,correlation_id,payload_id) VALUES($1,$2,$3,$4,''::bytea,false,$5,$6,$7,$8,$9) ON CONFLICT(source,entity,digest) DO UPDATE SET attempts=failed_ingestions.attempts+1,reason=excluded.reason,status=excluded.status,retryable=excluded.retryable,last_seen_at=now() RETURNING message_id::text`, uuid.NewString(), f.Source, f.Entity, digest, f.Retryable, f.Reason, status, f.CorrelationID, id).Scan(&retained)
+	_, err = tx.Exec(ctx, `INSERT INTO failed_ingestions(message_id,source,entity,digest,raw_payload,truncated,retryable,reason,status,correlation_id,payload_id) VALUES($1,$2,$3,$4,''::bytea,false,$5,$6,$7,$8,$9) ON CONFLICT(source,entity,digest) DO UPDATE SET attempts=failed_ingestions.attempts+1,reason=excluded.reason,status=excluded.status,retryable=excluded.retryable,last_seen_at=now()`, uuid.NewString(), f.Source, f.Entity, digest, f.Retryable, f.Reason, status, f.CorrelationID, id)
 	if err != nil {
 		return err
 	}

@@ -63,7 +63,7 @@ func (w *CanonicalWriter) handle(ctx context.Context, owner canonical.Ownership,
 		batch := canonical.Batch{ContractVersion: 1, BatchID: rawinput.Identity("coastal-batch-v1", e.MessageID, revision), Ownership: owner, Mutations: []canonical.Mutation{Mutation(e, o, s, revision)}}
 		_, err = w.Store.ApplyBatch(ctx, batch)
 		var problem *canonical.Error
-		if err == nil || !errors.As(err, &problem) {
+		if !errors.As(err, &problem) {
 			break
 		}
 		if problem.Code == "revision_conflict" && attempt == 0 {

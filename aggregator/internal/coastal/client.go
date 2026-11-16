@@ -54,20 +54,20 @@ func (e *SourceError) Error() string {
 	return fmt.Sprintf("sensor returned %d: %s", e.Status, e.Reason)
 }
 
-func (c *Client) get(ctx context.Context, b *Breaker, path string, out any) ([]byte, error) {
+func (c *Client) get(ctx context.Context, b *Breaker, path string, out any) error {
 	if err := b.Allow(); err != nil {
-		return nil, err
+		return err
 	}
 	if err := c.Limiter.Wait(ctx); err != nil {
 		b.Release()
-		return nil, err
+		return err
 	}
 	call, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(call, http.MethodGet, strings.TrimRight(c.BaseURL, "/")+path, nil)
 	if err != nil {
 		b.Release()
-		return nil, err
+		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Accept", "application/json")
@@ -80,10 +80,10 @@ func (c *Client) get(ctx context.Context, b *Breaker, path string, out any) ([]b
 	if err != nil {
 		if ctx.Err() != nil {
 			b.Release()
-			return nil, ctx.Err()
+			return ctx.Err()
 		}
 		b.Failure()
-		return nil, &SourceError{Reason: err.Error()}
+		return &SourceError{Reason: err.Error()}
 	}
 	defer resp.Body.Close()
 	limit := c.MaxBody
@@ -94,30 +94,30 @@ func (c *Client) get(ctx context.Context, b *Breaker, path string, out any) ([]b
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		b.Release()
-		return nil, ErrUnauthorized
+		return ErrUnauthorized
 	case resp.StatusCode != http.StatusOK:
 		b.Failure()
-		return nil, &SourceError{Status: resp.StatusCode, Reason: http.StatusText(resp.StatusCode)}
+		return &SourceError{Status: resp.StatusCode, Reason: http.StatusText(resp.StatusCode)}
 	case err != nil:
 		b.Failure()
-		return nil, &SourceError{Status: resp.StatusCode, Reason: "truncated body: " + err.Error()}
+		return &SourceError{Status: resp.StatusCode, Reason: "truncated body: " + err.Error()}
 	case int64(len(body)) > limit:
 		b.Failure()
-		return nil, &SourceError{Status: resp.StatusCode, Reason: "oversized body"}
+		return &SourceError{Status: resp.StatusCode, Reason: "oversized body"}
 	}
 	if err = json.Unmarshal(body, out); err != nil {
 		b.Failure()
-		return body, &SourceError{Status: resp.StatusCode, Reason: "malformed body: " + err.Error()}
+		return &SourceError{Status: resp.StatusCode, Reason: "malformed body: " + err.Error()}
 	}
 	b.Success()
-	return body, nil
+	return nil
 }
 
 func (c *Client) FetchStations(ctx context.Context) ([]Station, error) {
 	var body struct {
 		Items []Station `json:"items"`
 	}
-	if _, err := c.get(ctx, c.Stations, "/v1/stations", &body); err != nil {
+	if err := c.get(ctx, c.Stations, "/v1/stations", &body); err != nil {
 		return nil, err
 	}
 	if body.Items == nil {
@@ -133,7 +133,7 @@ func (c *Client) FetchObservations(ctx context.Context, cursor *string, limit in
 		q.Set("cursor", *cursor)
 	}
 	var page Page
-	if _, err := c.get(ctx, c.Observations, "/v1/observations?"+q.Encode(), &page); err != nil {
+	if err := c.get(ctx, c.Observations, "/v1/observations?"+q.Encode(), &page); err != nil {
 		return page, err
 	}
 	if page.Items == nil {
