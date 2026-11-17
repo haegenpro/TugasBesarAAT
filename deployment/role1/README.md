@@ -16,6 +16,11 @@ journal. Reuse the platform storage workflow with `--formation-suffix ingestion
 --mode postgres`; never point it at canonical volumes or databases. The extra
 formation retains the same platform ownership labels and resource classes.
 Capture its actual bootstrap system IDs before creating its durability ConfigMap.
+The ingestion migration accepts the administrator-created identity row only for
+a group-zero `*-ingestion` formation. Untracked application tables, a canonical
+formation, missing identity rows and changed migration checksums remain refused.
+`scripts/test-ingestion-bootstrap.py` verifies these boundaries using disposable
+PostgreSQL, including fresh initialization and repeat application.
 Generated ingestion application secrets use `INGESTION_DATABASE_URL` and
 `INGESTION_GROUP_0_URL`, not canonical `DATABASE_URL`.
 

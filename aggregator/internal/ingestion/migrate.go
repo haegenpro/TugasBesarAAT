@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 //go:embed migrations/*.sql
@@ -26,12 +27,40 @@ func Migrate(ctx context.Context, c *pgx.Conn, repositoryRoot, role string) erro
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(726103)`); err != nil {
 		return err
 	}
-	var journal, occupied bool
-	if err = tx.QueryRow(ctx, `SELECT to_regclass('ingestion_migrations') IS NOT NULL,EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='r')`).Scan(&journal, &occupied); err != nil {
+	var journal, occupied, bootstrap bool
+	if err = tx.QueryRow(ctx, `SELECT to_regclass('public.ingestion_migrations') IS NOT NULL,EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relname<>'platform_storage_identity'),to_regclass('public.platform_storage_identity') IS NOT NULL`).Scan(&journal, &occupied, &bootstrap); err != nil {
 		return err
 	}
 	if occupied && !journal {
 		return fmt.Errorf("ingestion requires an empty database or its recognized journal")
+	}
+	if bootstrap && !journal {
+		// Patroni installs the restricted replication probe before application
+		// migrations. Recognize only an ingestion coordinator's bootstrap row;
+		// a mistaken canonical/service DSN must not acquire ingestion tables.
+		var formation string
+		var group int
+		var singleton bool
+		rows, e := tx.Query(ctx, `SELECT singleton,formation,group_id FROM public.platform_storage_identity`)
+		if e != nil {
+			return e
+		}
+		count := 0
+		for rows.Next() {
+			count++
+			if e = rows.Scan(&singleton, &formation, &group); e != nil {
+				rows.Close()
+				return e
+			}
+		}
+		e = rows.Err()
+		rows.Close()
+		if e != nil {
+			return e
+		}
+		if count != 1 || !singleton || !strings.HasSuffix(formation, "-ingestion") || group != 0 {
+			return fmt.Errorf("unrecognized ingestion bootstrap identity")
+		}
 	}
 	if _, err = tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS ingestion_migrations(version text PRIMARY KEY,checksum text NOT NULL)`); err != nil {
 		return err
