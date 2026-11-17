@@ -67,6 +67,40 @@ func TestQuarantineKeepsOriginalBytesOnce(t *testing.T) {
 	require.Equal(t, payload, kept)
 }
 
+func TestPreserveBatchIsAtomicAndKeepsFirstReceipts(t *testing.T) {
+	s, owner := sourceLab(t, "SATELIT")
+	ctx := context.Background()
+	envelope := func(position int64, received, body string) rawinput.Envelope {
+		payload := []byte(body)
+		e := rawinput.Envelope{Version: 1, Source: s.Source, Namespace: s.Namespace, Position: &position, Operation: "heartbeat", ReceivedAt: received, Payload: payload, Size: int64(len(payload)), Digest: rawinput.Hash(payload), ContentType: "application/json", CorrelationID: received, OwnershipScope: owner.Scope, OwnershipEpoch: owner.Epoch, OwnershipHolder: owner.Holder}
+		e.MessageID = rawinput.ID(e)
+		return e
+	}
+	first := []rawinput.Envelope{envelope(1, "2026-11-16T00:00:00Z", `{"o":1}`), envelope(2, "2026-11-16T00:00:00Z", `{"o":2}`)}
+	kept, err := s.PreserveBatch(ctx, owner, first)
+	require.NoError(t, err)
+	require.Equal(t, first, kept)
+	retry := []rawinput.Envelope{envelope(2, "2026-11-16T00:09:00Z", `{"o":2}`), envelope(1, "2026-11-16T00:09:00Z", `{"o":1}`), envelope(3, "2026-11-16T00:09:00Z", `{"o":3}`)}
+	kept, err = s.PreserveBatch(ctx, owner, retry)
+	require.NoError(t, err)
+	require.Equal(t, []string{"2026-11-16T00:00:00Z", "2026-11-16T00:00:00Z", "2026-11-16T00:09:00Z"}, []string{kept[0].ReceivedAt, kept[1].ReceivedAt, kept[2].ReceivedAt})
+	conflicting := []rawinput.Envelope{envelope(4, "2026-11-16T00:10:00Z", `{"o":4}`), envelope(3, "2026-11-16T00:10:00Z", `{"changed":true}`)}
+	_, err = s.PreserveBatch(ctx, owner, conflicting)
+	require.ErrorContains(t, err, "identity_conflict")
+	var stored int
+	require.NoError(t, s.DB.Pool.QueryRow(ctx, `SELECT count(*) FROM source_envelopes WHERE position=4`).Scan(&stored))
+	require.Zero(t, stored, "a rejected batch must not keep any receipt")
+	_, err = s.PreserveBatch(ctx, owner, []rawinput.Envelope{envelope(5, "2026-11-16T00:10:00Z", `{"o":5}`), envelope(5, "2026-11-16T00:10:00Z", `{"o":5}`)})
+	require.Error(t, err)
+	stale := owner
+	stale.Epoch++
+	_, err = s.PreserveBatch(ctx, stale, []rawinput.Envelope{envelope(6, "2026-11-16T00:10:00Z", `{"o":6}`)})
+	require.Error(t, err)
+	kept, err = s.PreserveBatch(ctx, owner, nil)
+	require.NoError(t, err)
+	require.Empty(t, kept)
+}
+
 func TestSourceReceiptSurvivesReacquisitionUntilCursorCommit(t *testing.T) {
 	s, owner := sourceLab(t, "SATELIT")
 	ctx := context.Background()

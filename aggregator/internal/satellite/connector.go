@@ -162,45 +162,73 @@ func (c *Connector) connect(ctx context.Context) error {
 		return nil
 	}
 	defer func() { _ = flush() }()
+	batch := make([]rawinput.Envelope, 0, batchSize)
+	publish := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		kept, err := c.Progress.PreserveBatch(ctx, owner, batch)
+		if err != nil {
+			return err
+		}
+		for _, env := range kept {
+			if err = c.Sender.Send(ctx, rawinput.Satellite.Subject, env); err != nil {
+				return err
+			}
+			next++
+			pending++
+			c.published.Store(next)
+		}
+		platform.Add("satellite_events_published_total", float64(len(kept)))
+		c.reportLag()
+		batch = batch[:0]
+		if pending >= c.FlushEvery || time.Since(lastFlush) >= c.FlushAfter {
+			return flush()
+		}
+		return nil
+	}
+	expected := next
 	for {
 		e, err := events.Next()
 		if err != nil {
 			if stream.Err() != nil && ctx.Err() == nil {
-				return fmt.Errorf("feed idle for %s", c.IdleTimeout)
+				err = fmt.Errorf("feed idle for %s", c.IdleTimeout)
 			}
-			return err
+			return errors.Join(err, publish())
 		}
 		idle.Reset(c.IdleTimeout)
 		if _, err = acquisition.Token(ctx, Source); err != nil {
 			return err
 		}
 		n, normErr := Normalize(c.Progress.Namespace, e)
-		if n.Offset < 0 {
-			return normErr
-		}
-		if n.Offset < next {
+		switch {
+		case n.Offset < 0 && e.Type == "heartbeat":
+			platform.Add("satellite_feed_keepalives_total", 1)
+		case n.Offset < 0:
+			return errors.Join(normErr, publish())
+		case n.Offset < expected:
 			platform.Add("satellite_feed_duplicates_total", 1)
-			continue
+		case n.Offset > expected:
+			return errors.Join(&GapError{Expected: expected, Got: n.Offset}, publish())
+		default:
+			env, err := c.envelope(ctx, owner, e, n, normErr)
+			if err != nil {
+				return errors.Join(err, publish())
+			}
+			batch = append(batch, env)
+			expected++
 		}
-		if n.Offset > next {
-			return &GapError{Expected: next, Got: n.Offset}
-		}
-		if err = c.publish(ctx, owner, e, n, normErr); err != nil {
-			return err
-		}
-		next++
-		pending++
-		c.published.Store(next)
-		c.reportLag()
-		if pending >= c.FlushEvery || time.Since(lastFlush) >= c.FlushAfter {
-			if err = flush(); err != nil {
+		if len(batch) >= batchSize || events.Buffered() == 0 {
+			if err = publish(); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-func (c *Connector) publish(ctx context.Context, owner canonical.Ownership, e Event, n Normalized, normErr error) error {
+const batchSize = 64
+
+func (c *Connector) envelope(ctx context.Context, owner canonical.Ownership, e Event, n Normalized, normErr error) (rawinput.Envelope, error) {
 	received := time.Now().UTC().Format(time.RFC3339Nano)
 	position := n.Offset
 	env := rawinput.Envelope{Version: 1, Source: Source, Namespace: c.Progress.Namespace, Operation: n.Kind, Position: &position, ReceivedAt: received, ContentType: ContentType, CorrelationID: middleware.CorrelationFromContext(ctx), OwnershipScope: owner.Scope, OwnershipEpoch: owner.Epoch, OwnershipHolder: owner.Holder}
@@ -209,7 +237,7 @@ func (c *Connector) publish(ctx context.Context, owner canonical.Ownership, e Ev
 		env.Operation = "heartbeat"
 		placeholder, err := json.Marshal(map[string]any{"version": 1, "namespace": env.Namespace, "offset": position, "kind": "heartbeat", "payload": e.Data})
 		if err != nil {
-			return err
+			return env, err
 		}
 		operation = placeholder
 		quarantined := env
@@ -217,7 +245,7 @@ func (c *Connector) publish(ctx context.Context, owner canonical.Ownership, e Ev
 		quarantined.Payload, quarantined.Size, quarantined.Digest = e.Data, int64(len(e.Data)), rawinput.Hash(e.Data)
 		quarantined.MessageID = rawinput.Identity("raw-v1", Source, env.Namespace, position, "quarantine", e.Type)
 		if err = c.Progress.Quarantine(ctx, quarantined, e.Data, normErr.Error()); err != nil {
-			return err
+			return env, err
 		}
 		platform.Add("satellite_events_quarantined_total", 1)
 	}
@@ -227,16 +255,7 @@ func (c *Connector) publish(ctx context.Context, owner canonical.Ownership, e Ev
 	}
 	env.Payload, env.Size, env.Digest = operation, int64(len(operation)), rawinput.Hash(operation)
 	env.MessageID = rawinput.ID(env)
-	var err error
-	env, err = c.Progress.Preserve(ctx, owner, env)
-	if err != nil {
-		return err
-	}
-	if err := c.Sender.Send(ctx, rawinput.Satellite.Subject, env); err != nil {
-		return err
-	}
-	platform.Add("satellite_events_published_total", 1)
-	return nil
+	return env, nil
 }
 
 func (c *Connector) watchSession(ctx context.Context) {

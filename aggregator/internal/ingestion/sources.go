@@ -47,47 +47,85 @@ func (s *SourceStore) Progress(ctx context.Context, start int64) (Progress, erro
 // crash must not give an existing offset a new timestamp, trace or owner: the
 // canonical history fingerprints the complete envelope, not just its payload.
 func (s *SourceStore) Preserve(ctx context.Context, owner canonical.Ownership, e rawinput.Envelope) (rawinput.Envelope, error) {
-	if err := rawinput.Validate(e); err != nil {
+	kept, err := s.PreserveBatch(ctx, owner, []rawinput.Envelope{e})
+	if err != nil {
 		return e, err
 	}
-	if e.Source != s.Source || e.Namespace != s.Namespace {
-		return e, canonical.Fail(400, "invalid_request", "source receipt scope mismatch")
+	return kept[0], nil
+}
+
+func (s *SourceStore) PreserveBatch(ctx context.Context, owner canonical.Ownership, envelopes []rawinput.Envelope) ([]rawinput.Envelope, error) {
+	if len(envelopes) == 0 {
+		return nil, nil
+	}
+	positions := make([]int64, len(envelopes))
+	bodies := make([]string, len(envelopes))
+	seen := make(map[int64]bool, len(envelopes))
+	for i, e := range envelopes {
+		if err := rawinput.Validate(e); err != nil {
+			return nil, err
+		}
+		if e.Source != s.Source || e.Namespace != s.Namespace || seen[*e.Position] {
+			return nil, canonical.Fail(400, "invalid_request", "source receipt scope mismatch")
+		}
+		body, err := json.Marshal(e)
+		if err != nil {
+			return nil, err
+		}
+		positions[i], bodies[i], seen[*e.Position] = *e.Position, string(body), true
 	}
 	tx, err := s.DB.Pool.Begin(ctx)
 	if err != nil {
-		return e, canonical.Unavailable()
+		return nil, canonical.Unavailable()
 	}
 	defer tx.Rollback(context.Background())
 	if err = s.Durability.Prepare(ctx, tx); err != nil {
-		return e, err
+		return nil, err
 	}
 	if err = s.Fence.Protect(ctx, tx, owner, []canonical.Mutation{{Source: domain.Source(s.Source)}}); err != nil {
-		return e, err
+		return nil, err
 	}
-	body, err := json.Marshal(e)
+	_, err = tx.Exec(ctx, `INSERT INTO source_envelopes(source,namespace,position,envelope) SELECT $1,$2,p,e FROM unnest($3::bigint[],$4::jsonb[]) AS t(p,e) ON CONFLICT DO NOTHING`, s.Source, s.Namespace, positions, bodies)
 	if err != nil {
-		return e, err
+		return nil, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO source_envelopes(source,namespace,position,envelope) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, s.Source, s.Namespace, *e.Position, body)
+	rows, err := tx.Query(ctx, `SELECT position,envelope FROM source_envelopes WHERE source=$1 AND namespace=$2 AND position=ANY($3)`, s.Source, s.Namespace, positions)
 	if err != nil {
-		return e, err
+		return nil, err
 	}
-	var kept []byte
-	if err = tx.QueryRow(ctx, `SELECT envelope FROM source_envelopes WHERE source=$1 AND namespace=$2 AND position=$3`, s.Source, s.Namespace, *e.Position).Scan(&kept); err != nil {
-		return e, err
+	stored := make(map[int64]rawinput.Envelope, len(envelopes))
+	for rows.Next() {
+		var position int64
+		var body []byte
+		var original rawinput.Envelope
+		if err = rows.Scan(&position, &body); err == nil {
+			err = json.Unmarshal(body, &original)
+		}
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		stored[position] = original
 	}
-	var original rawinput.Envelope
-	if err = json.Unmarshal(kept, &original); err != nil {
-		return e, err
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
-	if original.MessageID != e.MessageID || original.Digest != e.Digest || original.ContentType != e.ContentType {
-		return e, canonical.Fail(409, "identity_conflict", "source offset reused with different input")
+	kept := make([]rawinput.Envelope, len(envelopes))
+	for i, e := range envelopes {
+		original, ok := stored[*e.Position]
+		if !ok || original.MessageID != e.MessageID || original.Digest != e.Digest || original.ContentType != e.ContentType {
+			return nil, canonical.Fail(409, "identity_conflict", "source offset reused with different input")
+		}
+		kept[i] = original
 	}
 	if err = tx.Commit(ctx); err != nil {
-		return e, canonical.Unavailable()
+		return nil, canonical.Unavailable()
 	}
-	err = s.Durability.ConfirmRecord(ctx, `SELECT EXISTS(SELECT 1 FROM source_envelopes WHERE source=$1 AND namespace=$2 AND position=$3)`, s.Source, s.Namespace, *e.Position)
-	return original, err
+	if err = s.Durability.ConfirmRecord(ctx, `SELECT count(*)=$4 FROM source_envelopes WHERE source=$1 AND namespace=$2 AND position=ANY($3)`, s.Source, s.Namespace, positions, len(positions)); err != nil {
+		return nil, err
+	}
+	return kept, nil
 }
 
 func (s *SourceStore) Advance(ctx context.Context, owner canonical.Ownership, p Progress) error {
