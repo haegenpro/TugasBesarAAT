@@ -15,6 +15,8 @@ JSON files. `images.json` combines the service/monitoring digest maps with actua
 `deployment/role1/Dockerfile` with repository-root context. Never use a made-up
 digest or a synthetic province table for an accepted release.
 
+Use `deployment/aggregator/config.integrated.example.json` and
+`deployment/role1/config.integrated.example.json` for integrated feature settings.
 The role1 input must explicitly enable analytics and contain the R3 source
 configuration. `wildfire_config` and `province_reference` reference UTF-8 files;
 their exact table hash and satellite namespace/start must match. Use the actual

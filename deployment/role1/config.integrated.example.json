@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "analytics_enabled": true,
+  "audit_sessions_enabled": true,
+  "bmkg_namespace": "bnpb-bmkg-v1",
+  "bmkg_initial_offset": 1,
+  "satellite_namespace": "bnpb-satellite-practice-v1",
+  "satellite_initial_offset": 0,
+  "payload_quota_bytes": 16777216,
+  "runtime_secret": "aat-m2-role1-runtime",
+  "ingestion_storage_secret": "aat-m2-ingestion-storage",
+  "ingestion_durability_configmap": "aat-m2-ingestion-durability",
+  "r3": {
+    "field_reports_namespace": "bnpb-field-reports-v1",
+    "coastal_namespace": "bnpb-coastal-v1",
+    "satellite_feed_url": "https://satellite.naufarrel.dev",
+    "pvmbg_adapter_version": 2,
+    "pantai_secret": "pantai-runtime"
+  }
+}

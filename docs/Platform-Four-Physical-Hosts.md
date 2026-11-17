@@ -49,5 +49,6 @@ The management API proxy still runs on the controller physical host. Losing that
 host can remove this administrative entry point even when surviving Kubernetes
 servers retain quorum. Do not claim controller-host-loss API continuity without
 a separately verified redundant entry point. Multi-provider disk-loss replacement
-is a separate recovery integration; the legacy destructive libvirt path remains
-blocked for v2 inventories until it can recover all owned persistent workloads.
+is implemented in the [integrated recovery workflow](Platform-Integrated-Node-Replacement.md).
+Target-host execution remains pending; the legacy destructive libvirt command
+still rejects v2 inventories.

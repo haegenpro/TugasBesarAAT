@@ -1,110 +1,96 @@
 # Platform integration handoff
 
-The platform implementation is ready for teammate review and deferred execution.
-It is not a completed HA deployment or project acceptance result. The local four
-QEMU/KVM VMs stay stopped during development, and no new builds/tests were run for
-these subsections. Both assignment specification Markdown files remain excluded
-from commits; normal documentation is included.
+The pulled source/processing work is integrated into release preparation,
+replicated service database rendering, monitoring and empty-disk recovery code.
+This is not a completed physical deployment or HA acceptance result. No VM was
+started during this integration. Focused local checks were authorized and run;
+four-host load/fault validation remains deferred. Changes are committed by
+subsection without pushing or including either assignment specification file.
 
-## Delivered code and owner boundaries
+## Implemented integration
 
-| Platform subsection | Integration entry | Owner work still required |
+| Area | Result | Remaining input or execution |
 | --- | --- | --- |
-| Synchronous local storage and source election | `platform-storage.py`, `platform-aggregator.py` | Real image digests, actual bootstrap identities, migration, HA/freeze/disk-loss proofs |
-| Processor authority and audit coordination | [Processor/audit contract](Platform-Processor-and-Audit-Handoff.md) | Teammate pins/copies/completeness/HTTP/processor transaction integration |
-| Shared services and retained volumes | `platform-services.py`, service catalog | Registry/Auth/consumer database HA, source HA, messaging acknowledgements and new owner services |
-| Fenced empty-node replacement | [Replacement runbook](Platform-Replacement-Runbook.md) | Owner-specific broker/source/database recovery hooks; execution/failure-phase validation |
-| Explicit storage/network isolation | `platform-isolation.py` | Actual required/forbidden connectivity and Tester Agent compatibility proof |
-| Metrics/logs/traces and resources | [Observability handoff](Platform-Observability-Handoff.md) | Image startup validation, owner SLIs, per-broker collection, durable monitoring if required |
-| Field request reservation | [Overload handoff](Platform-Overload-Handoff.md) | End-to-end Auth/read/source/critical-delivery capacity isolation and evidence |
-| Sustained load, scaling, rollout and fault evidence | [Game-day runbook](Platform-Game-Day-Runbook.md) | Owner fixtures, original-identity delivery/canonical reconciliation, adequate load hardware |
-| Dependency assembly and budget report | `platform-deploy.py` | Prepared private artifacts, live resource review, acceptance and final tuning |
+| Release assembly | [Release preparation](../deployment/platform/RELEASE.md): six database formations, applications, isolation, monitoring and explicit broker reservations | Actual image digests, Secrets, bootstrap identities, migrations and cutover |
+| Four physical hosts | [Four-host setup](Platform-Four-Physical-Hosts.md): one VM per physical host, Linux/libvirt or Windows/VirtualBox | Actual OS mapping, measured resources, identities, LAN addresses and SSH prerequisites |
+| Wildfire batches | [Multi-entity integration](Platform-Multi-Entity-Integration.md): live Citus capability checks retain fencing, transaction recovery and WAL confirmation | Replicated replay and failure validation |
+| Service databases | [Owned databases](Platform-Owned-Service-Databases.md): four HA formations, restricted roles and explicit schema/Registry initialization | Live bootstrap, identity capture and failover checks |
+| Empty-disk recovery | [Integrated replacement](Platform-Integrated-Node-Replacement.md): all declared PG formations, broker and explicit backup restores | Consistent source backups, provider disk-loss runs, interrupted-phase validation and accepted-data reconciliation |
+| Monitoring | [Observability](Platform-Observability-Handoff.md): owner metrics, every broker, all six database formations and warning coverage/error-budget signals | Runtime startup, reference/receipt reconciliation and clock accuracy |
+| Field priority | [Overload handoff](Platform-Overload-Handoff.md): authenticated HTTP check confirms Field progress under Media saturation | Shared Auth/database/network saturation and full-system measurements |
 
-## Prepare and deploy later
+## Prepare the actual release
 
-Copy `deployment/platform/bundle.example.json` to a private working directory.
-Paths resolve relative to that copy. Populate its artifacts with outputs from
-the storage, service, Aggregator, isolation and monitoring renderers, plus the
-teammates' owner-database and processing artifacts. Do not combine duplicate
-Namespace/Service/ConfigMap objects across stages. Preserve the exact namespace,
-role budgets, immutable images and component ownership labels.
+Copy `deployment/platform/release.example.json` to a private directory. Use
+`deployment/aggregator/config.integrated.example.json` and
+`deployment/role1/config.integrated.example.json` for analytics, R3, adapter-v2
+and audit-session settings. Ordinary examples remain development profiles.
+Copy the existing service catalog as `services.json`. Supply actual digest maps,
+bounded satellite HTTPS egress CIDRs and private Secrets.
 
-The bundle deliberately lists unresolved prerequisites. Resolve the actual work
-before removing each item: this is a review checklist, not an assertion that
-setting a flag establishes durability. In particular, canonical migration is an
-explicit administrator operation while **all writers/publishers are stopped**
-and distributed recovery has settled. Runtime startup does not migrate schemas.
-The prepared deployment command does not bootstrap storage, discover physical
-system IDs, run migrations, build images or provision VMs implicitly.
+Integrated source namespaces are proposed history identities. Confirm them
+before first activation and never reuse them for different/reset histories.
+A bounded satellite practice check returned IDs 0, 1 and 2 for `from=0`; the
+integrated example starts at zero. The token stays private. The connector now
+supplies an explicit User-Agent accepted by the observed feed. Full resume,
+burst, completeness and recovery verification remain pending.
+
+`deployment/role1/wildfire.integrated.example.json` deliberately contains an
+invalid province-hash placeholder. Supply an agreed real province centre table
+and its exact SHA-256; the repository's `(0,0)` fixture is not deployment data.
+Course reference results for correctness comparison are a separate input.
 
 ```sh
-# Offline: reads prepared files, reports missing artifacts and memory blockers.
-python3 scripts/platform-deploy.py plan --bundle /private/bundle.json \
-  --output /private/deployment-plan.json
-
-# Later: after starting/validating the already-owned cluster, prepare only the
-# exact service/monitoring paths from their rendered requirements files.
-python3 scripts/platform-deploy.py prepare-volumes \
-  --requirements /private/services/requirements.json \
-  --requirements /private/monitoring/requirements.json
-
-# One command applies the prepared application bundle in dependency order.
-python3 scripts/platform-deploy.py apply --bundle /private/bundle.json
+python3 scripts/platform-release.py --inventory /private/four-hosts.json \
+  --config /private/release.json --output /private/releases/RUN
+python3 scripts/platform-deploy.py plan --inventory /private/four-hosts.json \
+  --bundle /private/releases/RUN/bundle.json
 ```
 
-Canonical storage volumes use their existing `platform-storage.py prepare-disks`
-workflow. Service/monitoring preparation checks the guest ownership marker,
-mounted data disk, expected directory root, marker and UID before creating empty
-paths. It refuses to adopt unmarked existing data or change existing ownership.
-It never deletes data or starts a VM.
+Prepare storage paths and Secrets, bootstrap databases, initialize service schemas
+with owning applications stopped, and capture all original database system IDs.
+Perform canonical/ingestion migrations and BMKG cutover with relevant writers and
+publishers stopped. Resolve actual prerequisites before removing their unresolved
+bundle entries. A flag or healthy pod is not durability evidence. Application
+apply uses the exact reviewed bytes and stops without destructive rollback.
 
-The planner rejects mutable workload images, wrong namespaces/ownership,
-assignment memory-budget mismatches, duplicate resources and dependency cycles.
-It inventories required Secret references without printing their values. Secrets
-provided in private bundle artifacts can be applied; other referenced Secrets
-must already exist before application. Keep every private artifact under an
-ignored or external directory and keep application credentials out of ConfigMaps.
+Application updates use immutable container images; VMs do not need Git pulls.
+Align host-helper revisions on physical hosts when provider code changes.
+Replacement needs all six plan/config pairs and explicit recovery policies for
+every persistent workload. Unknown or unbacked source state blocks replacement.
+The top-level replacement phase engine is not yet fully resumable after errors.
 
-Stages can declare targeted workload waits. Wait for databases/broker setup before
-dependent jobs where necessary. Avoid waiting for Client API before Aggregator is
-created; Client API's readiness depends on it. A final pass waits for all bundle
-workloads. Application `apply` stops on failure and leaves applied resources for
-inspection; there is no destructive automatic rollback.
+## Capacity and verification
 
-## Capacity and later verification
+The current integrated examples request **25,856 MiB (25.25 GiB) RAM across all
+four VMs**, before guest/host overhead, rollout surge and recovery headroom.
+Placement is uneven. The four service database formations account for 8.5 GiB.
+Four 4 GiB VMs fail the offline check; four hosts with at least 8 GB each have
+not been shown to fit. Disk capacity is separate: databases/WAL, broker messages,
+images, VM roots, quarantine and backups also need space.
 
-The default 512 MiB/node guest/Kubernetes reserve is a planning estimate. The
-offline report includes replicated workload requests, daemon copies, fixed-node
-requests and init-container maximums; owner restartable-init sidecars require
-explicit accounting first. It is a lower-bound check, not a scheduler or measured
-fit guarantee. It omits rollout surge, physical-host failures, CPU/disk/IOPS,
-ephemeral disk, distribution of flexible pods and full recovery headroom.
+Consolidating the four service databases onto one replicated PostgreSQL group
+has been proposed, with a rough 18.9 GiB total request estimate. It is **not
+implemented or measured**. No CockroachDB migration has been made either.
 
-`apply` also requires all four existing nodes Ready and checks aggregate live
-allocatable memory against requests and other scheduled workload reservations.
-Missing resource requests and actual system working sets require separate review.
-The full 15-PostgreSQL Citus topology alone reserves 7.5 GiB before DCS, routers,
-applications and monitoring, so it cannot fit the current 7 GiB VM allocation.
-Use selected components for development, then resize/move acceptance later.
+| Focused check | Result |
+| --- | --- |
+| Offline integration checks | 10 passed: bundle/broker budgets, database release assembly, metrics and recovery coverage |
+| Existing renderer checks | 16 passed |
+| Inventory/provider regressions | 33 passed, including the temporary loopback HTTP test |
+| Isolated Citus/payload checks | 12 passed, no skips: batch atomicity/retry/rollback, lost commit reply and observed payload |
+| Isolated service database/Registry checks | All four schemas initialize/repeat; unsafe privileges, legacy schemas and checksum mismatch refused; real Registry bootstrap/runtime ready |
+| Focused Go checks | Broker recovery quorum decisions, notifier metrics and authenticated Field priority passed |
 
-After both teammates finish, review the contracts together, supply their missing
-artifacts, run the deferred checks on suitable hardware, fix integration failures,
-and tune requests/limits/capacity from measurements. Keep every unexecuted or
-failed acceptance row pending. The game-day result must include the original
-critical-operation denominator, actual receipts and gaps, not merely healthy pods.
+Raw evidence remains ignored, including successful Citus run
+`evidence/platform-integration/2e7581e9726c` and database run
+`evidence/platform-databases/075aeb9759a5`. Temporary resources were cleaned up;
+earlier failed attempts are preserved. These are local/protocol checks, not
+replicated failover, physical capacity or zero-loss acceptance results.
 
-```mermaid
-flowchart LR
-  Client[Media / Tim Lapangan] --> API[Client API replicas]
-  API --> Auth[Auth and owned database]
-  API --> Agg[Aggregator replicas]
-  Sources[BMKG / PVMBG / Satellite / Coastal] --> Owners[Source and processing owners]
-  Owners --> Agg
-  Owners --> Broker[Replicated broker and recipients]
-  Agg --> Router[Primary routers]
-  Router --> PG[Coordinator and partition replica groups]
-  PG --> DCS[Storage DCS]
-  Monitor[Metrics / Logs / Traces] -. observes .-> Agg
-  Monitor -. observes .-> Broker
-  Monitor -. observes .-> PG
-```
+Next supply exact per-host RAM/disk/OS/network details, the agreed real province
+reference and comparison data, image digests and consistent source backups.
+Then prepare the four-host deployment and execute the
+[acceptance matrix](Platform-Acceptance-Plan.md) and
+[game-day runbook](Platform-Game-Day-Runbook.md). Reconcile original operation
+identities, checksums and actual receipts. Keep unexecuted acceptance rows pending.

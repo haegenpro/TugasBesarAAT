@@ -11,7 +11,7 @@ and a first [canonical ownership/fencing integration](docs/Platform-Coordination
 M2 platform drafts now cover replicated storage/deployment, source election,
 Kubernetes, processor/audit coordination, recovery, isolation, observability,
 priority admission and deferred load/fault evidence. Teammate source/processor/
-Audit API integration and full runtime acceptance remain pending. See the
+Audit API work has been pulled and integrated into release preparation; full runtime acceptance remains pending. See the
 [preparation verification report](docs/Preparation%20Verification.md) for measured
 results and limitations.
 
@@ -25,7 +25,11 @@ acceptance is tracked separately.
 Start the next integration phase with the
 [platform integration handoff](docs/Platform-Integration-Handoff.md). It links
 each subsection, owner inputs, capacity limits and the prepared deployment
-workflow. The full application/storage stack does not fit the light 7 GiB VMs.
+workflow. The target is now [four physical hosts with one VM each](docs/Platform-Four-Physical-Hosts.md).
+The [integrated release](deployment/platform/RELEASE.md) includes owned service
+databases and [empty-disk recovery](docs/Platform-Integrated-Node-Replacement.md).
+The current full profile requests about 25.25 GiB RAM across the four VMs before
+overhead; measured hardware capacity and physical acceptance remain pending.
 
 A [four-node QEMU/KVM k3s bootstrap](deployment/platform/README.md) is available
 via `python3 scripts/platform-cluster.py up`. Its light laptop profile uses
