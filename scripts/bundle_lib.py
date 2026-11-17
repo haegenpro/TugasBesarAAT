@@ -37,6 +37,8 @@ def inspect(bundle_path,inventory):
         visiting.remove(name);done.add(name);ordered.append(lookup[name])
     for s in stages:visit(s["id"])
     require(type(bundle.get("node_reserve_mib"))is int and bundle["node_reserve_mib"]>=256,"declare >=256 MiB per node for guest/Kubernetes overhead")
+    formations=set(bundle.get("formations",[inventory["cluster_id"]+"-storage",inventory["cluster_id"]+"-ingestion"]))
+    require(formations and all(isinstance(f,str) and re.fullmatch(re.escape(inventory["cluster_id"])+r"-[a-z0-9-]+",f)for f in formations),"declare only this cluster's storage formations")
     blocked=[];objects=[];seen=set();snapshots={};planned=[]
     total=0;fixed={n["name"]:0 for n in inventory["nodes"]};external=set();supplied=set();apps=set()
     for stage in ordered:
@@ -60,7 +62,11 @@ def inspect(bundle_path,inventory):
             if kind not in ("Deployment","StatefulSet","DaemonSet","Job"):continue
             template=obj["spec"]["template"];pod=template["spec"];labels=template["metadata"]["labels"];role=labels.get("role")
             require(role in BUDGETS,"missing/invalid assignment role on "+name)
-            require(labels.get("platform.aat/cluster")==inventory["cluster_id"] or labels.get("platform.aat/formation")==inventory["cluster_id"]+"-storage","workload belongs to another cluster")
+            cluster_label=labels.get("platform.aat/cluster")
+            formation=labels.get("platform.aat/formation")
+            require(cluster_label in (None,inventory["cluster_id"]),"workload belongs to another cluster")
+            require(formation is None or formation in formations,"undeclared storage formation")
+            require(cluster_label==inventory["cluster_id"] or formation in formations,"workload belongs to another cluster")
             if labels.get("app.kubernetes.io/name"):apps.add(labels["app.kubernetes.io/name"])
             for container in pod.get("containers",[])+pod.get("initContainers",[]):
                 require(DIGEST.fullmatch(container["image"]),"mutable workload image on "+name)
@@ -88,4 +94,4 @@ def inspect(bundle_path,inventory):
     hosts={h["id"]:{"guest_memory_mib":sum(n["memory_mib"]for n in inventory["nodes"]if n["physical_host"]==h["id"]),
            "fixed_requests_mib":sum(fixed[n["name"]]for n in inventory["nodes"]if n["physical_host"]==h["id"]),
            "host_reserve_mib":h["reserve_mib"]}for h in inventory.get("hosts",[])}
-    return {"version":1,"ready_for_apply":not blocked,"blocked":blocked,"stages":planned,"workloads":objects,"memory_requests_mib":total,"estimated_available_mib":available,"fixed_requests_mib":fixed,"physical_hosts":hosts,"required_existing_secrets":sorted(external-supplied),"apps":sorted(apps),"note":"Offline lower-bound capacity estimate. Live resources, CPU/disk, scheduling, rollout surge and failover headroom still need verification."},snapshots
+    return {"version":1,"ready_for_apply":not blocked,"blocked":blocked,"stages":planned,"workloads":objects,"memory_requests_mib":total,"estimated_available_mib":available,"fixed_requests_mib":fixed,"physical_hosts":hosts,"formations":sorted(formations),"required_existing_secrets":sorted(external-supplied),"apps":sorted(apps),"note":"Offline lower-bound capacity estimate. Live resources, CPU/disk, scheduling, rollout surge and failover headroom still need verification."},snapshots

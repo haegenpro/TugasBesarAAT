@@ -36,7 +36,7 @@
       ],
       "storage": {
         "path": "/data",
-        "size": "2Gi",
+        "size": "10Gi",
         "uid": 10001
       },
       "ready": {
@@ -61,7 +61,17 @@
         "NATS_PORT": "4222",
         "NATS_MONITOR_PORT": "8222",
         "NATS_URL": "nats://broker:4222",
-        "NATS_REPLICAS": "3"
+        "NATS_REPLICAS": "3",
+        "NATS_STREAM": "HAZARDS",
+        "NATS_SUBJECT": "hazard.events",
+        "NATS_STREAM_MAX_AGE": "24h",
+        "NATS_DLQ_STREAM": "HAZARDS_DLQ",
+        "NATS_DLQ_SUBJECT_PREFIX": "hazard.dlq",
+        "NATS_DLQ_MAX_AGE": "168h",
+        "NATS_LIFECYCLE_STREAM": "REPORT_LIFECYCLE",
+        "NATS_LIFECYCLE_SUBJECT": "report.lifecycle",
+        "NATS_LIFECYCLE_MAX_AGE": "24h",
+        "NATS_MAX_BYTES": "268435456"
       },
       "command": [
         "/usr/local/bin/broker-init"
@@ -327,5 +337,51 @@
       },
       "dependencies": []
     }
-  ]
+  ],
+  "jetstream": {
+    "max_file_store_bytes": 8589934592,
+    "volume_headroom_bytes": 2147483648,
+    "streams": [
+      {
+        "name": "HAZARDS",
+        "max_bytes": 268435456,
+        "replicas": 3
+      },
+      {
+        "name": "REPORT_LIFECYCLE",
+        "max_bytes": 268435456,
+        "replicas": 3
+      },
+      {
+        "name": "HAZARDS_DLQ",
+        "max_bytes": 268435456,
+        "replicas": 3
+      },
+      {
+        "name": "BNPB_RAW_BMKG",
+        "max_bytes": 1073741824,
+        "replicas": 3
+      },
+      {
+        "name": "BNPB_RAW_SATELLITE",
+        "max_bytes": 1073741824,
+        "replicas": 3
+      },
+      {
+        "name": "BNPB_RAW_REPORTS",
+        "max_bytes": 1073741824,
+        "replicas": 3
+      },
+      {
+        "name": "BNPB_RAW_COASTAL",
+        "max_bytes": 1073741824,
+        "replicas": 3
+      },
+      {
+        "name": "BNPB_CRITICAL",
+        "max_bytes": 1073741824,
+        "replicas": 3
+      }
+    ]
+  }
 }

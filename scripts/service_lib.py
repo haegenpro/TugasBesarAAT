@@ -10,6 +10,32 @@ DIGEST = re.compile(r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}")
 NAME = re.compile(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?")
 
 
+def storage_bytes(value):
+    match=re.fullmatch(r"([1-9][0-9]*)(Mi|Gi)",value or "")
+    require(match,"local storage sizes must use positive integral Mi or Gi")
+    return int(match[1])*(1<<20 if match[2]=="Mi"else 1<<30)
+
+
+def broker_capacity(catalog):
+    broker=next((s for s in catalog["services"]if s["name"]=="broker"),None)
+    if broker is None:return None
+    policy=catalog.get("jetstream")
+    require(isinstance(policy,dict),"explicit JetStream capacity policy required")
+    limit=policy.get("max_file_store_bytes");headroom=policy.get("volume_headroom_bytes")
+    require(type(limit)is int and limit>0 and type(headroom)is int and headroom>0,"positive broker capacity and disk headroom required")
+    streams=policy.get("streams",[])
+    require(streams and len({s["name"]for s in streams})==len(streams),"distinct stream reservations required")
+    for stream in streams:
+        require(re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}",stream["name"]) and type(stream["max_bytes"])is int and stream["max_bytes"]>0,"invalid stream reservation")
+        require(stream.get("replicas")==3 and broker["replicas"]==3,"production streams require three broker copies")
+    # Every stream has a copy on every broker in the three-broker formation.
+    reserved=sum(s["max_bytes"]for s in streams)
+    volume=storage_bytes(broker["storage"]["size"])
+    require(reserved<=limit,"stream reservations exceed per-broker file storage")
+    require(limit+headroom<=volume,"broker volume cannot hold file storage plus declared headroom")
+    return {"reserved_bytes_per_broker":reserved,"max_file_store_bytes":limit,"volume_bytes_per_broker":volume,"headroom_bytes":headroom,"streams":streams}
+
+
 def validate(catalog):
     require(catalog["version"]==1,"unsupported service catalog version")
     services=catalog["services"]
@@ -39,6 +65,7 @@ def validate(catalog):
         for dependency in lookup[name].get("dependencies",[]):visit(dependency)
         visiting.remove(name);visited.add(name)
     for name in names:visit(name)
+    broker_capacity(catalog)
     return catalog
 
 
@@ -118,12 +145,13 @@ def render(inventory,catalog,images):
     # Broker route identities match the stable per-node member workloads above.
     routes=",".join(f'"nats://broker-{letter}-0.broker-members.{ns}.svc.cluster.local:6222"' for letter in "abc")
     if any(s["name"]=="broker" for s in catalog["services"]):
+        capacity=broker_capacity(catalog)
         config=f'''server_name: $POD_NAME
 port: 4222
 http_port: 8222
 cluster {{name: "{cluster}-broker", port: 6222, routes: [{routes}]}}
-jetstream {{store_dir: "/data", max_memory_store: 64MB, max_file_store: 1GB, sync_interval: always}}
+jetstream {{store_dir: "/data", max_memory_store: 64MB, max_file_store: {capacity['max_file_store_bytes']}, sync_interval: always}}
 '''
         add("v1","ConfigMap","broker-config",data={"nats.conf":config})
     return {"apiVersion":"v1","kind":"List","items":objects},{"local_volumes":volumes,"memory_requests_mib":requests,
-        "external_dependencies":catalog.get("external",[]),"note":"Rendered integration resources; external databases, source HA and acceptance remain owner inputs."}
+        "external_dependencies":catalog.get("external",[]),"broker_capacity":broker_capacity(catalog),"note":"Rendered integration resources; external databases, source HA and acceptance remain owner inputs."}

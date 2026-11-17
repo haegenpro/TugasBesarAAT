@@ -47,7 +47,7 @@ def apply(cluster,report,snapshots):
         if pod.get("status",{}).get("phase")in("Succeeded","Failed"):continue
         if pod["spec"].get("nodeName")not in {n["metadata"]["name"]for n in selected}:continue
         meta=pod["metadata"]
-        if meta["namespace"]==ns and (meta.get("labels",{}).get("app.kubernetes.io/name")in report["apps"] or meta.get("labels",{}).get("platform.aat/formation")==cluster.cfg["cluster_id"]+"-storage"):continue
+        if meta["namespace"]==ns and (meta.get("labels",{}).get("app.kubernetes.io/name")in report["apps"] or meta.get("labels",{}).get("platform.aat/formation")in report["formations"]):continue
         # Existing system pods can omit memory requests. Their actual use still
         # requires observation and is covered by the offline node reserve too.
         for c in pod["spec"].get("containers",[]):existing+=memory_mib(c.get("resources",{}).get("requests",{}).get("memory","0"))
