@@ -43,7 +43,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	a := &app{log: slog.New(slog.NewJSONHandler(os.Stderr, nil)), input: bufio.NewReader(os.Stdin), client: &http.Client{Timeout: 8 * time.Second}, chatClient: &http.Client{Timeout: 90 * time.Second}, baseURL: strings.TrimRight(baseURL, "/")}
+	a := &app{log: newLogger(os.Stderr), input: bufio.NewReader(os.Stdin), client: &http.Client{Timeout: 8 * time.Second}, chatClient: &http.Client{Timeout: 90 * time.Second}, baseURL: strings.TrimRight(baseURL, "/")}
 	a.run()
 }
 

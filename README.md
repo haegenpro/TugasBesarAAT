@@ -575,6 +575,7 @@ are single instances without replication or failover in this preparation setup.
 | `CLIENT_API_MAX_INFLIGHT_PER_CLIENT` | Max concurrent protected reads per verified `client_id`, across all sessions (`0` disables) | `32` |
 | `BNPB_API_URL` | TUI destination URL | `http://localhost:18080` |
 | `MEDIA_CLIENT_ID`, `FIELD_CLIENT_ID`, `INTERNAL_CLIENT_ID` | Public client IDs shown by the TUI | Required |
+| `CLIENT_TUI_LOG_FORMAT` | `json` keeps raw JSON call logs on an interactive terminal; otherwise the TUI shows one compact line per call there, and JSON whenever stderr is redirected | Optional |
 
 **Consumer process environment** (port and endpoint URLs injected by Compose; remaining settings in the consumer env files)
 
