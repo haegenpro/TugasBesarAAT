@@ -38,6 +38,44 @@ python3 scripts/platform-deploy.py plan --inventory /private/four-hosts.json \
   --bundle /private/releases/RUN/bundle.json
 ```
 
+For first deployment, prepare storage independently before full activation:
+
+```sh
+python3 scripts/platform-release.py --phase infrastructure \
+  --inventory /private/four-hosts.json --config /private/release.json \
+  --output /private/releases/BOOTSTRAP
+```
+
+This phase needs only the actual storage image digest from the image map, plus
+supplied or already prepared storage Secrets. It renders all six formations,
+namespace and network isolation, including ingestion replication/admin flows.
+It does not read the missing province table, require other application images,
+or start sources, consumers or application servers. It still enforces declared
+storage memory budgets and Secret keys; live apply still checks all four Ready
+nodes, physical-host prerequisites and allocatable capacity. Add any operator
+disk/prerequisite blockers to `infrastructure_unresolved` in the private config.
+`ready_for_apply` concerns this storage phase only; `ready_for_activation` remains
+false and application prerequisites remain in `activation_pending`.
+
+On the real nodes, explicitly prepare disks using `platform-storage.py
+prepare-disks --inventory ... --plan ...` for each of `canonical-plan.json`,
+`ingestion-plan.json`, `auth-db-plan.json`, `registry-db-plan.json`,
+`dashboard-db-plan.json` and `notifier-db-plan.json`. Then review/apply the
+infrastructure bundle with `platform-deploy.py`. It waits for all storage
+workloads. Use the existing administrator initialization and capture commands in
+[owned databases](../../docs/Platform-Owned-Service-Databases.md) and
+[storage deployment](../storage/README.md). Bootstrap the Registry using its
+actual pinned application image before restricting its runtime role. Run
+[canonical/ingestion migrations and BMKG cutover](../role1/README.md) with
+writers/publishers stopped. Preserve the original identity captures for recovery.
+
+After those operations and the pending external inputs are complete, prepare a
+**new full release** with captured canonical/ingestion durability files and
+recorded initialization/migration evidence. Resolve only the corresponding
+explicit blockers. Prepare application/monitoring local paths from the full
+release requirement files before its apply. Do not apply processing merely to
+discover whether its schema is ready. No bootstrap/apply step has been run yet.
+
 The optional `secrets` input supplies a private Secret-only List in a first stage,
 before storage. Missing or empty required keys block review even for supplied
 Secrets. The bundle handles all six database formations separately, records their

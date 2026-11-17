@@ -26,6 +26,8 @@ def pod_memory(pod):
 def inspect(bundle_path,inventory):
     path=Path(bundle_path).resolve();bundle=json.loads(path.read_text())
     require(bundle["version"]==1,"unsupported bundle version")
+    phase=bundle.get("phase","full")
+    require(phase in ("full","infrastructure"),"unknown release phase")
     stages=bundle["stages"];lookup={s["id"]:s for s in stages}
     require(stages and len(lookup)==len(stages),"empty bundle or duplicate stage")
     ordered=[];visiting=set();done=set()
@@ -104,4 +106,4 @@ def inspect(bundle_path,inventory):
     hosts={h["id"]:{"guest_memory_mib":sum(n["memory_mib"]for n in inventory["nodes"]if n["physical_host"]==h["id"]),
            "fixed_requests_mib":sum(fixed[n["name"]]for n in inventory["nodes"]if n["physical_host"]==h["id"]),
            "host_reserve_mib":h["reserve_mib"]}for h in inventory.get("hosts",[])}
-    return {"version":1,"ready_for_apply":not blocked,"blocked":blocked,"stages":planned,"workloads":objects,"memory_requests_mib":total,"estimated_available_mib":available,"fixed_requests_mib":fixed,"physical_hosts":hosts,"formations":sorted(formations),"required_existing_secrets":sorted(external-supplied.keys()),"required_existing_secret_keys":{name:sorted(keys)for name,keys in sorted(secret_keys.items())if name not in supplied},"apps":sorted(apps),"note":"Offline lower-bound capacity estimate. Live resources, CPU/disk, scheduling, rollout surge and failover headroom still need verification."},snapshots
+    return {"version":1,"phase":phase,"ready_for_activation":phase=="full"and not blocked,"activation_pending":bundle.get("activation_pending",[]),"ready_for_apply":not blocked,"blocked":blocked,"stages":planned,"workloads":objects,"memory_requests_mib":total,"estimated_available_mib":available,"fixed_requests_mib":fixed,"physical_hosts":hosts,"formations":sorted(formations),"required_existing_secrets":sorted(external-supplied.keys()),"required_existing_secret_keys":{name:sorted(keys)for name,keys in sorted(secret_keys.items())if name not in supplied},"apps":sorted(apps),"note":"Offline lower-bound capacity estimate. Live resources, CPU/disk, scheduling, rollout surge and failover headroom still need verification."},snapshots
