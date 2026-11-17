@@ -8,6 +8,8 @@ or applies manifests implicitly.
 The root-context `Dockerfile` builds Aggregator, raw-ingestion and the offline
 migration/cutover tools with Go 1.27.1. Build/push and supply actual immutable image
 digests. `Dockerfile.dockerignore` excludes local credentials and evidence.
+It also includes the read-only [satellite contract probe](../../docs/Platform-Satellite-Probe.md)
+for bounded live resume/payload checks during later validation.
 
 Ingestion owns a **separate** PostgreSQL formation, credentials and migration
 journal. Reuse the platform storage workflow with `--formation-suffix ingestion

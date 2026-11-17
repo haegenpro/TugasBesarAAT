@@ -25,6 +25,7 @@ import (
 const (
 	Source      = "SATELIT"
 	ContentType = "application/vnd.bnpb.satellite-fixture+json;version=1"
+	UserAgent   = "aat-m2-satellite/1.0"
 )
 
 type GapError struct{ Expected, Got int64 }
@@ -98,7 +99,7 @@ func (c *Connector) request(ctx context.Context, path string) (*http.Request, er
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("User-Agent", "aat-m2-satellite/1.0")
+	req.Header.Set("User-Agent", UserAgent)
 	return req, nil
 }
 
