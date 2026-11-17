@@ -290,7 +290,8 @@
         "WARNING_STREAM": "BNPB_CRITICAL",
         "WARNING_SUBJECT": "bnpb.warning.coastal",
         "WARNING_DURABLE": "tim-lapangan-v1",
-        "WARNING_EXPECTATIONS_URL": "http://coastal-processor:8080"
+        "WARNING_EXPECTATIONS_URL": "http://coastal-processor:8080",
+        "WARNING_SLO_METRICS_ENABLED": "true"
       },
       "ready": {
         "path": "/ready",

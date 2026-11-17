@@ -46,7 +46,7 @@ changes. API log collection adds kubelet/API overhead: measure it under load.
 | `app_stale_owner_rejections_total` | Authority rejected stale work; does not count every deferred SQL commit rejection |
 | `app_outbox_pending` | Committed outbox depth; owners add event age, source lag and delivery reconciliation |
 | Patroni `/metrics`, etcd `:2381/metrics` | Member role, WAL positions and DCS health; float WAL metrics are diagnostic, never a durability acknowledgement |
-| NATS exporter | Samples a broker behind the broker Service; per-member/stream placement and recipient durability remain messaging-owner integration |
+| NATS exporters | One exporter per original broker member; stream placement and recipient durability still require runtime evidence |
 | `platform_pod_cpu_cores`, `platform_pod_memory_bytes` | metrics-server measurements, joined with pod/node/role identity; not a memory limit or proof of unused capacity |
 | `platform_metrics_collection_success`, snapshot age | Distinguish stale cached samples from current observations; missing data never means zero |
 | Node exporter | Read-only host CPU/RAM/disk observations on four VM nodes; hostNetwork exposure/CNI behavior needs validation |
@@ -56,6 +56,33 @@ resource usage. Prometheus rules detect scrape failure, stale collection,
 unexpected application errors and sustained backlog. Thresholds are starting
 operational values, not acceptance criteria. Alertmanager routing and final
 recipient SLA/burn-rate alerts need the owners' complete event denominator.
+
+The integrated profile adds discovery annotations to Aggregator, ingestion and
+coastal pods, three distinct broker-member exporters, satellite offset lag,
+wildfire received/prepared/applied progress and correction age, coastal source
+state, and API admission rejections. Controlled 429s do not dilute the unexpected
+HTTP error-rate denominator.
+
+Notifier can enable `WARNING_SLO_METRICS_ENABLED=true` (set by the service catalog).
+One independent bounded collector per process refreshes the acquired-warning
+cohort every 30 seconds with a ten-second deadline. It reuses the owner's
+expectation/receipt reconciliation and exports expected, pending, overdue,
+coverage, clock anomalies, p95 completeness and budget use. Null ratios remain
+NaN, never zero; authority failure sets collection_success=0. Delivery continues
+independently. Replicas expose the same cohort, so dashboard counts use max,
+not sums across replicas. The initial observation window is the preceding hour.
+
+Budget alerts require current successful collection, complete coverage and no
+clock anomaly. This is still the `durably_acquired_critical_observations` scope:
+compare against the original sensor/reference identity set before claiming zero
+source loss. Verify database-clock synchronization and bound collection overhead
+on the target hardware. The latest-receipt duration panel is explicitly separate
+from cohort p95; it cannot substitute for the five-second acceptance proof.
+
+Focused checks passed for discovery, three-member broker coverage, coverage-aware
+budget alerts, the notifier's unknown/null metric semantics and the observed live
+satellite payload/explicit User-Agent. Full dashboard startup, CNI enforcement,
+runtime overhead and four-node delivery/failure evidence remain deferred.
 
 ## Capacity and reliability limits
 

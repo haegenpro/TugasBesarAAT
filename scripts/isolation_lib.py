@@ -43,7 +43,8 @@ def render(inventory,extra_flows=()):
     for source,port in (("bmkg-mock",8081),("pvmbg-mock",8082)):
         policy(source,app(source),ingress=[incoming(["aggregator","prometheus","alloy"],[port])],egress=[outgoing(["schema-registry"],[8080]),outgoing(["tempo"],[4318])])
     broker_clients=["aggregator","consumer-dashboard","consumer-notifier","broker-init","ingestion","wildfire-processor","coastal-processor"]
-    policy("broker",app("broker"),ingress=[incoming(broker_clients,[4222]),incoming(["broker"],[6222]),incoming(["prometheus","alloy","nats-exporter"],[8222])],egress=[outgoing(["broker"],[6222])])
+    exporters=["nats-exporter","nats-exporter-a","nats-exporter-b","nats-exporter-c"]
+    policy("broker",app("broker"),ingress=[incoming(broker_clients,[4222]),incoming(["broker"],[6222]),incoming(["prometheus","alloy"]+exporters,[8222])],egress=[outgoing(["broker"],[6222])])
     policy("broker-init",app("broker-init"),egress=[outgoing(["broker"],[4222]),outgoing(["tempo"],[4318])])
     policy("registry",app("schema-registry"),ingress=[incoming(broker_clients+["bmkg-mock","pvmbg-mock"],[8080]),incoming(["prometheus","alloy"],[9000])],egress=[outgoing(["registry-db"],[5432]),outgoing(["tempo"],[4318])])
     owners={"registry-db":"schema-registry","auth-db":"auth-service","dashboard-db":"consumer-dashboard","notifier-db":"consumer-notifier"}
@@ -61,7 +62,7 @@ def render(inventory,extra_flows=()):
         policy(name,app(name),ingress=[incoming(["prometheus","alloy"],[8080])],egress=[outgoing(["aggregator","schema-registry","sensor-pantai"],[8080]),outgoing(["broker"],[4222]),outgoing(["tempo"],[4318])])
     policy("load-generator",app("load-generator"),egress=[outgoing(["client-api","aggregator"],[8080])])
     metric_ports=[8080,8081,8082,8083,8091,8092,8008,8222,9187,2381,9090,12345,3100,3200,3000,4317,4318,9100,9101,7777]
-    for name in monitor_names+["nats-exporter","node-exporter","platform-metrics"]:
+    for name in monitor_names+exporters+["node-exporter","platform-metrics"]:
         policy(name,app(name),ingress=[{"from":[{"podSelector":{}}],"ports":ports(metric_ports)}],
             egress=[{"to":[{"podSelector":{}}],"ports":ports(metric_ports)},
                     {"to":[{"ipBlock":{"cidr":inventory["service_cidr"]}}],"ports":ports([443])},

@@ -3,6 +3,7 @@ package satellite
 import (
 	"aggregator/internal/rawinput"
 	"aggregator/internal/wildfireprocessor"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -31,6 +32,24 @@ func TestStreamParsesServerSentEvents(t *testing.T) {
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	_, err = NewStream(strings.NewReader("data: "+strings.Repeat("x", 2048)+"\n\n"), 1<<10).Next()
 	require.ErrorIs(t, err, ErrLineTooLong)
+}
+
+// Bounded read-only observation of the practice feed: offset zero is valid,
+// detection fields are nested, acquisition time is numeric, and FRP uses "frp".
+func TestObservedPracticeDetectionAndClientIdentification(t *testing.T) {
+	raw := []byte(`{"offset":0,"detection":{"version":"2.0NRT","scan":0.55,"acq_date":"2026-11-18","acq_time":2309,"bright_ti4":308.43,"bright_ti5":283.67,"confidence":"n","daynight":"N","frp":1.41,"instrument":"VIIRS","latitude":1.38076,"longitude":97.58036,"satellite":"N21","track":0.61}}`)
+	n, err := Normalize("session-a", Event{ID: "0", Type: "detection", Data: raw})
+	require.NoError(t, err)
+	require.Zero(t, n.Offset)
+	op, err := wildfireprocessor.DecodeOperation(envelopeFor(t, n), n.Operation, 1<<20)
+	require.NoError(t, err)
+	require.Equal(t, "2309", op.Detection.AcqTime)
+	require.Equal(t, 1.41, op.Detection.FRPMW)
+	require.Equal(t, raw, op.Payload)
+	c := Connector{BaseURL: "https://feed.invalid", Token: "fixture-token"}
+	req, err := c.request(context.Background(), "/v1/session")
+	require.NoError(t, err)
+	require.Equal(t, "aat-m2-satellite/1.0", req.Header.Get("User-Agent"))
 }
 
 func envelopeFor(t *testing.T, n Normalized) rawinput.Envelope {

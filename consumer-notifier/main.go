@@ -659,6 +659,10 @@ func main() {
 	var workers sync.WaitGroup
 	workers.Add(1)
 	go func() { defer workers.Done(); a.collectMetrics(ctx) }()
+	if a.warnings != nil && platform.Bool("WARNING_SLO_METRICS_ENABLED", false) {
+		workers.Add(1)
+		go func() { defer workers.Done(); a.warnings.collectSLOMetrics(ctx) }()
+	}
 	count := platform.Int("CONSUMER_WORKERS", 1)
 	if count < 1 {
 		panic("CONSUMER_WORKERS must be positive")

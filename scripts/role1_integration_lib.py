@@ -100,6 +100,9 @@ def render(inventory, aggregator_config, config, aggregator_image, ingestion_ima
     policy("owned-etcd", etcd, [group_flow([storage, etcd], [2379], "from"), group_flow([etcd], [2380], "from")], [group_flow([etcd], [2379, 2380])])
     if "r3" in config:
         add_r3(result, config, container, owned, obj, values, secret_env, policy, incoming, flow, group_flow, storage, router, cluster)
+    for workload in result["items"]:
+        if workload["kind"]=="Deployment":
+            workload["spec"]["template"]["metadata"].setdefault("annotations",{}).update({"prometheus.io/scrape":"true","prometheus.io/port":"8080","prometheus.io/path":"/metrics"})
     return result
 
 
@@ -135,3 +138,6 @@ def add_r3(result, config, aggregator, owned, obj, values, secret_env, policy, i
     policy("coastal-status", {"app.kubernetes.io/name": "aggregator"}, egress=[flow(["coastal-processor"], [8080])])
     policy("coastal-storage", storage, [incoming(["coastal-processor"], [5432])])
     policy("coastal-router", router, [incoming(["coastal-processor"], [5432])])
+    # Independently owned ingestion storage also needs its metrics exposed.
+    policy("ingestion-metrics", storage, [incoming(["prometheus"], [8008])])
+    policy("ingestion-etcd-metrics", {"platform.aat/formation":cluster+"-ingestion","component":"storage-etcd"}, [incoming(["prometheus"],[2381])])

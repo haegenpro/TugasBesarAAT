@@ -32,8 +32,13 @@ def configs(inventory, storage):
     alerts = {"groups":[{"name":"platform","rules":[
         {"alert":"ScrapeUnavailable","expr":"up == 0","for":"1m","labels":{"severity":"warning"},"annotations":{"summary":"Target unavailable; investigate before interpreting missing metrics as zero"}},
         {"alert":"MetricsCollectionStale","expr":"platform_metrics_collection_success == 0 or platform_metrics_snapshot_age_seconds > 30","for":"30s","labels":{"severity":"warning"}},
-        {"alert":"ApplicationUnexpectedErrors","expr":'sum by (service) (rate(app_http_requests_total{status=~"5.."}[2m])) / clamp_min(sum by (service) (rate(app_http_requests_total[2m])), 0.001) > 0.01',"for":"1m","labels":{"severity":"critical"}},
+        {"alert":"ApplicationUnexpectedErrors","expr":'sum by (service) (rate(app_http_requests_total{status=~"5.."}[2m])) / clamp_min(sum by (service) (rate(app_http_requests_total{status!="429"}[2m])), 0.001) > 0.01',"for":"1m","labels":{"severity":"critical"}},
         {"alert":"OutboxBacklog","expr":"app_outbox_pending > 1000","for":"2m","labels":{"severity":"warning"}},
+        {"alert":"SatelliteLagGrowing","expr":"app_satellite_feed_lag_offsets > 1000","for":"1m","labels":{"severity":"warning"}},
+        {"alert":"WildfireOutputBlocked","expr":"app_wildfire_blocked_output > 0","for":"30s","labels":{"severity":"critical"}},
+        {"alert":"CoastalSourceUnavailable","expr":"app_coastal_source_stale == 2","for":"30s","labels":{"severity":"warning"}},
+        {"alert":"CoastalSLOCollectionUnavailable","expr":"app_coastal_slo_collection_success == 0","for":"1m","labels":{"severity":"warning"}},
+        {"alert":"CoastalTimelinessBudgetExhausted","expr":"app_coastal_slo_error_budget_used > 1 and on(pod) (app_coastal_slo_collection_success == 1) and on(pod) (app_coastal_slo_coverage_complete == 1) and on(pod) (app_coastal_slo_clock_anomalies == 0)","for":"30s","labels":{"severity":"critical"}},
     ]}]}
     loki = {"auth_enabled":False,"server":{"http_listen_port":3100,"grpc_listen_port":9096},
         "common":{"instance_addr":"127.0.0.1","path_prefix":"/loki","replication_factor":1,"ring":{"kvstore":{"store":"inmemory"}},"storage":{"filesystem":{"chunks_directory":"/loki/chunks","rules_directory":"/loki/rules"}}},
@@ -67,7 +72,21 @@ loki.write "local" {
     sources = {"apiVersion":1,"datasources":[{"name":name,"uid":name,"type":kind,"access":"proxy","url":url,"isDefault":name=="prometheus"} for name,kind,url in (("prometheus","prometheus","http://prometheus:9090"),("loki","loki","http://loki:3100"),("tempo","tempo","http://tempo:3200"))]}
     provider = {"apiVersion":1,"providers":[{"name":"platform","type":"file","options":{"path":"/etc/platform-dashboards"}}]}
     panels=[]
-    for title,expr in (("Scrape health","up"),("Pod memory by role","sum by (role) (platform_pod_memory_bytes)"),("Pod CPU by role","sum by (role) (platform_pod_cpu_cores)"),("HTTP request rate","sum by (service,status) (rate(app_http_requests_total[1m]))"),("Pending outbox","app_outbox_pending"),("Patroni roles","patroni_primary"),("Collector age","platform_metrics_snapshot_age_seconds")):
+    signals=(("Scrape health","up"),("Pod memory by role","sum by (role) (platform_pod_memory_bytes)"),("Pod CPU by role","sum by (role) (platform_pod_cpu_cores)"),("HTTP request rate","sum by (service,status) (rate(app_http_requests_total[1m]))"),("Pending outbox","app_outbox_pending"),("Patroni roles","patroni_primary"),("Collector age","platform_metrics_snapshot_age_seconds"),
+        ("Satellite acquisition lag (offsets)","app_satellite_feed_lag_offsets"),
+        ("Wildfire received / prepared / applied","{__name__=~\"app_wildfire_(received_through|prepared_through|applied_through)\"}"),
+        ("Oldest wildfire correction age","app_wildfire_oldest_correction_age_seconds"),
+        ("Coastal source state: fresh=0 stale=1 unavailable=2","app_coastal_source_stale"),
+        ("Coastal source lag","app_coastal_observation_lag_seconds"),
+        ("Critical warning delivery duration (latest receipt only)","app_coastal_warning_last_delivery_seconds"),
+        ("Critical receipts delivered and on-time (local counters)","{__name__=~\"app_coastal_warnings_(delivered|on_time)_total\"}"),
+        ("Acquired critical cohort: expected / pending / overdue","max by (__name__) ({__name__=~\"app_coastal_slo_(expected|pending|pending_overdue)\"} and on(pod) (app_coastal_slo_collection_success == 1))"),
+        ("Acquired cohort error-budget use (review coverage)","max(app_coastal_slo_error_budget_used and on(pod) (app_coastal_slo_collection_success == 1))"),
+        ("Cohort coverage / p95 completeness / clock anomalies","{__name__=~\"app_coastal_slo_(coverage_complete|p95_complete|clock_anomalies|collection_success)\"}"),
+        ("Critical cohort p95 lower bound (seconds)","max(app_coastal_slo_p95_lower_bound_seconds and on(pod) (app_coastal_slo_collection_success == 1))"),
+        ("Controlled API rejections","sum by (service) (rate(app_http_requests_total{status=\"429\"}[1m]))"),
+        ("Field reserve / authentication rejections","{__name__=~\"app_admission_(role_capacity|authentication_capacity)_rejected_total\"}"))
+    for title,expr in signals:
         i=len(panels);panels.append({"id":i+1,"title":title,"type":"timeseries","datasource":{"type":"prometheus","uid":"prometheus"},"gridPos":{"h":8,"w":12,"x":(i%2)*12,"y":(i//2)*8},"targets":[{"expr":expr,"refId":"A"}]})
     dashboard={"uid":"platform-m2","title":"M2 platform","schemaVersion":39,"version":1,"refresh":"15s","time":{"from":"now-30m","to":"now"},"panels":panels}
     return {"prometheus-config":{"prometheus.json":json.dumps(prom),"alerts.json":json.dumps(alerts)},"loki-config":{"config.json":json.dumps(loki)},"tempo-config":{"config.json":json.dumps(tempo)},"alloy-config":{"config.alloy":alloy},"grafana-datasources":{"sources.json":json.dumps(sources)},"grafana-providers":{"providers.json":json.dumps(provider)},"platform-dashboards":{"platform.json":json.dumps(dashboard),"application.json":(ROOT/"monitoring/templates/grafana/application.json").read_text()}}
@@ -83,12 +102,15 @@ def render(inventory, storage, images):
         ("tempo",3200,"/tempo",["-config.file=/etc/tempo/config.json"],"/var/tempo","/etc/tempo","/ready","/ready"),
         ("grafana",3000,"/run.sh",[],"/var/lib/grafana",None,"/api/health","/api/health"),
         ("alloy",12345,"/bin/alloy",["run","/etc/alloy/config.alloy","--storage.path=/var/lib/alloy/data","--server.http.listen-addr=0.0.0.0:12345"],None,"/etc/alloy","/-/ready","/-/healthy"),
-        ("nats-exporter",7777,"/usr/local/bin/prometheus-nats-exporter",["-addr=0.0.0.0","-port=7777","-path=/metrics","-varz","-jsz=all","http://broker:8222"],None,None,"/metrics","/metrics"),
         ("platform-metrics",9101,"/usr/local/bin/platform-metrics",[],None,None,"/ready","/health"),
     ]
+    for letter in "abc":
+        endpoint=f"http://broker-{letter}-0.broker-members.{inventory['namespace']}.svc.cluster.local:8222"
+        definitions.append(("nats-exporter-"+letter,7777,"/usr/local/bin/prometheus-nats-exporter",["-addr=0.0.0.0","-port=7777","-path=/metrics","-varz","-jsz=all",endpoint],None,None,"/metrics","/metrics"))
     services=[]
     for name,port,binary,args,path,config,ready,live in definitions:
-        s={"name":name,"kind":"StatefulSet" if path else "Deployment","role":"other","replicas":1,"image_key":name,"ports":{"http":port},"metrics_port":port if name in ("alloy","nats-exporter","platform-metrics") else None,"environment":{},"command":[binary]+args,"ready":{"path":ready,"port":port},"live":{"path":live,"port":port},"config_mounts":[]}
+        exporter=name.startswith("nats-exporter-")
+        s={"name":name,"kind":"StatefulSet" if path else "Deployment","role":"other","replicas":1,"image_key":"nats-exporter"if exporter else name,"ports":{"http":port},"metrics_port":port if exporter or name in ("alloy","platform-metrics") else None,"environment":{},"command":[binary]+args,"ready":{"path":ready,"port":port},"live":{"path":live,"port":port},"config_mounts":[]}
         if config:s["config_mounts"].append({"name":name+"-config","path":config})
         if path:s["storage"]={"path":path,"size":"1Gi","uid":{"grafana":472,"prometheus":65534,"loki":10001,"tempo":10001}[name]}
         if name=="grafana":

@@ -98,6 +98,7 @@ func (c *Connector) request(ctx context.Context, path string) (*http.Request, er
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("User-Agent", "aat-m2-satellite/1.0")
 	return req, nil
 }
 
