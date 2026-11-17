@@ -117,6 +117,7 @@ def render(inventory, storage, images, additional_storages=()):
         if path:s["storage"]={"path":path,"size":"1Gi","uid":{"grafana":472,"prometheus":65534,"loki":10001,"tempo":10001}[name]}
         if name=="grafana":
             s["secret"]="grafana-runtime"
+            s["required_secret_keys"]=["GF_SECURITY_ADMIN_USER","GF_SECURITY_ADMIN_PASSWORD"]
             s["environment"]={"GF_PATHS_PROVISIONING":"/etc/grafana/provisioning","GF_USERS_ALLOW_SIGN_UP":"false","GF_AUTH_ANONYMOUS_ENABLED":"false"}
             s["config_mounts"] += [{"name":"grafana-datasources","path":"/etc/grafana/provisioning/datasources"},{"name":"grafana-providers","path":"/etc/grafana/provisioning/dashboards"},{"name":"platform-dashboards","path":"/etc/platform-dashboards"}]
         if name=="tempo":s["ports"].update({"otlp-http":4318,"otlp-grpc":4317})

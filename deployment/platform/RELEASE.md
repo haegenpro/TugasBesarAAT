@@ -9,7 +9,9 @@ ingestion PostgreSQL formation, service catalog, owner processing, isolation and
 monitoring and four owned HA service databases into one dependency-ordered bundle. It does not build images, start
 VMs, rotate credentials, migrate databases or apply resources.
 
-Copy `release.example.json` into a private directory and provide its referenced
+Use the [private configuration generator](../../docs/Platform-Private-Configuration.md)
+to prepare consistent unused credentials and pending inputs, or copy
+`release.example.json` into a private directory and provide its referenced
 JSON files. `images.json` combines the service/monitoring digest maps with actual
 `storage` and `role1` image digests. Build the role1 image using
 `deployment/role1/Dockerfile` with repository-root context. Never use a made-up
@@ -26,7 +28,8 @@ same input; live Audit API is enabled independently by the owner renderer.
 The private satellite session check confirmed that `from=0` yielded detection IDs
 0, 1 and 2 on the practice feed. The session reported 60x speed. This is a bounded
 interface observation, not a burst/recovery/zero-loss acceptance result. The
-credential is deliberately absent from this file and release artifacts.
+credential is deliberately absent from public examples. A generated private
+Secrets bundle contains credentials and must remain outside version control.
 
 ```sh
 python3 scripts/platform-release.py --inventory /private/four-hosts.json \
@@ -35,7 +38,9 @@ python3 scripts/platform-deploy.py plan --inventory /private/four-hosts.json \
   --bundle /private/releases/RUN/bundle.json
 ```
 
-The bundle handles all six database formations separately, records their
+The optional `secrets` input supplies a private Secret-only List in a first stage,
+before storage. Missing or empty required keys block review even for supplied
+Secrets. The bundle handles all six database formations separately, records their
 Secret references and avoids duplicate Aggregator/Namespace resources. Service
 databases are rendered automatically when `owner_databases` is null; an explicit
 artifact path remains available for reviewed alternatives. See

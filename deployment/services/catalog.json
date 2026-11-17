@@ -141,7 +141,9 @@
         "BMKG_PORT": "8081",
         "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
         "SOURCE_ARCHIVE_PATH": "/data/archive.json",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",
+        "BMKG_DELAY_MS": "100",
+        "BMKG_EVENT_INTERVAL_MS": "10000"
       },
       "storage": {
         "path": "/data",
@@ -159,7 +161,10 @@
       "dependencies": [
         "schema-registry"
       ],
-      "metrics_port": 8081
+      "metrics_port": 8081,
+      "required_secret_keys": [
+        "BMKG_API_KEY"
+      ]
     },
     {
       "name": "pvmbg-mock",
@@ -175,7 +180,10 @@
         "PVMBG_PORT": "8082",
         "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
         "SOURCE_ARCHIVE_PATH": "/data/archive.json",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",
+        "PVMBG_MIN_DELAY_MS": "500",
+        "PVMBG_MAX_DELAY_MS": "1500",
+        "PVMBG_REPORT_INTERVAL_MS": "10000"
       },
       "storage": {
         "path": "/data",
@@ -193,7 +201,11 @@
       "dependencies": [
         "schema-registry"
       ],
-      "metrics_port": 8082
+      "metrics_port": 8082,
+      "required_secret_keys": [
+        "PVMBG_TOKEN",
+        "PVMBG_ADMIN_TOKEN"
+      ]
     },
     {
       "name": "auth-service",
@@ -212,7 +224,9 @@
         "AUTH_MAX_INFLIGHT": "32",
         "AUTH_FIELD_RESERVED": "8",
         "AUTH_DB_FIELD_RESERVED": "4",
-        "DB_MAX_OPEN_CONNS": "16"
+        "DB_MAX_OPEN_CONNS": "16",
+        "ACCESS_TOKEN_TTL_SEC": "900",
+        "REFRESH_TOKEN_TTL_SEC": "86400"
       },
       "ready": {
         "path": "/ready",
@@ -229,7 +243,13 @@
       "required_secret_keys": [
         "DATABASE_URL",
         "AUTH_INTERNAL_KEY",
-        "AUTH_PRIORITY_KEY"
+        "AUTH_PRIORITY_KEY",
+        "MEDIA_CLIENT_ID",
+        "MEDIA_CLIENT_SECRET",
+        "FIELD_CLIENT_ID",
+        "FIELD_CLIENT_SECRET",
+        "INTERNAL_CLIENT_ID",
+        "INTERNAL_CLIENT_SECRET"
       ]
     },
     {
@@ -288,9 +308,20 @@
         "http": 8091
       },
       "environment": {
-        "DASHBOARD_PORT": "8091",
         "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",
+        "CONSUMER_ROLE": "dashboard",
+        "CONSUMER_PORT": "8091",
+        "CONSUMER_ADMIN_SOCKET": "/tmp/dashboard-admin.sock",
+        "NATS_STREAM": "HAZARDS",
+        "NATS_SUBJECT": "hazard.events",
+        "NATS_DURABLE": "dashboard-main-v1",
+        "NATS_DLQ_STREAM": "HAZARDS_DLQ",
+        "NATS_DLQ_SUBJECT": "hazard.dlq.dashboard",
+        "NATS_LIFECYCLE_STREAM": "REPORT_LIFECYCLE",
+        "NATS_LIFECYCLE_SUBJECT": "report.lifecycle",
+        "CONSUMER_WORKERS": "4",
+        "NATS_MAX_ACK_PENDING": "64"
       },
       "ready": {
         "path": "/ready",
@@ -322,14 +353,25 @@
         "http": 8092
       },
       "environment": {
-        "NOTIFIER_PORT": "8092",
         "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",
         "WARNING_STREAM": "BNPB_CRITICAL",
         "WARNING_SUBJECT": "bnpb.warning.coastal",
         "WARNING_DURABLE": "tim-lapangan-v1",
         "WARNING_EXPECTATIONS_URL": "http://coastal-processor:8080",
-        "WARNING_SLO_METRICS_ENABLED": "true"
+        "WARNING_SLO_METRICS_ENABLED": "true",
+        "CONSUMER_ROLE": "notifier",
+        "CONSUMER_PORT": "8092",
+        "CONSUMER_ADMIN_SOCKET": "/tmp/notifier-admin.sock",
+        "NATS_STREAM": "HAZARDS",
+        "NATS_SUBJECT": "hazard.events",
+        "NATS_DURABLE": "notifier-main-v1",
+        "NATS_DLQ_STREAM": "HAZARDS_DLQ",
+        "NATS_DLQ_SUBJECT": "hazard.dlq.notifier",
+        "NATS_LIFECYCLE_STREAM": "REPORT_LIFECYCLE",
+        "NATS_LIFECYCLE_SUBJECT": "report.lifecycle",
+        "CONSUMER_WORKERS": "4",
+        "NATS_MAX_ACK_PENDING": "64"
       },
       "ready": {
         "path": "/ready",
@@ -379,7 +421,10 @@
         "path": "/healthz",
         "port": 8080
       },
-      "dependencies": []
+      "dependencies": [],
+      "required_secret_keys": [
+        "PANTAI_AUTH_TOKEN"
+      ]
     }
   ],
   "jetstream": {

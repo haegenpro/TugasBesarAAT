@@ -56,7 +56,13 @@ def assemble(inventory,config_path,output):
             items.append(obj)
         artifacts[stage]={"apiVersion":"v1","kind":"List","items":items}
         stages.append({"id":stage,"manifest":"artifacts/"+stage+".json","requires":list(dependencies),"wait":list(wait)})
-    add("canonical-storage",manifests(canonical))
+    if config.get("secrets"):
+        resolved=output.resolve()
+        require(not resolved.is_relative_to(ROOT)or resolved.is_relative_to(ROOT/"evidence"),"keep a release containing Secrets outside the repository or under ignored evidence/")
+        credentials=read("secrets")
+        require(credentials.get("kind")=="List"and all(o.get("kind")=="Secret"for o in credentials["items"]),"secrets input must contain only Secret objects")
+        add("secrets",{"apiVersion":"v1","kind":"List","items":[{"apiVersion":"v1","kind":"Namespace","metadata":{"name":inventory["namespace"]}},*credentials["items"]]})
+    add("canonical-storage",manifests(canonical),["secrets"]if config.get("secrets")else [])
     add("ingestion-storage",manifests(ingestion),["canonical-storage"])
     add("isolation",render_isolation(inventory,flows),["ingestion-storage"])
     blockers=list(config.get("unresolved",[]))

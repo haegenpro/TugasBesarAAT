@@ -7,6 +7,7 @@
   "wildfire_config": "wildfire.json",
   "province_reference": "provinces.json",
   "services": "services.json",
+  "secrets": "secrets.json",
   "external_flows": "external-flows.json",
   "owner_databases": null,
   "canonical_durability": null,

@@ -48,4 +48,15 @@ class BundleIntegrationChecks(unittest.TestCase):
             next(s for s in bad["services"]if s["name"]=="broker")["storage"]["size"]=volume
             with self.assertRaises(ValueError):broker_capacity(bad)
 
+    def test_missing_tls_and_password_keys_in_supplied_secrets_block_release(self):
+        from storage_lib import manifests,plan
+        resources=manifests(plan(self.inventory,"postgres",self.image))
+        names={c["valueFrom"]["secretKeyRef"]["name"] for o in resources["items"]if o["kind"]=="StatefulSet"for c in o["spec"]["template"]["spec"]["containers"][0].get("env",[])if "secretKeyRef"in c.get("valueFrom",{})}
+        name=next(iter(names))
+        resources["items"].append({"apiVersion":"v1","kind":"Secret","metadata":{"name":name,"namespace":self.inventory["namespace"]},"stringData":{"POSTGRES_PASSWORD":"private"}})
+        report=self.inspect_resources(resources)
+        self.assertFalse(report["ready_for_apply"])
+        self.assertTrue(any("APP_PASSWORD"in message for message in report["blocked"]))
+        self.assertNotIn("private",json.dumps(report))
+
 if __name__=="__main__":unittest.main()

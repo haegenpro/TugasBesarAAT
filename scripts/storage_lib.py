@@ -15,10 +15,15 @@ def require(value, message):
 
 
 def plan(inventory, mode, image, formation_suffix="storage"):
+    require(isinstance(image,str) and re.fullmatch(r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}", image), "supply the built Patroni image by immutable digest")
+    return {**formation_layout(inventory,mode,formation_suffix),"image":image}
+
+
+def formation_layout(inventory, mode, formation_suffix="storage"):
+    """Placement for PKI generation before builds; contains no executable image."""
     require(formation_suffix in ("storage", "ingestion",*SERVICE_DATABASES), "unknown owned storage formation")
     require(formation_suffix == "storage" or mode == "postgres", "owned service databases require PostgreSQL mode")
     require(mode in ("postgres", "citus"), "mode must be postgres or citus")
-    require(re.fullmatch(r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}", image), "supply the built Patroni image by immutable digest")
     nodes = [n["name"] for n in inventory["nodes"]]
     placement = {0: [0, 1, 2]}
     if formation_suffix in SERVICE_DATABASES:
@@ -45,7 +50,7 @@ def plan(inventory, mode, image, formation_suffix="storage"):
     for node in nodes[:3]:
         per_node[node] += 128  # etcd
     return {**({"formation_suffix": formation_suffix} if formation_suffix != "storage" else {}),**({"database":SERVICE_DATABASES[formation_suffix][0],"runtime_role":SERVICE_DATABASES[formation_suffix][1]}if formation_suffix in SERVICE_DATABASES else{}), "version": 1, "formation": formation, "namespace": namespace,
-            "mode": mode, "image": image, "groups": groups,
+            "mode": mode, "groups": groups,
             "nodes": nodes, "pod_cidr": inventory["pod_cidr"], "cluster_id": inventory["cluster_id"],
             "requests_mib_before_routers": per_node, "router_requests_mib": 256,
             "vm_memory_mib": {n["name"]: n["memory_mib"] for n in inventory["nodes"]}}
@@ -124,7 +129,7 @@ def manifests(storage):
                         "--cacert=/tls/ca.crt", "--cert=/tls/tls.crt", "--key=/tls/tls.key", "endpoint", "health"]}, "periodSeconds": 5},
                     "volumeMounts": [{"name": "data", "mountPath": "/data"}, {"name": "tls", "mountPath": "/tls", "readOnly": True}]}],
                 "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": workload}},
-                            {"name": "tls", "secret": {"secretName": workload + "-tls", "defaultMode": 0o440}}]}}})
+                            {"name": "tls", "secret": {"secretName": workload + "-tls", "defaultMode": 0o440,"items":[{"key":key,"path":key}for key in("ca.crt","tls.crt","tls.key")]}}]}}})
 
     service(formation + "-members", {**owner, "component": "storage-postgres"}, [("postgres", 5432, 5432), ("patroni", 8008, 8008)], True)
     for group in storage["groups"]:
@@ -139,6 +144,7 @@ def manifests(storage):
             env = [{"name": k, "value": v} for k, v in values.items()]
             env += [{"name": k, "valueFrom": {"fieldRef": {"fieldPath": v}}} for k, v in
                     (("POD_NAME", "metadata.name"), ("POD_NAMESPACE", "metadata.namespace"))]
+            env += [{"name":key,"valueFrom":{"secretKeyRef":{"name":formation+"-credentials","key":key}}}for key in("POSTGRES_PASSWORD","REPLICATION_PASSWORD","PATRONI_PASSWORD","APP_PASSWORD")]
             obj("StatefulSet", workload, {"replicas": 1, "serviceName": formation + "-members",
                 "selector": {"matchLabels": {"member": name}}, "template": {"metadata": {"labels": labels}, "spec": {
                     "nodeSelector": {"kubernetes.io/hostname": node}, "automountServiceAccountToken": False,
@@ -150,7 +156,7 @@ def manifests(storage):
                         "volumeMounts": [{"name": "data", "mountPath": "/var/lib/postgresql/data"},
                                          {"name": "etcd-tls", "mountPath": "/etcd-tls", "readOnly": True}]}],
                     "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": workload}},
-                        {"name": "etcd-tls", "secret": {"secretName": formation + "-patroni-tls", "defaultMode": 0o440}}]}}})
+                        {"name": "etcd-tls", "secret": {"secretName": formation + "-patroni-tls", "defaultMode": 0o440,"items":[{"key":key,"path":key}for key in("ca.crt","tls.crt","tls.key")]}}]}}})
 
     proxy = ["global", "  log stdout format raw local0", "defaults", "  mode tcp", "  log global",
              "  timeout connect 2s", "  timeout client 65s", "  timeout server 65s", "resolvers cluster_dns",

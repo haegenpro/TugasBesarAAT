@@ -49,7 +49,7 @@ def validate(catalog):
         require(s["kind"]=="StatefulSet" or "storage" not in s,"local data requires StatefulSet placement")
         require(set(s.get("dependencies",[]))<=known,"unknown dependency")
         for key,value in s.get("environment",{}).items():
-            require(not re.search(r"PASSWORD|TOKEN|API_KEY|SECRET|DATABASE_URL|INTERNAL_KEY",key),"credential belongs in the service Secret")
+            require(key in ("ACCESS_TOKEN_TTL_SEC","REFRESH_TOKEN_TTL_SEC")or not re.search(r"PASSWORD|TOKEN|API_KEY|SECRET|DATABASE_URL|INTERNAL_KEY",key),"credential belongs in the service Secret")
             require(isinstance(value,str) and "\n" not in value,"public environment values must be strings")
             require(not re.search(r"://[^/\s]*@",value),"URL credentials belong in a Secret")
         for port in s["ports"].values():

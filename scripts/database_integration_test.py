@@ -73,5 +73,18 @@ class DatabaseIntegrationChecks(unittest.TestCase):
             self.assertEqual(len(next(j for j in jobs if j["job_name"]=="patroni")["static_configs"]),30)
             self.assertEqual(len(next(j for j in jobs if j["job_name"]=="storage-etcd")["static_configs"]),18)
             self.assertEqual(len(report["formations"]),6)
+            # Private Secrets are staged before any storage, and supplied-but-
+            # incomplete keys cannot disappear from offline preflight.
+            (root/"secrets.json").write_text(json.dumps({"kind":"List","items":[{"apiVersion":"v1","kind":"Secret","metadata":{"name":owner["runtime_secret"],"namespace":self.inventory["namespace"]},"stringData":{"AUDIT_CURSOR_KEY":"private"}}]}))
+            config["secrets"]="secrets.json"
+            (root/"release.json").write_text(json.dumps(config))
+            with_secrets=assemble(self.inventory,root/"release.json",root/"with-secrets")
+            self.assertEqual(with_secrets["stages"][0]["id"],"secrets")
+            self.assertEqual(with_secrets["stages"][1]["requires"],["secrets"])
+            self.assertTrue(any("AUDIT_TOKEN"in v and "missing keys"in v for v in with_secrets["blocked"]))
+            namespaces=[]
+            for stage in with_secrets["stages"]:
+                namespaces += [o for o in json.loads(Path(stage["manifest"]).read_text())["items"]if o["kind"]=="Namespace"]
+            self.assertEqual(len(namespaces),1)
 
 if __name__=="__main__":unittest.main()

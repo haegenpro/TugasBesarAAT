@@ -40,7 +40,7 @@ def inspect(bundle_path,inventory):
     formations=set(bundle.get("formations",[inventory["cluster_id"]+"-storage",inventory["cluster_id"]+"-ingestion"]))
     require(formations and all(isinstance(f,str) and re.fullmatch(re.escape(inventory["cluster_id"])+r"-[a-z0-9-]+",f)for f in formations),"declare only this cluster's storage formations")
     blocked=[];objects=[];seen=set();snapshots={};planned=[]
-    total=0;fixed={n["name"]:0 for n in inventory["nodes"]};external=set();supplied=set();apps=set();secret_keys={}
+    total=0;fixed={n["name"]:0 for n in inventory["nodes"]};external=set();supplied={};apps=set();secret_keys={}
     for stage in ordered:
         require(isinstance(stage.get("manifest"),str),"stage manifest path required")
         artifact=(path.parent/stage["manifest"]).resolve()
@@ -58,7 +58,9 @@ def inspect(bundle_path,inventory):
             if kind=="Namespace":require(name==inventory["namespace"],"unexpected namespace")
             identity=(obj["apiVersion"],kind,meta.get("namespace"),name)
             require(identity not in seen,"duplicate object across stages: "+kind+"/"+name);seen.add(identity)
-            if kind=="Secret":supplied.add(name)
+            if kind=="Secret":
+                values={**obj.get("data",{}),**obj.get("stringData",{})}
+                supplied[name]={key for key,value in values.items()if isinstance(value,str)and value}
             if kind not in ("Deployment","StatefulSet","DaemonSet","Job"):continue
             template=obj["spec"]["template"];pod=template["spec"];labels=template["metadata"]["labels"];role=labels.get("role")
             require(role in BUDGETS,"missing/invalid assignment role on "+name)
@@ -80,7 +82,9 @@ def inspect(bundle_path,inventory):
                 for source in container.get("envFrom",[]):
                     if "secretRef"in source:external.add(source["secretRef"]["name"])
             for volume in pod.get("volumes",[]):
-                if "secret"in volume:external.add(volume["secret"]["secretName"])
+                if "secret"in volume:
+                    secret=volume["secret"];external.add(secret["secretName"])
+                    secret_keys.setdefault(secret["secretName"],set()).update(item["key"]for item in secret.get("items",[]))
             count=len(inventory["nodes"])if kind=="DaemonSet"else obj["spec"].get("replicas",1)
             amount=pod_memory(pod);total+=amount*count
             node=pod.get("nodeSelector",{}).get("kubernetes.io/hostname")
@@ -92,8 +96,12 @@ def inspect(bundle_path,inventory):
     if total>available:blocked.append("declared workload requests exceed VM memory after guest/Kubernetes reserve")
     for node in inventory["nodes"]:
         if fixed[node["name"]]>node["memory_mib"]-bundle["node_reserve_mib"]:blocked.append("fixed workloads exceed memory on "+node["name"])
+    for name,keys in secret_keys.items():
+        if name in supplied:
+            missing=keys-supplied[name]
+            if missing:blocked.append("supplied Secret "+name+" is missing keys: "+", ".join(sorted(missing)))
     blocked+=bundle.get("unresolved",[])
     hosts={h["id"]:{"guest_memory_mib":sum(n["memory_mib"]for n in inventory["nodes"]if n["physical_host"]==h["id"]),
            "fixed_requests_mib":sum(fixed[n["name"]]for n in inventory["nodes"]if n["physical_host"]==h["id"]),
            "host_reserve_mib":h["reserve_mib"]}for h in inventory.get("hosts",[])}
-    return {"version":1,"ready_for_apply":not blocked,"blocked":blocked,"stages":planned,"workloads":objects,"memory_requests_mib":total,"estimated_available_mib":available,"fixed_requests_mib":fixed,"physical_hosts":hosts,"formations":sorted(formations),"required_existing_secrets":sorted(external-supplied),"required_existing_secret_keys":{name:sorted(keys)for name,keys in sorted(secret_keys.items())if name not in supplied},"apps":sorted(apps),"note":"Offline lower-bound capacity estimate. Live resources, CPU/disk, scheduling, rollout surge and failover headroom still need verification."},snapshots
+    return {"version":1,"ready_for_apply":not blocked,"blocked":blocked,"stages":planned,"workloads":objects,"memory_requests_mib":total,"estimated_available_mib":available,"fixed_requests_mib":fixed,"physical_hosts":hosts,"formations":sorted(formations),"required_existing_secrets":sorted(external-supplied.keys()),"required_existing_secret_keys":{name:sorted(keys)for name,keys in sorted(secret_keys.items())if name not in supplied},"apps":sorted(apps),"note":"Offline lower-bound capacity estimate. Live resources, CPU/disk, scheduling, rollout surge and failover headroom still need verification."},snapshots
