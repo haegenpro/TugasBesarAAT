@@ -14,7 +14,7 @@ import (
 
 func TestChatReport(t *testing.T) {
 	report, answer := chatReport(http.StatusOK, []byte(`{"answer":"Ada satu gempa AWAS di Aceh.","references":[{"hazard_id":"hz-1","hazard_type":"SEISMIC","severity":"AWAS","area_name":"Aceh","occurred_at":"2026-11-17T07:59:07Z"}],"model":"nemotron","data_as_of":"2026-11-17T08:00:00Z","disclaimer":"Bukan peringatan resmi."}`))
-	for _, want := range []string{"AI: Ada satu gempa AWAS di Aceh.", "Rujukan:", "AWAS", "Aceh | 2026-11-17T07:59:07Z | hz-1", "Bukan peringatan resmi."} {
+	for _, want := range []string{"AI: Ada satu gempa AWAS di Aceh.", "Rujukan:", "AWAS", "Aceh | 2026-11-17T07:59:07Z | hz-1", "Model : nemotron", "Data  : 17 Nov 2026 08:00:00 UTC (15:00:00 WIB)", "Bukan peringatan resmi."} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("report is missing %q:\n%s", want, report)
 		}
@@ -30,6 +30,19 @@ func TestChatReport(t *testing.T) {
 	} {
 		if report, answer := chatReport(status, []byte(body)); answer != "" || report == "" {
 			t.Errorf("HTTP %d should not produce an answer: %q", status, report)
+		}
+	}
+}
+
+func TestReadableTime(t *testing.T) {
+	cases := map[string]string{
+		"2026-11-17T13:22:10.51347962Z": "17 Nov 2026 13:22:10 UTC (20:22:10 WIB)",
+		"2026-11-17T18:30:00Z":          "17 Nov 2026 18:30:00 UTC (18 Nov 01:30:00 WIB)",
+		"bukan waktu":                   "bukan waktu",
+	}
+	for raw, want := range cases {
+		if got := readableTime(raw); got != want {
+			t.Errorf("readableTime(%q) = %q, want %q", raw, got, want)
 		}
 	}
 }

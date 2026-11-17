@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 const chatMemory = 8
@@ -78,6 +79,21 @@ func chatReport(status int, data []byte) (string, string) {
 			fmt.Fprintf(&b, "  - %-7s  %-10s  %s | %s | %s\n", e.Severity, e.HazardType, e.AreaName, e.OccurredAt, e.HazardID)
 		}
 	}
-	fmt.Fprintf(&b, "\n[%s | data per %s] %s\n", r.Model, r.DataAsOf, r.Disclaimer)
+	fmt.Fprintf(&b, "\n%s\nModel : %s\nData  : %s\n%s\n", strings.Repeat("─", 60), r.Model, readableTime(r.DataAsOf), r.Disclaimer)
 	return b.String(), r.Answer
+}
+
+var wib = time.FixedZone("WIB", 7*60*60)
+
+func readableTime(raw string) string {
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return raw
+	}
+	utc, local := t.UTC(), t.In(wib)
+	layout := "15:04:05"
+	if local.Day() != utc.Day() {
+		layout = "2 Jan 15:04:05"
+	}
+	return fmt.Sprintf("%s UTC (%s WIB)", utc.Format("2 Jan 2006 15:04:05"), local.Format(layout))
 }

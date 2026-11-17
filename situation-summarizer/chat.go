@@ -37,6 +37,8 @@ var chatSchema = map[string]any{
 	},
 }
 
+const chatDisclaimer = "Jawaban ini dibuat AI dari data BNPB dan bukan peringatan resmi. Ikuti peringatan dari kanal resmi."
+
 const (
 	maxQuestion   = 500
 	maxTurn       = 2000
@@ -141,7 +143,7 @@ func (c *Chat) Ask(ctx context.Context, req ChatRequest) (*ChatAnswer, *chatFail
 		c.log.Warn("chat answer not delivered", "outcome", outcome, "error", err)
 		return nil, &failure
 	}
-	answer.Model, answer.DataAsOf, answer.Disclaimer = completion.Model, snap.AsOf, disclaimer
+	answer.Model, answer.DataAsOf, answer.Disclaimer = completion.Model, snap.AsOf, chatDisclaimer
 	c.metrics.Add("summarizer_chat_ok_total", 1)
 	c.log.Info("chat answered", "model", completion.Model, "references", len(answer.References), "seconds", time.Since(started).Seconds())
 	return answer, nil
