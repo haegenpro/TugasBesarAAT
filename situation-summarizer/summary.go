@@ -52,34 +52,44 @@ func text(value string, limit int) bool {
 	return value != "" && utf8.ValidString(value) && utf8.RuneCountInString(value) <= limit
 }
 
+type draft struct {
+	Headline   string `json:"headline"`
+	Overview   string `json:"overview"`
+	Highlights []struct {
+		Ref     string `json:"ref"`
+		Summary string `json:"summary"`
+	} `json:"highlights"`
+	SourceNotes []string `json:"source_notes"`
+}
+
 func validate(content string, s *Snapshot, maxHighlights int) (Narrative, error) {
-	var n Narrative
+	var a draft
 	d := json.NewDecoder(bytes.NewReader([]byte(extractJSON(content))))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&n); err != nil {
-		return n, invalid("not the expected JSON object: %v", err)
+	if err := d.Decode(&a); err != nil {
+		return Narrative{}, invalid("not the expected JSON object: %v", err)
 	}
+	n := Narrative{Headline: a.Headline, Overview: a.Overview, Highlights: make([]Highlight, 0, len(a.Highlights)), SourceNotes: a.SourceNotes}
 	if !text(n.Headline, 200) {
 		return n, invalid("headline is empty or too long")
 	}
 	if !text(n.Overview, 1200) {
 		return n, invalid("overview is empty or too long")
 	}
-	if len(n.Highlights) > maxHighlights {
-		return n, invalid("%d highlights exceed the limit of %d", len(n.Highlights), maxHighlights)
-	}
 	seen := map[string]bool{}
-	for _, h := range n.Highlights {
-		if !s.Has(h.HazardID) {
-			return n, invalid("highlight refers to unknown hazard_id %q", h.HazardID)
+	for _, h := range a.Highlights {
+		id, ok := s.refs[h.Ref]
+		if !ok {
+			return n, invalid("highlight refers to unknown event %q", h.Ref)
 		}
-		if seen[h.HazardID] {
-			return n, invalid("hazard_id %q is highlighted twice", h.HazardID)
+		if seen[h.Ref] {
+			return n, invalid("event %q is highlighted twice", h.Ref)
 		}
-		seen[h.HazardID] = true
+		seen[h.Ref] = true
 		if !text(h.Summary, 300) {
-			return n, invalid("highlight %q is empty or too long", h.HazardID)
+			return n, invalid("highlight %q is empty or too long", h.Ref)
 		}
+		n.Highlights = append(n.Highlights, Highlight{HazardID: id, Summary: h.Summary})
 	}
 	if len(n.SourceNotes) > 5 {
 		return n, invalid("too many source notes")
@@ -92,5 +102,6 @@ func validate(content string, s *Snapshot, maxHighlights int) (Narrative, error)
 	if s.Counts.Total == 0 && len(n.Highlights) > 0 {
 		return n, invalid("highlights reported for an empty window")
 	}
+	n.Highlights = n.Highlights[:min(len(n.Highlights), maxHighlights)]
 	return n, nil
 }

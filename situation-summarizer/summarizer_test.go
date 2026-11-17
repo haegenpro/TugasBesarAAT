@@ -48,24 +48,28 @@ func TestSnapshotCountsRanksAndFingerprints(t *testing.T) {
 	}
 }
 
-const goodSummary = `{"headline":"Gempa AWAS di Aceh","overview":"Satu gempa AWAS dan satu SIAGA tercatat dalam dua jam terakhir.","highlights":[{"hazard_id":"hz-b","summary":"Gempa AWAS di Aceh."}],"source_notes":[]}`
+const goodSummary = `{"headline":"Gempa AWAS di Aceh","overview":"Satu gempa AWAS dan satu SIAGA tercatat dalam dua jam terakhir.","highlights":[{"ref":"E1","summary":"Gempa AWAS di Aceh."}],"source_notes":[]}`
 
 func TestValidateRejectsWhatTheDataDoesNotSupport(t *testing.T) {
 	s := build(events("NORMAL", "AWAS"), nil, base, base, false, 8)
-	if _, err := validate("```json\n"+goodSummary+"\n```", s, 8); err != nil {
-		t.Fatalf("valid summary rejected: %v", err)
+	n, err := validate("```json\n"+goodSummary+"\n```", s, 8)
+	if err != nil || n.Highlights[0].HazardID != "hz-b" {
+		t.Fatalf("valid summary rejected or not mapped back: %+v %v", n.Highlights, err)
+	}
+	if prompt := string(s.promptJSON()); strings.Contains(prompt, "hz-") || !strings.Contains(prompt, `"ref":"E1"`) {
+		t.Fatalf("prompt should expose short refs instead of hazard ids: %s", prompt)
 	}
 	cases := map[string]string{
-		"unknown id":     strings.Replace(goodSummary, "hz-b", "hz-zzz", 1),
-		"unknown field":  strings.Replace(goodSummary, `"source_notes"`, `"x":1,"source_notes"`, 1),
-		"empty headline": strings.Replace(goodSummary, "Gempa AWAS di Aceh\"", "\"", 1),
-		"not json":       "Situasi aman terkendali.",
-		"extra field":    strings.Replace(goodSummary, `"source_notes":[]`, `"source_notes":[],"casualties":120`, 1),
-		"too many":       `{"headline":"h","overview":"o","highlights":[{"hazard_id":"hz-a","summary":"s"},{"hazard_id":"hz-b","summary":"s"}],"source_notes":[]}`,
+		"unknown id":        strings.Replace(goodSummary, `"E1"`, `"E99"`, 1),
+		"unknown field":     strings.Replace(goodSummary, `"source_notes"`, `"x":1,"source_notes"`, 1),
+		"empty headline":    strings.Replace(goodSummary, "Gempa AWAS di Aceh\"", "\"", 1),
+		"not json":          "Situasi aman terkendali.",
+		"extra field":       strings.Replace(goodSummary, `"source_notes":[]`, `"source_notes":[],"casualties":120`, 1),
+		"fake beyond limit": `{"headline":"h","overview":"o","highlights":[{"ref":"E2","summary":"s"},{"ref":"E99","summary":"s"}],"source_notes":[]}`,
 	}
 	for name, content := range cases {
 		limit := 8
-		if name == "too many" {
+		if name == "fake beyond limit" {
 			limit = 1
 		}
 		var bad *Invalid
@@ -73,8 +77,12 @@ func TestValidateRejectsWhatTheDataDoesNotSupport(t *testing.T) {
 			t.Errorf("%s: expected rejection, got %v", name, err)
 		}
 	}
-	if _, err := validate(`{"headline":"h","overview":"o","highlights":[{"hazard_id":"hz-a","summary":"s"},{"hazard_id":"hz-a","summary":"s"}],"source_notes":[]}`, s, 8); err == nil {
+	if _, err := validate(`{"headline":"h","overview":"o","highlights":[{"ref":"E2","summary":"s"},{"ref":"E2","summary":"s"}],"source_notes":[]}`, s, 8); err == nil {
 		t.Error("duplicate highlight accepted")
+	}
+	n, err = validate(`{"headline":"h","overview":"o","highlights":[{"ref":"E1","summary":"s"},{"ref":"E2","summary":"s"}],"source_notes":[]}`, s, 1)
+	if err != nil || len(n.Highlights) != 1 || n.Highlights[0].HazardID != "hz-b" {
+		t.Errorf("extra genuine highlights should be trimmed, got %+v %v", n.Highlights, err)
 	}
 }
 
@@ -96,6 +104,8 @@ func TestOpenRouterRequestAndErrors(t *testing.T) {
 		case 502:
 			w.WriteHeader(200)
 			_, _ = w.Write([]byte(`{"error":{"code":502,"message":"provider down"}}`))
+		case 204:
+			_, _ = w.Write([]byte(`{"model":"thinker:free","choices":[{"message":{"content":""},"finish_reason":"length"}]}`))
 		default:
 			_ = json.NewEncoder(w).Encode(map[string]any{"model": "baidu/ernie-5.5-flash-preview:free", "choices": []any{map[string]any{"message": map[string]string{"content": goodSummary}}}})
 		}
@@ -109,6 +119,9 @@ func TestOpenRouterRequestAndErrors(t *testing.T) {
 	if got["model"] != "primary:free" || len(got["models"].([]any)) != 2 || got["response_format"].(map[string]any)["type"] != "json_schema" {
 		t.Fatalf("unexpected request %v", got)
 	}
+	if reasoning := got["reasoning"].(map[string]any); reasoning["max_tokens"].(float64) >= got["max_tokens"].(float64) {
+		t.Fatalf("reasoning can consume the whole answer budget: %v", got)
+	}
 	status.Store(429)
 	var limited *RateLimited
 	if _, err = o.Complete(context.Background(), []byte(`{}`)); !errors.As(err, &limited) || limited.RetryAfter != 2*time.Minute {
@@ -117,6 +130,10 @@ func TestOpenRouterRequestAndErrors(t *testing.T) {
 	status.Store(502)
 	if _, err = o.Complete(context.Background(), []byte(`{}`)); err == nil || !strings.Contains(err.Error(), "provider down") {
 		t.Fatalf("provider error not reported: %v", err)
+	}
+	status.Store(204)
+	if _, err = o.Complete(context.Background(), []byte(`{}`)); err == nil || !strings.Contains(err.Error(), "thinker:free") || !strings.Contains(err.Error(), "length") {
+		t.Fatalf("empty answer not explained: %v", err)
 	}
 }
 
@@ -214,7 +231,7 @@ func TestWrongAnswerIsRejectedAndPreviousSummaryKept(t *testing.T) {
 	s, clock := scheduler(source, llm, nil)
 	tick(s)
 	first := s.View()
-	llm.content = strings.Replace(goodSummary, "hz-b", "hz-invented", 1)
+	llm.content = strings.Replace(goodSummary, `"E1"`, `"E77"`, 1)
 	source.set(events("NORMAL", "AWAS", "SIAGA"), nil)
 	*clock = clock.Add(time.Hour)
 	tick(s)

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -50,7 +51,9 @@ type Snapshot struct {
 	Sources     map[string]SourceState `json:"source_status"`
 	Partial     bool                   `json:"partial"`
 	Fingerprint string                 `json:"-"`
+	highlights  int
 	known       map[string]Event
+	refs        map[string]string
 }
 
 func (s *Snapshot) Has(id string) bool {
@@ -119,7 +122,7 @@ func (a *Aggregator) get(ctx context.Context, path string, out any) error {
 }
 
 func build(events []Event, sources map[string]SourceState, start, now time.Time, partial bool, notableLimit int) *Snapshot {
-	s := &Snapshot{WindowStart: start, AsOf: now.UTC(), Sources: sources, Partial: partial, known: make(map[string]Event, len(events))}
+	s := &Snapshot{WindowStart: start, AsOf: now.UTC(), Sources: sources, Partial: partial, highlights: notableLimit, known: make(map[string]Event, len(events))}
 	if s.Sources == nil {
 		s.Sources = map[string]SourceState{}
 	}
@@ -158,6 +161,10 @@ func build(events []Event, sources map[string]SourceState, start, now time.Time,
 		return a.HazardID < b.HazardID
 	})
 	s.Notable = unique[:min(len(unique), notableLimit*3)]
+	s.refs = make(map[string]string, len(s.Notable))
+	for i, e := range s.Notable {
+		s.refs[ref(i)] = e.HazardID
+	}
 	for _, e := range unique {
 		if e.Severity == "AWAS" && len(s.Critical) < 20 {
 			s.Critical = append(s.Critical, e)
@@ -200,14 +207,30 @@ func (s *Snapshot) urgentChange(previous *Snapshot) bool {
 	return false
 }
 
+func ref(i int) string { return "E" + strconv.Itoa(i+1) }
+
+type promptEvent struct {
+	Ref        string `json:"ref"`
+	Source     string `json:"source"`
+	HazardType string `json:"hazard_type"`
+	Severity   string `json:"severity"`
+	AreaName   string `json:"area_name"`
+	OccurredAt string `json:"occurred_at"`
+}
+
 func (s *Snapshot) promptJSON() []byte {
+	notable := make([]promptEvent, len(s.Notable))
+	for i, e := range s.Notable {
+		notable[i] = promptEvent{Ref: ref(i), Source: e.Source, HazardType: e.HazardType, Severity: e.Severity, AreaName: e.AreaName, OccurredAt: e.OccurredAt}
+	}
 	view := struct {
-		Window  string                 `json:"window"`
-		Counts  Counts                 `json:"counts"`
-		Notable []Event                `json:"notable_events"`
-		Sources map[string]SourceState `json:"source_status"`
-		Partial bool                   `json:"data_partial"`
-	}{Window: s.WindowStart.Format(time.RFC3339) + "/" + s.AsOf.Format(time.RFC3339), Counts: s.Counts, Notable: s.Notable, Sources: s.Sources, Partial: s.Partial}
+		Window        string                 `json:"window"`
+		MaxHighlights int                    `json:"max_highlights"`
+		Counts        Counts                 `json:"counts"`
+		Notable       []promptEvent          `json:"notable_events"`
+		Sources       map[string]SourceState `json:"source_status"`
+		Partial       bool                   `json:"data_partial"`
+	}{Window: s.WindowStart.Format(time.RFC3339) + "/" + s.AsOf.Format(time.RFC3339), MaxHighlights: s.highlights, Counts: s.Counts, Notable: notable, Sources: s.Sources, Partial: s.Partial}
 	b, _ := json.Marshal(view)
 	return b
 }

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,9 +16,11 @@ const systemPrompt = `Anda adalah analis pusat data BNPB. Tulis ringkasan situas
 
 Aturan:
 - Gunakan hanya fakta yang ada di data. Jangan menambah lokasi, angka, korban, atau prediksi yang tidak tertulis.
-- Setiap sorotan wajib merujuk satu hazard_id yang ada di notable_events.
+- Pilih paling banyak max_highlights sorotan. Setiap sorotan wajib merujuk satu ref yang ada di notable_events, misalnya E1. Jangan menulis ref di dalam teks.
 - Utamakan kejadian AWAS dan SIAGA, lalu sebutkan sumber data yang berstatus stale atau unavailable.
 - Jika data_partial bernilai true, nyatakan bahwa data belum lengkap.
+- Semua waktu di data dalam UTC. Tulis sebagai UTC, jangan diubah ke WIB.
+- headline maksimal 160 karakter, overview 2-4 kalimat, setiap summary sorotan satu kalimat.
 - Kalimat singkat dan faktual. Jawab hanya dengan JSON sesuai skema.`
 
 var summarySchema = map[string]any{
@@ -34,10 +35,10 @@ var summarySchema = map[string]any{
 			"items": map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
-				"required":             []string{"hazard_id", "summary"},
+				"required":             []string{"ref", "summary"},
 				"properties": map[string]any{
-					"hazard_id": map[string]any{"type": "string"},
-					"summary":   map[string]any{"type": "string"},
+					"ref":     map[string]any{"type": "string", "description": "Kode ref dari notable_events, misalnya E1."},
+					"summary": map[string]any{"type": "string"},
 				},
 			},
 		},
@@ -73,8 +74,8 @@ func (o *OpenRouter) Complete(ctx context.Context, input []byte) (Completion, er
 		},
 		"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "situation_summary", "strict": true, "schema": summarySchema}},
 		"temperature":     0.2,
-		"max_tokens":      4000,
-		"reasoning":       map[string]any{"effort": "low", "exclude": true},
+		"max_tokens":      8000,
+		"reasoning":       map[string]any{"max_tokens": 1024, "exclude": true},
 	}
 	if len(o.Fallbacks) > 0 {
 		body["models"] = append([]string{o.Model}, o.Fallbacks...)
@@ -128,8 +129,11 @@ func (o *OpenRouter) Complete(ctx context.Context, input []byte) (Completion, er
 	if resp.StatusCode != http.StatusOK {
 		return Completion{}, fmt.Errorf("openrouter returned %d", resp.StatusCode)
 	}
-	if len(out.Choices) == 0 || strings.TrimSpace(out.Choices[0].Message.Content) == "" {
-		return Completion{}, errors.New("openrouter returned no content")
+	if len(out.Choices) == 0 {
+		return Completion{}, fmt.Errorf("openrouter returned no choices from %s", out.Model)
+	}
+	if strings.TrimSpace(out.Choices[0].Message.Content) == "" {
+		return Completion{}, fmt.Errorf("%s returned no content (finish_reason %s)", out.Model, out.Choices[0].FinishReason)
 	}
 	return Completion{Content: out.Choices[0].Message.Content, Model: out.Model}, nil
 }

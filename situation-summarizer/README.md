@@ -32,11 +32,11 @@ Default-nya memakai model gratis OpenRouter:
 
 | Peran | Model | Alasan |
 |---|---|---|
-| Utama | `baidu/ernie-5.5-flash-preview:free` | Mendukung structured output dan konteks panjang, cepat, dan bagus untuk ringkasan. |
-| Cadangan 1 | `nvidia/nemotron-3.5-super-vl:free` | Kuat dalam mengikuti instruksi dan membuat JSON. |
-| Cadangan 2 | `google/gemma-4-31b-it:free` | Bahasa Indonesianya baik. |
+| Utama | `nvidia/nemotron-3.5-super-vl:free` | Mematuhi batas token reasoning, mendukung structured output, dan menjawab data 2 jam penuh dalam 10–25 detik. |
+| Cadangan 1 | `baidu/ernie-5.5-flash-preview:free` | Mendukung structured output, tetapi reasoning-nya wajib dan panjangnya tidak stabil sehingga hanya dipakai sebagai cadangan. |
+| Cadangan 2 | `google/gemma-4-31b-it:free` | Bahasa Indonesianya baik, tetapi sering terkena rate limit dari penyedia. |
 
-Cadangan dikirim lewat field `models`, sehingga OpenRouter otomatis berpindah model bila model utama sedang penuh. Model gratis bisa terkena rate limit atau dihapus sewaktu-waktu. Untuk mengganti model, ubah `SUMMARY_MODEL` atau `SUMMARY_FALLBACK_MODELS` tanpa mengubah kode.
+Reasoning dibatasi 1.024 token dari total 8.000 token supaya model tidak menghabiskan seluruh jatah untuk berpikir sebelum menulis jawaban. Cadangan dikirim lewat field `models`, sehingga OpenRouter otomatis berpindah model bila model utama sedang penuh. Model gratis bisa terkena rate limit atau dihapus sewaktu-waktu. Untuk mengganti model, ubah `SUMMARY_MODEL` atau `SUMMARY_FALLBACK_MODELS` tanpa mengubah kode.
 
 ## Konfigurasi
 
@@ -78,6 +78,8 @@ Ringkasan dapat dibaca melalui client-api dengan token yang sudah login:
 ```
 curl -H "Authorization: Bearer <token>" http://localhost:<CLIENT_API_PORT>/situation
 ```
+
+Pada volume Postgres yang baru, Aggregator baru bisa melayani `/internal/hazards` setelah migrasi M2 dijalankan (lihat [store/README.md](../store/README.md#m2-offline-migrations)). Tanpa migrasi itu, summarizer hanya mencatat `aggregator returned 503` dan `/situation` menjawab `unavailable`.
 
 Ringkasan juga bisa dibuka dari `client-tui` melalui menu `10. Ringkasan situasi (AI)` setelah login dengan role apa pun.
 

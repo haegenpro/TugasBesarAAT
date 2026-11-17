@@ -135,7 +135,7 @@ func (s *Scheduler) summarize(ctx context.Context, snap *Snapshot) {
 		completion, err = s.llm.Complete(call, snap.promptJSON())
 	}
 	if err == nil && s.cfg.Fault == "invalid" {
-		completion.Content = `{"headline":"Gempa besar di wilayah fiktif","overview":"Ringkasan uji yang sengaja salah.","highlights":[{"hazard_id":"fabricated-hazard","summary":"Kejadian ini tidak ada di data."}],"source_notes":[]}`
+		completion.Content = `{"headline":"Gempa besar di wilayah fiktif","overview":"Ringkasan uji yang sengaja salah.","highlights":[{"ref":"E999","summary":"Kejadian ini tidak ada di data."}],"source_notes":[]}`
 	}
 	var narrative Narrative
 	if err == nil {
