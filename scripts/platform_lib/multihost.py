@@ -133,6 +133,9 @@ class MultiHostCluster(LocalCluster):
         require(self.vm_state(node)=="shut off","owned VM must be fenced shut off before disk replacement")
         return self.clients[node["physical_host"]].call("replace-empty",node=node["name"],run_id=run_id)
 
+    def replacement_status(self,node,run_id):
+        return self.clients[node['physical_host']].call('replacement-status',node=node['name'],run_id=run_id)
+
     def status(self):
         return {name: client.call("status") for name, client in self.clients.items()}
 

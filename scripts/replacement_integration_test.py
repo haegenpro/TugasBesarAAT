@@ -64,6 +64,10 @@ class ReplacementIntegrationChecks(unittest.TestCase):
             for kind in ("root","data"):self.assertEqual((quarantine/f"{name}-{kind}.vdi").read_bytes(),("original-"+kind).encode())
             self.assertFalse(any("--delete"in args or "startvm"in args for args in calls))
             with patch.object(agent,"status",return_value={"state":"running"}),self.assertRaises(ValueError):agent.replace_empty(name,"b"*32)
+            self.assertEqual(agent.replacement_status(name,'a'*32)['phase'],'complete')
+            replacement=agent.path('disks/changed.tmp');replacement.write_bytes(b'foreign disk')
+            replacement.replace(agent.path(f'disks/{name}-data.vdi'))
+            with self.assertRaisesRegex(ValueError,'disks changed'):agent.replacement_status(name,'a'*32)
 
     def test_restore_rejects_traversal_and_symlink_before_node_mutation(self):
         for unsafe in ("../escape","/absolute","symlink"):

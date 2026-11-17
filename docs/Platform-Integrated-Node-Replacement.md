@@ -75,12 +75,13 @@ its private APP `NATS_URL` and separate `NATS_SYSTEM_URL`. Missing tools or
 credentials stop before controller holds or disk replacement. See the
 [broker recovery account wiring](Platform-Broker-Recovery.md).
 
-Failures keep journals, quarantine and uncertain workloads for explicit repair;
-the top-level controller is not yet a fully resumable phase engine. It never
-silently rolls back data or boots old storage. Do not declare automatic recovery
-under interrupted replacement until those phase-fault scenarios are exercised.
+Failures keep journals, quarantine and workloads at their recorded checkpoints.
+Version 3 runs can be resumed explicitly with the original run ID and unchanged
+inventory, bundle bytes, volume requirements and checkpoint hashes. Completed
+phases are skipped; pending phases reconcile observed state before continuing.
+It never silently rolls back data or boots quarantined old storage.
 
-Version 2 controller reports are replaced atomically with file/directory fsync.
+Controller reports are replaced atomically with file/directory fsync.
 They record original WAL anchors, controller UIDs/counts, mutation intents,
 per-controller hold/release completion, DCS membership and learner IDs, provider
 quarantine and restore hashes. An interrupted report therefore identifies the
@@ -94,8 +95,35 @@ python3 scripts/platform-node-replacement.py status \
 ```
 
 Status checks bind the report to its original run/node/cluster. Inspect it and
-the host journal before repairing or retrying; this command does not resume,
+the host journal before repairing or retrying. Status itself does not resume,
 roll back or declare logical reconciliation complete.
+
+```sh
+python3 scripts/platform-node-replacement.py resume-node \
+  --inventory /private/four-hosts.json --config /private/replacement.json \
+  --node aat-fourhost-b --run ORIGINAL_32_CHARACTER_RUN_ID
+```
+
+Resume reconciles completed controller patches, lost DCS remove/add/promote
+replies, provider completion, already-running replacement boot, partial K3s join,
+volume preparation, atomic source restore and controller release. It preserves
+the original WAL and broker acknowledgement anchors. Provider status validates
+the fresh disk file identities, while a guest marker binds the data disk to the
+original replacement generation. Fresh runs refuse another unfinished run on
+the same node. Final verification always repeats even after a lost result reply.
+
+Changed controller identities/counts, foreign DCS members, changed disk files,
+different artifacts, missing generation markers or changed primary timelines
+stop automatic continuation for explicit inspection. A stale provider lock after
+a killed host helper still requires inspection. Version 2 interrupted runs do
+not contain the complete phase state and are not automatically adopted. This is
+guarded resumption of supported states, not recovery from arbitrary external
+modification. Primary timeline changes require ancestry/reconciliation review.
+
+Focused interruption checks replay eight mutating phase boundaries with durable
+journals and actual source restores, preserving source writes made after release.
+They also cover lost DCS/provider replies, completed promotion, changed-plan/UID
+refusal and changed disk identity. Physical phase-fault execution remains pending.
 
 ## Verification status
 

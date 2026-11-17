@@ -164,6 +164,6 @@ def load_plan(inventory,path,node_name):
                 volume["kind"]="unresolved";blockers.append("restore/rebuild policy required for "+claim)
         volumes.append(volume)
     require(storage_claims<={v["claim"]for v in volumes},"bundle omits original storage replicas")
-    return {"version":1,"target":target,"ready":not blockers,"blocked":blockers,"formations":formations,"volumes":volumes,"volume_requirements":[str(base/p)for p in config.get("volume_requirements",[])],"namespace":inventory["namespace"],"scope":"Fenced empty-VM recovery; no accepted-data or restore success is inferred from a healthy pod"}
+    return {"version":1,"target":target,"ready":not blockers,"blocked":blockers,"formations":formations,"volumes":volumes,"volume_requirements":[str(base/p)for p in config.get("volume_requirements",[])],"bundle_hashes":{key:hashlib.sha256(raw).hexdigest()for key,raw in snapshots.items()},"requirements_hashes":{str(base/p):hashlib.sha256((base/p).read_bytes()).hexdigest()for p in config.get('volume_requirements',[])},"inventory_sha256":fingerprint(inventory),"namespace":inventory["namespace"],"scope":"Fenced empty-VM recovery; no accepted-data or restore success is inferred from a healthy pod"}
 
 RESTORE=(ROOT/'deployment/platform/restore_source.py').read_text()

@@ -24,7 +24,7 @@ from .multihost_inventory import capacity, host_nodes
 
 MAX_REQUEST = 128 * 1024
 MAX_RESPONSE = 2 * 1024 * 1024
-OPERATIONS = {"doctor", "status", "init", "upload", "upload-status", "seal-upload", "create", "start", "stop", "pause", "resume", "replace-empty", "collector-start", "collector-fetch"}
+OPERATIONS = {"doctor", "status", "init", "upload", "upload-status", "seal-upload", "create", "start", "stop", "pause", "resume", "replace-empty", "replacement-status", "collector-start", "collector-fetch"}
 
 
 def execute(args, *, timeout=60, check=True, input=None):
@@ -528,9 +528,25 @@ class HostAgent:
                 record["retained"].append(kind);record["phase"]="disks-retained";self._json(journal_path,record)
             self.create(name)
             require(self.status(name)["state"]=="shut off","fresh replacement must remain stopped")
+            record['fresh_disks']={kind:{'inode':self.path(f'disks/{name}-{kind}.{ext}').stat().st_ino,'device':self.path(f'disks/{name}-{kind}.{ext}').stat().st_dev}for kind in('root','data')}
             record["phase"]="complete";self._json(journal_path,record)
             return {"state":self.status(name),"quarantine":str(quarantine),"run_id":run_id}
         finally:lock.rmdir()
+
+    def replacement_status(self,name,run_id):
+        self.check_owner();self._node(name)
+        require(isinstance(run_id,str)and re.fullmatch(r'[0-9a-f]{32}',run_id),'replacement run identity required')
+        path=self.path('intents/'+name+'.replacement.json')
+        if not path.exists():return {'phase':'absent','run_id':run_id}
+        record=json.loads(path.read_text())
+        require(record['identity']=={**self.owner,'node':name,'uuid':resource_uuid(self.cfg,name),'run_id':run_id},'host replacement belongs to another run')
+        if record['phase']=='complete':
+            ext='qcow2'if self.host['provider']=='libvirt'else'vdi'
+            require(set(record.get('fresh_disks',{}))=={'root','data'},'fresh disk identities unavailable; inspect original provider journal')
+            for kind,identity in record['fresh_disks'].items():
+                disk=self.path(f'disks/{name}-{kind}.{ext}')
+                require(disk.is_file()and not disk.is_symlink()and{'inode':disk.stat().st_ino,'device':disk.stat().st_dev}==identity,'replacement disks changed after original provider operation')
+        return {'phase':record['phase'],'run_id':run_id,'quarantine':record['quarantine'],'fresh_disks':record.get('fresh_disks',{})}
 
     def dispatch(self, op, args):
         require(op in OPERATIONS, "operation not allowlisted")
@@ -552,6 +568,9 @@ class HostAgent:
         if op == "replace-empty":
             require(set(args)=={"node","run_id"},"replacement accepts only owned node/run identities")
             return self.replace_empty(args["node"],args["run_id"])
+        if op=='replacement-status':
+            require(set(args)=={'node','run_id'},'replacement status only accepts original identities')
+            return self.replacement_status(args['node'],args['run_id'])
         if op.startswith("collector-"):
             from .network_evidence import collector_operation
             self.check_owner()
