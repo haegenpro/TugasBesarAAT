@@ -25,6 +25,8 @@ func NewStream(r io.Reader, maxLine int) *Stream {
 	return &Stream{r: bufio.NewReaderSize(r, 64<<10), maxLine: maxLine}
 }
 
+func (s *Stream) Buffered() int { return s.r.Buffered() }
+
 func (s *Stream) line() ([]byte, error) {
 	var out []byte
 	for {

@@ -135,9 +135,15 @@ func TestConnectorResumesWithoutGapsOrDuplicates(t *testing.T) {
 			write("id: " + strconv.FormatInt(from+1, 10) + "\nevent: detection\ndata: {\"broken\":true}\n\n")
 			write(detectionEvent(from + 3))
 		default:
+			write("event: heartbeat\ndata: {\"virtual_now\":\"2026-11-12T02:52:00Z\"}\n\n")
+			var burst strings.Builder
 			for o := from; o <= 12; o++ {
-				write(detectionEvent(o))
+				burst.WriteString(detectionEvent(o))
+				if o == from+1 {
+					burst.WriteString("event: heartbeat\ndata:\n\n")
+				}
 			}
+			write(burst.String())
 			write(": idle\n\n")
 			<-r.Context().Done()
 		}

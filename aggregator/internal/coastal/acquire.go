@@ -109,6 +109,7 @@ func (a *Acquirer) Step(ctx context.Context) (more bool, retErr error) {
 		clock = &page.GeneratedAt
 	}
 	var latest time.Time
+	accepted := make([]rawinput.Envelope, 0, len(page.Items))
 	for i, raw := range page.Items {
 		position := progress.Position + int64(i)
 		e := rawinput.Envelope{Version: 1, Source: Source, Namespace: a.Progress.Namespace, Operation: "create", Position: &position, Cursor: progress.Cursor, ReceivedAt: received.Format(time.RFC3339Nano), VirtualNow: clock, Payload: raw, Size: int64(len(raw)), Digest: rawinput.Hash(raw), ContentType: "application/json", CorrelationID: cid, Traceparent: traceparent, OwnershipScope: owner.Scope, OwnershipEpoch: owner.Epoch, OwnershipHolder: owner.Holder}
@@ -140,10 +141,13 @@ func (a *Acquirer) Step(ctx context.Context) (more bool, retErr error) {
 			platform.Add("coastal_observations_quarantined_total", 1)
 			continue
 		}
-		e, err = a.Progress.Preserve(ctx, owner, e)
-		if err != nil {
-			return false, err
-		}
+		accepted = append(accepted, e)
+	}
+	accepted, err = a.Progress.PreserveBatch(ctx, owner, accepted)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range accepted {
 		if a.Repository != nil {
 			if err = a.Repository.Expect(ctx, owner, e); err != nil {
 				return false, err
