@@ -6,6 +6,7 @@ from pathlib import Path
 import tarfile
 
 from bundle_lib import inspect
+from platform_lib.inventory import fingerprint
 from storage_lib import require
 
 ROOT=Path(__file__).resolve().parent.parent
@@ -26,6 +27,16 @@ def validate_archive(path):
 def recovery_module():
     spec=importlib.util.spec_from_file_location("canonical_recovery",ROOT/"scripts/platform-recovery.py")
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
+
+def validate_checkpoint(inventory,volume,policy,base):
+    receipt=json.loads((base/policy['receipt']).read_text())
+    require(receipt.get('version')==1 and receipt.get('writers_stopped')is True,'source checkpoint was not captured with stopped writers')
+    require(receipt.get('cluster_id')==inventory['cluster_id'] and receipt.get('namespace')==inventory['namespace'] and receipt.get('inventory_sha256')==fingerprint(inventory),'source checkpoint belongs to another deployment')
+    recorded=receipt['volume']
+    require(all(recorded.get(k)==volume.get(k)for k in('claim','path','uid','node')),'source checkpoint volume identity differs')
+    require(recorded.get('app')==volume['controller']['app'] and recorded.get('controller')==volume['controller']['name'],'source checkpoint owning controller differs')
+    require(receipt.get('sha256')==policy['sha256'],'source checkpoint/archive digest differs')
+    return {'captured_at':receipt['captured_at'],'sha256':receipt['sha256'],'sqlite':receipt.get('sqlite',[]),'scope':receipt.get('scope')}
 
 def load_plan(inventory,path,node_name):
     require(inventory.get("version")==2 and len(inventory.get("hosts",[]))==4,"integrated replacement requires four physical provider hosts")
@@ -64,7 +75,7 @@ def load_plan(inventory,path,node_name):
         if node_name not in assigned:continue
         require(assigned=={node_name},"recovery requires exactly one original node per local volume")
         claim=spec["claimRef"]["name"];controller=controllers.get(claim);require(controller,"local volume has no known owning workload")
-        volume={"claim":claim,"path":spec["local"]["path"],"controller":controller}
+        volume={"claim":claim,"path":spec["local"]["path"],"node":node_name,"controller":controller}
         if claim in storage_claims:volume["kind"]="postgres"
         else:
             declared=volume_requirements.get(claim)
@@ -88,6 +99,7 @@ def load_plan(inventory,path,node_name):
                     require(actual==policy.get("sha256"),"restore artifact hash differs for "+claim)
                     validate_archive(archive)
                 volume.update(kind=kind,archive=str(archive),sha256=policy.get("sha256"))
+                if policy.get('receipt'):volume['checkpoint']=validate_checkpoint(inventory,volume,policy,base)
             else:
                 volume["kind"]="unresolved";blockers.append("restore/rebuild policy required for "+claim)
         volumes.append(volume)

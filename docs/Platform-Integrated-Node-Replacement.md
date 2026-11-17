@@ -34,6 +34,11 @@ uncompressed tar (64 MiB and 10,000 entries), limited to regular files/directori
 Absolute/traversal paths, links and duplicate entries are rejected before mutation.
 The owning service must provide a consistent capture and validate its logical
 contents. A live, changing SQLite file must not simply be copied as a backup.
+The [source checkpoint command](Platform-Source-Checkpoints.md) can capture owned
+source volumes with their writers stopped, producing bounded archives and receipts.
+These protect only the recorded restore point; later source writes need additional
+protection and reconciliation. Supply `receipt` in the restore policy to validate
+the platform capture's deployment, volume and owning-service identity.
 If no safe backup or replica exists, recovery remains blocked: the platform does
 not recreate lost source state as if it were preserved data.
 
