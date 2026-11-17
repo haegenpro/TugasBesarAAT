@@ -43,8 +43,11 @@ def run(cluster, output, probes=None, durations=(60, 30, 180), sleep=time.sleep)
         revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, timeout=5)
         start["revision"] = revision.stdout.strip()
         start["worktree_dirty"] = bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, timeout=5).stdout.strip())
-        for phase, seconds in zip(("baseline", "disconnect_windows_ethernet", "reconnect_and_observe"), durations):
-            message = {"baseline": "Leave both Ethernet links connected.", "disconnect_windows_ethernet": "Remove the Windows host Ethernet cable now; do not repair/restart applications.",
+        fault_host=next(h["id"]for h in cluster.cfg["hosts"]if h["id"]!=cluster.cfg["controller_host"])
+        fault_phase="disconnect_"+fault_host+"_ethernet"
+        start["physical_fault_host"]=fault_host
+        for phase, seconds in zip(("baseline", fault_phase, "reconnect_and_observe"), durations):
+            message = {"baseline": "Leave all Ethernet links connected.", fault_phase: "Remove Ethernet from host "+fault_host+" now; do not repair/restart applications.",
                        "reconnect_and_observe": "Reconnect that same cable now; observe automatic recovery without application intervention."}[phase]
             print(message, flush=True)
             start["events"].append({"phase": phase, "controller_monotonic_ns": time.monotonic_ns(), "controller_wall_ns": time.time_ns()})

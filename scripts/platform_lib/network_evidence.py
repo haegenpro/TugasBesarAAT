@@ -293,6 +293,7 @@ def reconcile(cfg, run_id, logs, application_evidence=None, demo_attestation=Non
             "physical_link_down_observed": bool(down), "link_recovered": recovered,
             "entity_observations": observations, "progress_samples": metrics}
     result["assertions"]["two_machine_identities"] = len(machines) == 2
+    result["assertions"]["all_machine_identities"] = len(machines) == len(cfg["hosts"])
     result["assertions"]["collectors_completed"] = all(h["complete"] for h in result["hosts"].values())
     result["assertions"]["real_link_loss_and_restore"] = any(h["link_recovered"] for h in result["hosts"].values())
     result["assertions"]["both_hosts_measured_peer_traffic"] = all(h["rtt_ms"]["p50"] is not None and h["peer_unavailable"] > 0 for h in result["hosts"].values())
@@ -328,7 +329,7 @@ def reconcile(cfg, run_id, logs, application_evidence=None, demo_attestation=Non
         require(demo_attestation.get("run_id") == run_id and demo_attestation.get("physical_hosts") == sorted(result["hosts"]), "demo attestation scope mismatch")
         require(demo_attestation.get("both_displays_artifact") and demo_attestation.get("cable_disconnect_artifact") and demo_attestation.get("reviewer"), "physical demo references/reviewer required")
         result["demo_attestation"] = demo_attestation
-    required = ["two_machine_identities", "collectors_completed", "real_link_loss_and_restore", "both_hosts_measured_peer_traffic"]
+    required = ["all_machine_identities", "collectors_completed", "real_link_loss_and_restore", "both_hosts_measured_peer_traffic"]
     if not all(result["assertions"][k] for k in required):
         result["status"] = "failed"
     elif application_evidence is not None and result["application_reconciliation"]["status"] == "blocked":

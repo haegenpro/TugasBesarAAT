@@ -1,4 +1,4 @@
-"""Version-two inventory: existing Ethernet LAN, two explicit provider hosts."""
+"""Version-two inventory: bridged LAN, two legacy hosts or four independent hosts."""
 import copy
 import ipaddress
 from pathlib import PurePosixPath, PureWindowsPath
@@ -13,9 +13,10 @@ def validate(cfg):
     require(cfg.get("version") == 2, "multi-host inventory version must be 2")
     hosts = cfg.get("hosts", [])
     require(not any(c in cfg["state_dir"] for c in '\r\n\x00"'), "invalid controller path")
-    require(len(hosts) == 2 and {h.get("provider") for h in hosts} == {"libvirt", "virtualbox"},
-            "one Linux/libvirt and one Windows/VirtualBox host required")
-    require(len({h["id"] for h in hosts}) == 2 and len({h["address"] for h in hosts}) == 2, "duplicate host identity/address")
+    require(len(hosts) in (2,4),"declare two legacy hosts or four physical hosts")
+    require(all(h.get("provider")in("libvirt","virtualbox")for h in hosts),"host provider must be libvirt or virtualbox")
+    require(len({h["id"] for h in hosts}) == len(hosts) and len({h["address"] for h in hosts}) == len(hosts), "duplicate host identity/address")
+    require(sum(h["id"]==cfg["controller_host"]for h in hosts)==1,"one declared Linux controller required")
     net = cfg["network"]
     require(net.get("mode") == "bridged", "v2 supports existing bridged Ethernet LAN only")
     lan = ipaddress.IPv4Network(net["cidr"])
@@ -33,10 +34,11 @@ def validate(cfg):
                 "host state must be an absolute cluster-specific directory")
         require(h.get("reserve_mib", 0) >= 4096 and h.get("startup_headroom_mib", 0) >= 1024, "preserve host reserve/startup headroom")
         if h["provider"] == "libvirt":
-            require(h["id"] == cfg["controller_host"] and h.get("transport") == "local", "Linux controller must own the local libvirt provider")
             require(re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,14}", h["bridge"]) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,14}", h["ethernet"]), "invalid Linux interface")
+        if h["id"]==cfg["controller_host"]:
+            require(h["provider"]=="libvirt" and h.get("transport")=="local","controller requires local Linux/libvirt")
         else:
-            require(h.get("transport") == "ssh", "Windows requires SSH helper transport")
+            require(h.get("transport") == "ssh", "remote hosts require SSH helper transport")
             require(re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,40}", h["ssh_user"]), "invalid management SSH user")
             for k in ("ssh_key_file", "known_hosts"):
                 p = PurePosixPath(h[k])
@@ -44,9 +46,13 @@ def validate(cfg):
     controller = next(h for h in hosts if h["id"] == cfg["controller_host"])
     api = urlsplit(cfg["api_endpoint"])
     require(api.hostname == controller["address"] and api.port == 7443, "API must bind the Linux controller LAN address on 7443")
-    linux = next(h for h in hosts if h["provider"] == "libvirt")
-    windows = next(h for h in hosts if h["provider"] == "virtualbox")
-    require([n["physical_host"] for n in cfg["nodes"]] == [linux["id"], linux["id"], windows["id"], windows["id"]], "place A/B on Linux and C/D on Windows")
+    if len(hosts)==2:
+        require({h["provider"]for h in hosts}=={"libvirt","virtualbox"},"legacy layout requires Linux and Windows")
+        linux=next(h for h in hosts if h["provider"]=="libvirt")
+        windows=next(h for h in hosts if h["provider"]=="virtualbox")
+        require([n["physical_host"]for n in cfg["nodes"]]==[linux["id"],linux["id"],windows["id"],windows["id"]],"legacy layout places A/B on Linux and C/D on Windows")
+    else:
+        require(len(cfg["nodes"])==4 and {n["physical_host"]for n in cfg["nodes"]}=={h["id"]for h in hosts},"four-host layout requires exactly one VM per physical machine")
     require(not ({h["address"] for h in hosts} & {n["address"] for n in cfg["nodes"]}), "host/guest addresses overlap")
     # Reuse v1 common/pin validation without weakening its NAT-only rules.
     common = copy.deepcopy(cfg)

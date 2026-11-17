@@ -1,4 +1,4 @@
-"""Linux controller for a fresh two-host formation; legacy guest bootstrap reused."""
+"""Linux controller for independently owned bridged provider hosts."""
 import json
 import os
 from pathlib import Path
@@ -74,10 +74,10 @@ class MultiHostCluster(LocalCluster):
                 reports[name] = client.call("doctor")
             except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 errors[name] = type(exc).__name__ + ": host doctor unavailable; verify helper, SSH trust, Ethernet and state ownership"
-        distinct = len({r["machine_sha256"] for r in reports.values()}) == 2
+        distinct = len({r["machine_sha256"] for r in reports.values()}) == len(self.cfg["hosts"])
         docker_ok = not missing and self.docker("version", "--format", "{{.Server.Version}}", check=False).returncode == 0
         return {"version": 2, "hosts": reports, "errors": errors, "missing": missing, "distinct_machine_identities": distinct,
-                "ready": len(reports) == 2 and not errors and not missing and docker_ok and distinct and all(r["ready"] for r in reports.values()),
+                "ready": len(reports) == len(self.cfg["hosts"]) and not errors and not missing and docker_ok and distinct and all(r["ready"] for r in reports.values()),
                 "full_stack_acceptance": "blocked: bootstrap sizing is not a full workload/recovery capacity proof"}
 
     def preflight_resources(self):
@@ -158,4 +158,4 @@ class MultiHostCluster(LocalCluster):
             require(observed["metadata"]["labels"].get("platform.aat/physical-host") == n["physical_host"], "physical-host label differs")
             require(any(v["type"] == "InternalIP" and v["address"] == n["address"] for v in observed["status"]["addresses"]), "node advertised the wrong LAN address")
         self.preflight_resources()
-        (self.state / "evidence" / "physical-placement.json").write_text(json.dumps({"hosts": [{"id": h["id"], "provider": h["provider"], "nodes": [n["name"] for n in self.cfg["nodes"] if n["physical_host"] == h["id"]]} for h in self.cfg["hosts"]], "physical_demo_verification": "requires both host displays; machine IDs alone are not physical proof"}, indent=2))
+        (self.state / "evidence" / "physical-placement.json").write_text(json.dumps({"hosts": [{"id": h["id"], "provider": h["provider"], "nodes": [n["name"] for n in self.cfg["nodes"] if n["physical_host"] == h["id"]]} for h in self.cfg["hosts"]], "physical_demo_verification": "requires all physical host displays; machine IDs alone are not physical proof"}, indent=2))

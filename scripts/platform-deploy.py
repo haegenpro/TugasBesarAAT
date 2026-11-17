@@ -35,7 +35,7 @@ def prepare_volumes(cluster,requirements):
 def apply(cluster,report,snapshots):
     require(report["ready_for_apply"],"resolve all bundle blockers before applying")
     if cluster.cfg.get("version")==2:
-        require(cluster.doctor()["ready"],"both physical hosts must pass live prerequisites and capacity checks")
+        require(cluster.doctor()["ready"],"all physical hosts must pass live prerequisites and capacity checks")
     ns=cluster.cfg["namespace"]
     nodes=json.loads(cluster.kubectl("get","nodes","-o","json").stdout)["items"]
     selected=[n for n in nodes if n["metadata"]["name"]in {v["name"]for v in cluster.cfg["nodes"]}]
