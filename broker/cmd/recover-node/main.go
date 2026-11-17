@@ -24,11 +24,19 @@ type peer struct {
 	Lag     uint64 `json:"lag"`
 }
 type streamState struct {
+	Name      string          `json:"name"`
+	Replicas  int             `json:"replicas"`
+	Leader    string          `json:"leader"`
+	Peers     []peer          `json:"peers"`
+	Last      uint64          `json:"last_sequence"`
+	Consumers []consumerState `json:"consumers"`
+}
+
+type consumerState struct {
 	Name     string `json:"name"`
-	Replicas int    `json:"replicas"`
+	AckFloor uint64 `json:"ack_floor_stream"`
 	Leader   string `json:"leader"`
 	Peers    []peer `json:"peers"`
-	Last     uint64 `json:"last_sequence"`
 }
 
 func validate(state streamState, lost string, expected map[string]bool, rejoined bool) error {
@@ -58,14 +66,45 @@ func validate(state streamState, lost string, expected map[string]bool, rejoined
 	return nil
 }
 
+// Prove that the privileged connection reaches the same cluster as the stream
+// connection, rather than trusting a second URL with matching server names.
+func systemConnection(ctx context.Context, app *nats.Conn, expected map[string]bool) (*nats.Conn, error) {
+	url := os.Getenv("NATS_SYSTEM_URL")
+	if url == "" {
+		return nil, fmt.Errorf("NATS_SYSTEM_URL Secret required for recovery")
+	}
+	nc, err := nats.Connect(url, nats.Timeout(2*time.Second), nats.NoReconnect())
+	if err != nil {
+		return nil, fmt.Errorf("broker system connection unavailable")
+	}
+	probe, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	response, err := nc.RequestWithContext(probe, "$SYS.REQ.SERVER."+app.ConnectedServerId()+".STATSZ", nil)
+	var status struct {
+		Server struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"server"`
+	}
+	if err != nil || json.Unmarshal(response.Data, &status) != nil || status.Server.ID != app.ConnectedServerId() || !expected[status.Server.Name] {
+		nc.Close()
+		return nil, fmt.Errorf("system credential cannot verify the original application broker cluster")
+	}
+	return nc, nil
+}
+
 func run() error {
 	operation := flag.String("operation", "observe", "observe, remove or verify")
 	server := flag.String("server", "", "original fenced server_name")
 	memberList := flag.String("members", "", "three original server names, comma separated")
 	streamList := flag.String("streams", "", "expected stream names, comma separated")
+	fenced := flag.Bool("fenced", false, "confirm that the parent has independently fenced the original server")
 	flag.Parse()
 	if *operation != "observe" && *operation != "remove" && *operation != "verify" {
 		return fmt.Errorf("invalid recovery operation")
+	}
+	if *operation == "remove" && !*fenced {
+		return fmt.Errorf("peer removal requires explicit --fenced acknowledgement from the parent")
 	}
 	names := strings.Split(*memberList, ",")
 	expected := map[string]bool{}
@@ -121,11 +160,40 @@ func run() error {
 		if err = validate(state, *server, expected, *operation == "verify"); err != nil {
 			return err
 		}
+		consumers := stream.ListConsumers(ctx)
+		for info := range consumers.Info() {
+			if info.Config.Durable == "" {
+				continue
+			}
+			if len(state.Consumers) >= 64 || info.Cluster == nil || info.Config.MemoryStorage {
+				return fmt.Errorf("durable consumer quorum metadata unavailable or unsupported: %s", name)
+			}
+			replicas := info.Config.Replicas
+			if replicas == 0 {
+				replicas = state.Replicas
+			}
+			copyState := streamState{Name: name + "/" + info.Name, Replicas: replicas, Leader: info.Cluster.Leader}
+			for _, p := range info.Cluster.Replicas {
+				copyState.Peers = append(copyState.Peers, peer{Name: p.Name, Current: p.Current, Offline: p.Offline, Lag: p.Lag})
+			}
+			if err = validate(copyState, *server, expected, *operation == "verify"); err != nil {
+				return err
+			}
+			state.Consumers = append(state.Consumers, consumerState{Name: info.Name, AckFloor: info.AckFloor.Stream, Leader: copyState.Leader, Peers: copyState.Peers})
+		}
+		if err = consumers.Err(); err != nil {
+			return fmt.Errorf("durable consumer listing unavailable: %s", name)
+		}
 		states = append(states, state)
 	}
+	system, err := systemConnection(ctx, nc, expected)
+	if err != nil {
+		return err
+	}
+	defer system.Close()
 	if *operation == "remove" {
-		body, _ := json.Marshal(map[string]string{"server": *server})
-		response, err := nc.RequestWithContext(ctx, "$JS.API.SERVER.REMOVE", body)
+		body, _ := json.Marshal(map[string]string{"peer": *server})
+		response, err := system.RequestWithContext(ctx, "$JS.API.SERVER.REMOVE", body)
 		if err != nil {
 			return fmt.Errorf("fenced JetStream peer removal unavailable")
 		}

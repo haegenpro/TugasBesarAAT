@@ -24,7 +24,7 @@ explicit recovery strategy; an unknown live claim or hostPath stops execution.
 | Data | Recovery path |
 | --- | --- |
 | Canonical, ingestion and all four service PostgreSQL formations | Verify two surviving original copies, replace lost DCS member as learner, rebuild original empty member, check system identity/replayed WAL/primary timeline |
-| Broker | Verify two current original copies for every declared stream, peer-remove the fenced server, rejoin with empty storage, verify all three stream peers current and no sequence regression |
+| Broker | Verify two current original copies for every declared stream, retain original membership, rejoin the same server name with empty storage, verify all three stream peers current and no sequence regression |
 | Single-copy source/sensor state | Require an owner-produced consistent backup tar, its exact claim identity and SHA-256; refuse missing, oversized or unsafe restores |
 | Monitoring local data | Explicit `observability` policy recreates it and records an evidence gap; it does not pretend retained logs/traces survived |
 
@@ -64,8 +64,10 @@ through a surviving server with a CA-pinned token, prepares original local paths
 restores required artifacts, and resumes only the held controllers. It promotes
 caught-up DCS learners, verifies fresh PostgreSQL receiver identity/timeline and
 recorded WAL prefixes, checks broker peers, and waits for workloads to recover.
-Broker recovery requires the rebuilt broker image containing `recover-node` and
-its private `NATS_URL`; missing tools/credentials stop before disk replacement.
+Broker recovery requires the rebuilt broker image containing `recover-node`,
+its private APP `NATS_URL` and separate `NATS_SYSTEM_URL`. Missing tools or
+credentials stop before controller holds or disk replacement. See the
+[broker recovery account wiring](Platform-Broker-Recovery.md).
 
 Failures keep journals, quarantine and uncertain workloads for explicit repair;
 the top-level controller is not yet a fully resumable phase engine. It never
@@ -78,8 +80,10 @@ Focused offline checks passed for formation/volume coverage, refusal of unbacked
 source data, retained disk/idempotent provider operations, and unsafe archive
 refusal. The broker helper's original-quorum/current-replica checks passed in its
 Go unit test. No real VM was replaced and no disk-loss acceptance test was run.
-The broker's empty-disk catch-up path and both hypervisors require target-host
-execution. After recovery, independently reconcile accepted operation identities,
+The broker's empty-disk catch-up path now passed a focused three-process check
+with original membership retained, all 48 accepted payloads and durable consumer
+progress preserved. Both hypervisors and the combined recovery controller still
+require target-host execution. After recovery, independently reconcile accepted operation identities,
 Audit API checksum, replica placement and continued write/read availability.
 Healthy pods and nonregressing stream sequence numbers alone are not zero-loss
 evidence.

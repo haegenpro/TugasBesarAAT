@@ -53,6 +53,11 @@ needs that capacity because all streams use three copies. These are declared
 reservations, not measured use; physical disk growth and retained WAL/database
 data need separate accounting. Existing PVCs/data are never implicitly resized.
 Keep raw/critical retention and acknowledgement rules unchanged.
+Prepare the APP/system account Secrets using the
+[broker recovery wiring](../../docs/Platform-Broker-Recovery.md); applications
+and the separate broker-init Secret receive only the APP URL. Same-name disk
+replacement retains broker membership and rebuilds original stream/consumer
+copies instead of permanently removing the returning server.
 
 Focused offline regression checks are authored in `bundle_integration_test.py`.
 The full four-node, migration, failover and sustained-load validation remains a

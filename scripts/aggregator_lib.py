@@ -49,8 +49,8 @@ def render(inventory, config, image, replicas=3):
         return {"apiVersion": api, "kind": kind,
                 "metadata": {"name": resource_name, "namespace": namespace, "labels": labels.copy()}, **fields}
 
-    env = [{"name": key, "valueFrom": {"configMapKeyRef": {"name": name + "-config", "key": key}}} for key in sorted(public)]
-    for key in ("AGGREGATOR_ADMIN_TOKEN", "BMKG_API_KEY", "PVMBG_TOKEN", "CANONICAL_SERVICE_TOKEN", "PROCESSOR_SERVICE_TOKEN"):
+    env = [{"name": key, "valueFrom": {"configMapKeyRef": {"name": name + "-config", "key": key}}} for key in sorted(public)if key!="NATS_URL"]
+    for key in ("AGGREGATOR_ADMIN_TOKEN", "BMKG_API_KEY", "PVMBG_TOKEN", "CANONICAL_SERVICE_TOKEN", "PROCESSOR_SERVICE_TOKEN", "NATS_URL"):
         env.append({"name": key, "valueFrom": {"secretKeyRef": {"name": config["runtime_secret"], "key": key}}})
     keys = ["DATABASE_URL"] + [f"STORAGE_GROUP_{i}_URL" for i in range(5 if config["storage_mode"] == "citus" else 1)]
     for key in keys:

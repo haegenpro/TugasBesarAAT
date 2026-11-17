@@ -154,6 +154,11 @@ port: 4222
 http_port: 8222
 cluster {{name: "{cluster}-broker", port: 6222, routes: [{routes}]}}
 jetstream {{store_dir: "/data", max_memory_store: 64MB, max_file_store: {capacity['max_file_store_bytes']}, sync_interval: always}}
+accounts {{
+  APP {{jetstream: enabled, users: [{{user: $NATS_APP_USER, password: $NATS_APP_PASSWORD}}]}}
+  SYS {{users: [{{user: $NATS_SYSTEM_USER, password: $NATS_SYSTEM_PASSWORD}}]}}
+}}
+system_account: SYS
 '''
         add("v1","ConfigMap","broker-config",data={"nats.conf":config})
     return {"apiVersion":"v1","kind":"List","items":objects},{"local_volumes":volumes,"memory_requests_mib":requests,

@@ -47,7 +47,15 @@
         "path": "/healthz",
         "port": 8222
       },
-      "dependencies": []
+      "dependencies": [],
+      "required_secret_keys": [
+        "NATS_APP_USER",
+        "NATS_APP_PASSWORD",
+        "NATS_SYSTEM_USER",
+        "NATS_SYSTEM_PASSWORD",
+        "NATS_URL",
+        "NATS_SYSTEM_URL"
+      ]
     },
     {
       "name": "broker-init",
@@ -55,12 +63,11 @@
       "kind": "Job",
       "replicas": 1,
       "image_key": "broker",
-      "secret": "broker-runtime",
+      "secret": "broker-init-runtime",
       "ports": {},
       "environment": {
         "NATS_PORT": "4222",
         "NATS_MONITOR_PORT": "8222",
-        "NATS_URL": "nats://broker:4222",
         "NATS_REPLICAS": "3",
         "NATS_STREAM": "HAZARDS",
         "NATS_SUBJECT": "hazard.events",
@@ -78,6 +85,9 @@
       ],
       "dependencies": [
         "broker"
+      ],
+      "required_secret_keys": [
+        "NATS_URL"
       ]
     },
     {
@@ -270,7 +280,6 @@
       },
       "environment": {
         "DASHBOARD_PORT": "8091",
-        "NATS_URL": "nats://broker:4222",
         "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
       },
@@ -289,7 +298,8 @@
       ],
       "metrics_port": 8091,
       "required_secret_keys": [
-        "DATABASE_URL"
+        "DATABASE_URL",
+        "NATS_URL"
       ]
     },
     {
@@ -304,7 +314,6 @@
       },
       "environment": {
         "NOTIFIER_PORT": "8092",
-        "NATS_URL": "nats://broker:4222",
         "SCHEMA_REGISTRY_URL": "http://schema-registry:8080/apis/ccompat/v7",
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",
         "WARNING_STREAM": "BNPB_CRITICAL",
@@ -329,7 +338,8 @@
       "metrics_port": 8092,
       "required_secret_keys": [
         "DATABASE_URL",
-        "COASTAL_SLO_TOKEN"
+        "COASTAL_SLO_TOKEN",
+        "NATS_URL"
       ]
     },
     {

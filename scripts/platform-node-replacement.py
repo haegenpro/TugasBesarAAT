@@ -55,6 +55,19 @@ def execute(inventory,prepared):
                 helper.record=lambda phase,_name=formation["plan"]["formation"],**fields:record(_name+": "+phase,**fields)
                 anchors=helper.validate_survivors();helpers.append((helper,anchors,None))
             record("all PostgreSQL formations retain two original flushed copies")
+            def broker_call(volume,operation):
+                workload=volume["controller"]["name"];lost=workload+"-0"
+                original=["broker-"+letter+"-0"for letter in "abc"]
+                require(lost in original,"unexpected broker member identity")
+                survivor=next(name for name in original if name!=lost)
+                require(operation in('observe','verify'),'same-name replacement must retain original broker membership')
+                response=c.kubectl("exec","-n",ns,survivor,"-c","broker","--","/usr/local/bin/recover-node","--operation",operation,"--server",lost,"--members",",".join(original),"--streams",",".join(volume["streams"]),timeout=15)
+                return json.loads(response.stdout)
+            for volume in prepared["volumes"]:
+                if volume["kind"]=="jetstream":
+                    baseline=wait(lambda:broker_call(volume,"observe"),"surviving broker quorum or system credential unavailable",60)
+                    brokers.append((volume,baseline))
+            record("broker quorum and original-cluster system credential verified")
             # Stop only the already-lost member controllers. This prevents a
             # freshly booted source from writing into a directory being restored.
             for volume in prepared["volumes"]:
@@ -64,18 +77,8 @@ def execute(inventory,prepared):
                 held[key]=current["spec"].get("replicas",1)
                 c.kubectl("scale",key,"-n",ns,"--replicas=0")
             record("lost-member workload controllers held for safe restoration",original_replicas=held)
-            def broker_call(volume,operation):
-                workload=volume["controller"]["name"];lost=workload+"-0"
-                original=["broker-"+letter+"-0"for letter in "abc"]
-                require(lost in original,"unexpected broker member identity")
-                survivor=next(name for name in original if name!=lost)
-                response=c.kubectl("exec","-n",ns,survivor,"-c","broker","--","/usr/local/bin/recover-node","--operation",operation,"--server",lost,"--members",",".join(original),"--streams",",".join(volume["streams"]),timeout=15)
-                return json.loads(response.stdout)
-            for volume in prepared["volumes"]:
-                if volume["kind"]=="jetstream":
-                    baseline=wait(lambda:broker_call(volume,"observe"),"surviving broker quorum unavailable",60)
-                    broker_call(volume,"remove");brokers.append((volume,baseline))
-                    record("fenced broker removed from original surviving quorum",member=volume["controller"]["name"]+"-0",baseline=baseline)
+            for volume,baseline in brokers:
+                record("original broker membership retained for same-name empty-storage rejoin",member=volume["controller"]["name"]+"-0",baseline=baseline)
             for index,(helper,anchors,_)in enumerate(helpers):helpers[index]=(helper,anchors,helper.replace_dcs_member())
             c.kubectl("delete","node",target["name"],"--wait=true","--timeout=60s",timeout=70)
             for pod in pods:
@@ -119,6 +122,9 @@ def execute(inventory,prepared):
                 def broker_ready(v=volume,b=baseline):
                     current=broker_call(v,"verify");before={s["name"]:s["last_sequence"]for s in b["streams"]}
                     require(all(s["last_sequence"]>=before[s["name"]]for s in current["streams"]),"broker stream sequence regressed")
+                    durable_before={(s['name'],consumer['name']):consumer['ack_floor_stream']for s in b['streams']for consumer in s.get('consumers',[])}
+                    durable_after={(s['name'],consumer['name']):consumer['ack_floor_stream']for s in current['streams']for consumer in s.get('consumers',[])}
+                    require(all(key in durable_after and durable_after[key]>=floor for key,floor in durable_before.items()),'durable consumer disappeared or its acknowledgement prefix regressed')
                     return current
                 record("broker replacement current on original stream groups",state=wait(broker_ready,"JetStream replica catch-up deadline"))
             for key in held:c.kubectl("rollout","status",key,"-n",ns,"--timeout=300s",timeout=330)
