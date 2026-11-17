@@ -27,7 +27,9 @@ Start the next integration phase with the
 each subsection, owner inputs, capacity limits and the prepared deployment
 workflow. The target is now [four physical hosts with one VM each](docs/Platform-Four-Physical-Hosts.md).
 The [integrated release](deployment/platform/RELEASE.md) includes owned service
-databases and [empty-disk recovery](docs/Platform-Integrated-Node-Replacement.md).
+databases and [empty-disk recovery](docs/Platform-Integrated-Node-Replacement.md),
+including [consistent source checkpoints](docs/Platform-Source-Checkpoints.md)
+and a [verified broker disk-rebuild protocol](docs/Platform-Broker-Recovery.md).
 The current full profile requests about 25.25 GiB RAM across the four VMs before
 overhead; measured hardware capacity and physical acceptance remain pending.
 

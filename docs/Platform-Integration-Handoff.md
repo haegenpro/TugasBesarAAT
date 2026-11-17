@@ -15,7 +15,9 @@ subsection without pushing or including either assignment specification file.
 | Four physical hosts | [Four-host setup](Platform-Four-Physical-Hosts.md): one VM per physical host, Linux/libvirt or Windows/VirtualBox | Actual OS mapping, measured resources, identities, LAN addresses and SSH prerequisites |
 | Wildfire batches | [Multi-entity integration](Platform-Multi-Entity-Integration.md): live Citus capability checks retain fencing, transaction recovery and WAL confirmation | Replicated replay and failure validation |
 | Service databases | [Owned databases](Platform-Owned-Service-Databases.md): four HA formations, restricted roles and explicit schema/Registry initialization | Live bootstrap, identity capture and failover checks |
-| Empty-disk recovery | [Integrated replacement](Platform-Integrated-Node-Replacement.md): all declared PG formations, broker and explicit backup restores | Consistent source backups, provider disk-loss runs, interrupted-phase validation and accepted-data reconciliation |
+| Empty-disk recovery | [Integrated replacement](Platform-Integrated-Node-Replacement.md): all declared PG formations, retained broker membership, UID-guarded controller holds and atomic interruption reports | Actual source checkpoints, provider disk-loss runs, interrupted-phase validation and accepted-data reconciliation |
+| Source checkpoints | [Stopped-writer capture](Platform-Source-Checkpoints.md): owned volumes, SQLite WAL snapshots, integrity checks and deployment-bound receipts | Choose/capture actual restore points; later source writes need protection and reconciliation |
+| Broker recovery | [Account and recovery wiring](Platform-Broker-Recovery.md): APP/system credentials separated, same-name rebuild, stream/durable quorums and acknowledgement anchors | Actual private Secrets and physical failure validation |
 | Monitoring | [Observability](Platform-Observability-Handoff.md): owner metrics, every broker, all six database formations and warning coverage/error-budget signals | Runtime startup, reference/receipt reconciliation and clock accuracy |
 | Field priority | [Overload handoff](Platform-Overload-Handoff.md): authenticated HTTP check confirms Field progress under Media saturation | Shared Auth/database/network saturation and full-system measurements |
 
@@ -59,6 +61,9 @@ Align host-helper revisions on physical hosts when provider code changes.
 Replacement needs all six plan/config pairs and explicit recovery policies for
 every persistent workload. Unknown or unbacked source state blocks replacement.
 The top-level replacement phase engine is not yet fully resumable after errors.
+Use its offline `status` action to inspect the recorded original controller UIDs,
+counts, WAL anchors and mutation checkpoints before explicit repair. Holds and
+releases reject recreated controllers or concurrent replica-count changes.
 
 ## Capacity and verification
 
@@ -71,20 +76,24 @@ images, VM roots, quarantine and backups also need space.
 
 Consolidating the four service databases onto one replicated PostgreSQL group
 has been proposed, with a rough 18.9 GiB total request estimate. It is **not
-implemented or measured**. No CockroachDB migration has been made either.
+implemented or measured**. No CockroachDB migration has been made either. The
+current topology is retained; the user deferred that architecture assessment.
 
 | Focused check | Result |
 | --- | --- |
-| Offline integration checks | 10 passed: bundle/broker budgets, database release assembly, metrics and recovery coverage |
+| Offline integration checks | 24 passed: release assembly, broker credential boundaries, source WAL capture/restore, recovery identity guards, journal failure injection and existing coverage |
+| Recovery plan/analyzer checks | 16 passed |
 | Existing renderer checks | 16 passed |
 | Inventory/provider regressions | 33 passed, including the temporary loopback HTTP test |
 | Isolated Citus/payload checks | 12 passed, no skips: batch atomicity/retry/rollback, lost commit reply and observed payload |
 | Isolated service database/Registry checks | All four schemas initialize/repeat; unsafe privileges, legacy schemas and checksum mismatch refused; real Registry bootstrap/runtime ready |
-| Focused Go checks | Broker recovery quorum decisions, notifier metrics and authenticated Field priority passed |
+| Three real broker processes | 2 passed, no skips: empty-storage rebuild retains 48 accepted payloads and durable-consumer progress; privileged decommission is a separate operation |
+| Other focused Go checks | Notifier metrics and authenticated Field priority passed |
 
 Raw evidence remains ignored, including successful Citus run
 `evidence/platform-integration/2e7581e9726c` and database run
-`evidence/platform-databases/075aeb9759a5`. Temporary resources were cleaned up;
+`evidence/platform-databases/075aeb9759a5`, plus broker recovery run
+`evidence/platform-broker-recovery/a7b4c298ac21`. Temporary resources were cleaned up;
 earlier failed attempts are preserved. These are local/protocol checks, not
 replicated failover, physical capacity or zero-loss acceptance results.
 
