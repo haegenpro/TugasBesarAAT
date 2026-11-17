@@ -20,9 +20,9 @@ from storage_lib import durability_config,plan,require,write_json
 ROOT=Path(__file__).resolve().parent.parent
 
 
-def recovery_plan(inventory,storage,node_name):
-    require(inventory.get("version") == 1, "v2 disk replacement is blocked before mutation; provider-specific empty-member recovery is not implemented")
-    require(storage==plan(inventory,storage["mode"],storage["image"]),"storage plan differs from inventory")
+def recovery_plan(inventory,storage,node_name,provider_aware=False):
+    require(inventory.get("version") == 1 or provider_aware, "use the integrated recovery workflow for provider-aware replacement")
+    require(storage==plan(inventory,storage["mode"],storage["image"],storage.get("formation_suffix","storage")),"storage plan differs from inventory")
     target=next((n for n in inventory["nodes"] if n["name"]==node_name),None)
     require(target,"replacement target is not an owned node")
     groups=[{"id":g["id"],"replacement":next(m for m in g["members"] if m["node"]==node_name),
@@ -49,14 +49,14 @@ def validate_config(storage,config):
 
 
 class Recovery:
-    def __init__(self,inventory,storage,config,target):
-        require(inventory.get("version") == 1, "v2 disk replacement is not implemented")
+    def __init__(self,inventory,storage,config,target,provider_aware=False):
+        require(inventory.get("version") == 1 or provider_aware, "use integrated recovery for provider-aware replacement")
         # Offline plans/checks also run on Windows; libvirt's Linux-only locking
         # dependency is needed only when constructing the mutating executor.
         from platform_lib.cluster import Cluster
         validate_config(storage,config)
         self.cluster=Cluster(inventory);self.inventory=inventory;self.storage=storage;self.config=config
-        self.plan=recovery_plan(inventory,storage,target);self.target=self.plan["node"]
+        self.plan=recovery_plan(inventory,storage,target,provider_aware=provider_aware);self.target=self.plan["node"]
         self.run_id=uuid.uuid4().hex
         self.evidence=self.cluster.state/"evidence"/("replacement-"+self.run_id)
         self.report={"run_id":self.run_id,"node":target,"passed":False,"completed":[]}

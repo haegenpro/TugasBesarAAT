@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "bundle": "bundle.json",
+  "formations": [
+    {"plan":"canonical-plan.json","config":"canonical-durability.json"},
+    {"plan":"ingestion-plan.json","config":"ingestion-durability.json"}
+  ],
+  "volume_requirements": ["service-requirements.json","monitoring-requirements.json"],
+  "volume_policy": {
+    "aat-fourhost-broker-a": {"kind":"jetstream","streams":["HAZARDS","REPORT_LIFECYCLE","HAZARDS_DLQ","BNPB_RAW_BMKG","BNPB_RAW_SATELLITE","BNPB_RAW_REPORTS","BNPB_RAW_COASTAL","BNPB_CRITICAL"]},
+    "aat-fourhost-broker-b": {"kind":"jetstream","streams":["HAZARDS","REPORT_LIFECYCLE","HAZARDS_DLQ","BNPB_RAW_BMKG","BNPB_RAW_SATELLITE","BNPB_RAW_REPORTS","BNPB_RAW_COASTAL","BNPB_CRITICAL"]},
+    "aat-fourhost-broker-c": {"kind":"jetstream","streams":["HAZARDS","REPORT_LIFECYCLE","HAZARDS_DLQ","BNPB_RAW_BMKG","BNPB_RAW_SATELLITE","BNPB_RAW_REPORTS","BNPB_RAW_COASTAL","BNPB_CRITICAL"]},
+    "aat-fourhost-prometheus-a":{"kind":"observability"},
+    "aat-fourhost-loki-a":{"kind":"observability"},
+    "aat-fourhost-tempo-a":{"kind":"observability"},
+    "aat-fourhost-grafana-a":{"kind":"observability"}
+  }
+}

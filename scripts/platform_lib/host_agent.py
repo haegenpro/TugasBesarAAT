@@ -24,7 +24,7 @@ from .multihost_inventory import capacity, host_nodes
 
 MAX_REQUEST = 128 * 1024
 MAX_RESPONSE = 2 * 1024 * 1024
-OPERATIONS = {"doctor", "status", "init", "upload", "upload-status", "seal-upload", "create", "start", "stop", "pause", "resume", "collector-start", "collector-fetch"}
+OPERATIONS = {"doctor", "status", "init", "upload", "upload-status", "seal-upload", "create", "start", "stop", "pause", "resume", "replace-empty", "collector-start", "collector-fetch"}
 
 
 def execute(args, *, timeout=60, check=True, input=None):
@@ -474,6 +474,64 @@ class HostAgent:
                 self._vbox("controlvm", name, {"stop": "acpipowerbutton", "pause": "pause", "resume": "resume"}[action])
         return self.status(name)
 
+    def replace_empty(self,name,run_id):
+        """Retain old disks and recreate only this fenced owned VM's storage.
+
+        Application/DCS quorum and fencing are checked by the controller first.
+        This helper independently refuses a running VM, foreign paths, a second
+        concurrent replacement or a changed run identity. It never starts a VM.
+        """
+        self.check_owner();self._node(name)
+        require(isinstance(run_id,str)and re.fullmatch(r"[0-9a-f]{32}",run_id),"replacement run identity required")
+        lock=self.path("intents/"+name+".replacement.lock")
+        try:lock.mkdir()
+        except FileExistsError as exc:raise ValueError("another host replacement operation is active; inspect retained lock before retry")from exc
+        try:
+            journal_path="intents/"+name+".replacement.json"
+            expected={**self.owner,"node":name,"uuid":resource_uuid(self.cfg,name),"run_id":run_id}
+            path=self.path(journal_path)
+            if path.exists():
+                record=json.loads(path.read_text())
+                if record["identity"]!=expected:
+                    require(record["phase"]=="complete" and self.status(name)["state"]=="shut off","resume the original incomplete replacement run")
+                    prior=self.path(record["quarantine"])/"replacement.complete.json"
+                    require(not prior.exists(),"previous replacement journal already archived")
+                    path.rename(prior)
+                    record={"identity":expected,"phase":"prepared","retained":[],"quarantine":"quarantine/"+run_id+"/"+name}
+                    self._json(journal_path,record)
+                if record["phase"]=="complete":return {"state":self.status(name),"quarantine":record["quarantine"],"run_id":run_id}
+            else:
+                require(self.status(name)["state"]=="shut off","replacement VM must be fenced shut off")
+                record={"identity":expected,"phase":"prepared","retained":[],"quarantine":"quarantine/"+run_id+"/"+name}
+                self._json(journal_path,record)
+            require(self.status(name,partial=True)["state"]=="shut off","fence lost during replacement")
+            quarantine=self.path(record["quarantine"]);quarantine.mkdir(parents=True,exist_ok=True)
+            completed=self.path("intents/"+name+".complete.json")
+            if completed.exists():
+                require(json.loads(completed.read_text())=={k:v for k,v in expected.items()if k!="run_id"},"completed provisioning ownership differs")
+                completed.rename(quarantine/"provisioning.complete.json")
+            ext="qcow2"if self.host["provider"]=="libvirt"else"vdi"
+            for port,kind in enumerate(("root","data")):
+                if kind in record["retained"]:continue
+                disk=self.path(f"disks/{name}-{kind}.{ext}");destination=quarantine/disk.name
+                if self.host["provider"]=="virtualbox"and not destination.exists():
+                    self._vbox("storageattach",name,"--storagectl","SATA","--port",str(port),"--device","0","--type","hdd","--medium","none")
+                    # A lost disk may remain registered as inaccessible. Closing
+                    # its registry entry never uses --delete and is retryable.
+                    medium=self._vbox("showmediuminfo","disk",disk,check=False)
+                    if medium.returncode==0:self._vbox("closemedium","disk",disk)
+                if destination.exists():
+                    require(not disk.exists(),"ambiguous replacement disk state")
+                elif disk.exists():
+                    require(disk.is_file(),"original disk is not a regular owned file")
+                    disk.rename(destination)
+                record["retained"].append(kind);record["phase"]="disks-retained";self._json(journal_path,record)
+            self.create(name)
+            require(self.status(name)["state"]=="shut off","fresh replacement must remain stopped")
+            record["phase"]="complete";self._json(journal_path,record)
+            return {"state":self.status(name),"quarantine":str(quarantine),"run_id":run_id}
+        finally:lock.rmdir()
+
     def dispatch(self, op, args):
         require(op in OPERATIONS, "operation not allowlisted")
         require(platform.system() == ("Linux" if self.host["provider"] == "libvirt" else "Windows"), "helper dispatched to wrong OS")
@@ -491,6 +549,9 @@ class HostAgent:
             return self.seal_upload(args)
         if op == "create":
             return self.create(args["node"])
+        if op == "replace-empty":
+            require(set(args)=={"node","run_id"},"replacement accepts only owned node/run identities")
+            return self.replace_empty(args["node"],args["run_id"])
         if op.startswith("collector-"):
             from .network_evidence import collector_operation
             self.check_owner()
