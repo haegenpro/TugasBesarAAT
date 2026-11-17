@@ -111,8 +111,9 @@ func TestOpenRouterRequestAndErrors(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	o := &OpenRouter{BaseURL: server.URL, APIKey: "key", Model: "primary:free", Fallbacks: []string{"backup:free"}, HTTP: server.Client()}
-	c, err := o.Complete(context.Background(), []byte(`{}`))
+	o := &OpenRouter{BaseURL: server.URL, APIKey: "key", Model: "primary:free", Fallbacks: []string{"backup:free"}, MaxTokens: 16000, ReasoningTokens: 2048, HTTP: server.Client()}
+	prompt := Prompt{Name: "situation_summary", Schema: summarySchema, Messages: []Message{{Role: "user", Content: "{}"}}}
+	c, err := o.Complete(context.Background(), prompt)
 	if err != nil || c.Content != goodSummary || c.Model == "" {
 		t.Fatalf("completion %+v %v", c, err)
 	}
@@ -124,15 +125,15 @@ func TestOpenRouterRequestAndErrors(t *testing.T) {
 	}
 	status.Store(429)
 	var limited *RateLimited
-	if _, err = o.Complete(context.Background(), []byte(`{}`)); !errors.As(err, &limited) || limited.RetryAfter != 2*time.Minute {
+	if _, err = o.Complete(context.Background(), prompt); !errors.As(err, &limited) || limited.RetryAfter != 2*time.Minute {
 		t.Fatalf("rate limit not reported: %v", err)
 	}
 	status.Store(502)
-	if _, err = o.Complete(context.Background(), []byte(`{}`)); err == nil || !strings.Contains(err.Error(), "provider down") {
+	if _, err = o.Complete(context.Background(), prompt); err == nil || !strings.Contains(err.Error(), "provider down") {
 		t.Fatalf("provider error not reported: %v", err)
 	}
 	status.Store(204)
-	if _, err = o.Complete(context.Background(), []byte(`{}`)); err == nil || !strings.Contains(err.Error(), "thinker:free") || !strings.Contains(err.Error(), "length") {
+	if _, err = o.Complete(context.Background(), prompt); err == nil || !strings.Contains(err.Error(), "thinker:free") || !strings.Contains(err.Error(), "length") {
 		t.Fatalf("empty answer not explained: %v", err)
 	}
 }
@@ -159,14 +160,19 @@ func (f *fakeSource) Snapshot(_ context.Context, window time.Duration, n int, no
 }
 
 type fakeLLM struct {
+	mu      sync.Mutex
+	last    Prompt
 	calls   atomic.Int32
 	content string
 	err     error
 	block   chan struct{}
 }
 
-func (f *fakeLLM) Complete(ctx context.Context, _ []byte) (Completion, error) {
+func (f *fakeLLM) Complete(ctx context.Context, p Prompt) (Completion, error) {
 	f.calls.Add(1)
+	f.mu.Lock()
+	f.last = p
+	f.mu.Unlock()
 	if f.block != nil {
 		select {
 		case <-f.block:
@@ -263,7 +269,7 @@ func TestFaultInjectionModes(t *testing.T) {
 func TestServingNeverWaitsForTheLLM(t *testing.T) {
 	llm := &fakeLLM{content: goodSummary, block: make(chan struct{})}
 	s, _ := scheduler(&fakeSource{events: events("NORMAL", "AWAS")}, llm, func(c *config) { c.LLMTimeout = 10 * time.Second })
-	server := httptest.NewServer(s.Handler())
+	server := httptest.NewServer(s.Handler(http.NotFoundHandler()))
 	defer server.Close()
 	s.Tick(context.Background())
 	started := time.Now()

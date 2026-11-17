@@ -46,12 +46,32 @@ var summarySchema = map[string]any{
 	},
 }
 
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type Prompt struct {
+	Name     string
+	Schema   map[string]any
+	Messages []Message
+}
+
+func summaryPrompt(s *Snapshot) Prompt {
+	return Prompt{Name: "situation_summary", Schema: summarySchema, Messages: []Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: string(s.promptJSON())},
+	}}
+}
+
 type OpenRouter struct {
-	BaseURL   string
-	APIKey    string
-	Model     string
-	Fallbacks []string
-	HTTP      *http.Client
+	BaseURL         string
+	APIKey          string
+	Model           string
+	Fallbacks       []string
+	MaxTokens       int
+	ReasoningTokens int
+	HTTP            *http.Client
 }
 
 type Completion struct {
@@ -65,17 +85,14 @@ func (e *RateLimited) Error() string {
 	return "openrouter rate limited; retry after " + e.RetryAfter.String()
 }
 
-func (o *OpenRouter) Complete(ctx context.Context, input []byte) (Completion, error) {
+func (o *OpenRouter) Complete(ctx context.Context, p Prompt) (Completion, error) {
 	body := map[string]any{
-		"model": o.Model,
-		"messages": []map[string]string{
-			{"role": "system", "content": systemPrompt},
-			{"role": "user", "content": string(input)},
-		},
-		"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": "situation_summary", "strict": true, "schema": summarySchema}},
+		"model":           o.Model,
+		"messages":        p.Messages,
+		"response_format": map[string]any{"type": "json_schema", "json_schema": map[string]any{"name": p.Name, "strict": true, "schema": p.Schema}},
 		"temperature":     0.2,
-		"max_tokens":      8000,
-		"reasoning":       map[string]any{"max_tokens": 1024, "exclude": true},
+		"max_tokens":      o.MaxTokens,
+		"reasoning":       map[string]any{"max_tokens": o.ReasoningTokens, "exclude": true},
 	}
 	if len(o.Fallbacks) > 0 {
 		body["models"] = append([]string{o.Model}, o.Fallbacks...)

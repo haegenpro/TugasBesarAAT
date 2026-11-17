@@ -16,10 +16,11 @@ import (
 )
 
 type api struct {
-	cfg       config
-	log       logger
-	client    *http.Client
-	authSlots chan struct{}
+	cfg        config
+	log        logger
+	client     *http.Client
+	chatClient *http.Client
+	authSlots  chan struct{}
 }
 
 type logger interface {

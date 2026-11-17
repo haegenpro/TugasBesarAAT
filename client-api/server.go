@@ -55,6 +55,7 @@ func (a *api) router() *gin.Engine {
 	}
 	if a.cfg.SituationURL != "" {
 		protected.GET("/situation", a.situation)
+		protected.POST("/situation/chat", a.situationChat)
 	}
 	if a.cfg.IngestionURL != "" {
 		protected.POST("/field-reports", a.submitFieldReport)

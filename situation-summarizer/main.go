@@ -21,11 +21,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	source := &Aggregator{BaseURL: cfg.AggregatorURL, HTTP: &http.Client{Timeout: 10 * time.Second}}
-	llm := &OpenRouter{BaseURL: cfg.OpenRouterURL, APIKey: cfg.APIKey, Model: cfg.Model, Fallbacks: cfg.FallbackModels, HTTP: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	llm := &OpenRouter{
+		BaseURL:         cfg.OpenRouterURL,
+		APIKey:          cfg.APIKey,
+		Model:           cfg.Model,
+		Fallbacks:       cfg.FallbackModels,
+		MaxTokens:       cfg.MaxTokens,
+		ReasoningTokens: cfg.ReasoningTokens,
+		HTTP:            &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+	}
 	scheduler := NewScheduler(cfg, source, llm, log)
+	chat := NewChat(cfg, scheduler.Latest, llm, log, scheduler.metrics)
 	done := make(chan struct{})
 	go func() { defer close(done); scheduler.Run(ctx) }()
-	server := &http.Server{Addr: ":" + cfg.Port, Handler: scheduler.Handler(), ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second}
+	server := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           scheduler.Handler(chat),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      cfg.ChatTimeout + 10*time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)

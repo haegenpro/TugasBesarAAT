@@ -10,7 +10,7 @@ import (
 )
 
 type Completer interface {
-	Complete(context.Context, []byte) (Completion, error)
+	Complete(context.Context, Prompt) (Completion, error)
 }
 
 type Source interface {
@@ -132,7 +132,7 @@ func (s *Scheduler) summarize(ctx context.Context, snap *Snapshot) {
 	var completion Completion
 	err := call.Err()
 	if err == nil {
-		completion, err = s.llm.Complete(call, snap.promptJSON())
+		completion, err = s.llm.Complete(call, summaryPrompt(snap))
 	}
 	if err == nil && s.cfg.Fault == "invalid" {
 		completion.Content = `{"headline":"Gempa besar di wilayah fiktif","overview":"Ringkasan uji yang sengaja salah.","highlights":[{"ref":"E999","summary":"Kejadian ini tidak ada di data."}],"source_notes":[]}`

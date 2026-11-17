@@ -117,7 +117,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	a := &api{cfg: cfg, log: log, client: platform.Client(5 * time.Second)}
+	a := &api{cfg: cfg, log: log, client: platform.Client(5 * time.Second), chatClient: platform.Client(situationChatTimeout)}
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           platform.Handler("client-api", a.router()),

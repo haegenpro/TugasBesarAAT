@@ -116,7 +116,13 @@ func (s *Scheduler) View() Response {
 	return r
 }
 
-func (s *Scheduler) Handler() http.Handler {
+func (s *Scheduler) Latest() *Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.latest
+}
+
+func (s *Scheduler) Handler(chat http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "situation-summarizer"})
@@ -134,6 +140,7 @@ func (s *Scheduler) Handler() http.Handler {
 	mux.HandleFunc("GET /summary", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, s.View())
 	})
+	mux.Handle("POST /chat", chat)
 	mux.Handle("GET /metrics", s.metrics)
 	return mux
 }

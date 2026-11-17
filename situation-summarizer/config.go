@@ -24,6 +24,12 @@ type config struct {
 	LLMTimeout      time.Duration
 	MaxCallsPerDay  int
 	MaxHighlights   int
+	MaxTokens       int
+	ReasoningTokens int
+	ChatTimeout     time.Duration
+	ChatCallsPerDay int
+	ChatConcurrency int
+	ChatHistory     int
 	Fault           string
 }
 
@@ -65,18 +71,34 @@ func loadConfig() (config, error) {
 		{"SUMMARY_REFRESH_INTERVAL", 30 * time.Minute, &c.RefreshInterval},
 		{"SUMMARY_URGENT_DELAY", 30 * time.Second, &c.UrgentDelay},
 		{"SUMMARY_MIN_CALL_INTERVAL", 2 * time.Minute, &c.MinCallInterval},
-		{"SUMMARY_LLM_TIMEOUT", 45 * time.Second, &c.LLMTimeout},
+		{"SUMMARY_LLM_TIMEOUT", 60 * time.Second, &c.LLMTimeout},
+		{"CHAT_TIMEOUT", 60 * time.Second, &c.ChatTimeout},
 	}
 	for _, d := range durations {
 		if *d.target, err = envDuration(d.key, d.fallback); err != nil {
 			return c, err
 		}
 	}
-	if c.MaxCallsPerDay, err = envInt("SUMMARY_MAX_CALLS_PER_DAY", 45, 1, 10000); err != nil {
-		return c, err
+	ints := []struct {
+		key              string
+		fallback, lo, hi int
+		target           *int
+	}{
+		{"SUMMARY_MAX_CALLS_PER_DAY", 45, 1, 10000, &c.MaxCallsPerDay},
+		{"SUMMARY_MAX_HIGHLIGHTS", 8, 1, 20, &c.MaxHighlights},
+		{"LLM_MAX_TOKENS", 16000, 2000, 32000, &c.MaxTokens},
+		{"LLM_REASONING_TOKENS", 2048, 256, 16000, &c.ReasoningTokens},
+		{"CHAT_MAX_CALLS_PER_DAY", 150, 0, 10000, &c.ChatCallsPerDay},
+		{"CHAT_MAX_CONCURRENT", 2, 1, 16, &c.ChatConcurrency},
+		{"CHAT_MAX_HISTORY", 8, 0, 20, &c.ChatHistory},
 	}
-	if c.MaxHighlights, err = envInt("SUMMARY_MAX_HIGHLIGHTS", 8, 1, 20); err != nil {
-		return c, err
+	for _, n := range ints {
+		if *n.target, err = envInt(n.key, n.fallback, n.lo, n.hi); err != nil {
+			return c, err
+		}
+	}
+	if c.ReasoningTokens*2 > c.MaxTokens {
+		return c, fmt.Errorf("LLM_REASONING_TOKENS must leave at least half of LLM_MAX_TOKENS for the answer")
 	}
 	if c.Fault != "off" && c.Fault != "slow" && c.Fault != "invalid" {
 		return c, fmt.Errorf("SUMMARY_FAULT_MODE must be off, slow or invalid")

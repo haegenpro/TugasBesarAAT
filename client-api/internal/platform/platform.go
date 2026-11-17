@@ -250,7 +250,7 @@ func (w *response) Write(b []byte) (int, error) {
 func (w *response) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func route(path string) string {
 	switch path {
-	case "/health", "/ready", "/metrics", "/hazards", "/notices", "/internal/hazards", "/internal/notices", "/internal/login", "/internal/logout", "/internal/refresh", "/internal/introspect", "/auth/login", "/auth/logout", "/auth/refresh", "/records", "/history", "/seismic-events", "/tsunami-warnings", "/volcanic-reports", "/admin/outage", "/admin/schema-version", "/field-reports", "/situation":
+	case "/health", "/ready", "/metrics", "/hazards", "/notices", "/internal/hazards", "/internal/notices", "/internal/login", "/internal/logout", "/internal/refresh", "/internal/introspect", "/auth/login", "/auth/logout", "/auth/refresh", "/records", "/history", "/seismic-events", "/tsunami-warnings", "/volcanic-reports", "/admin/outage", "/admin/schema-version", "/field-reports", "/situation", "/situation/chat":
 		return path
 	}
 	for _, prefix := range []string{"/hazards/", "/notices/", "/internal/hazards/", "/internal/notices/", "/field-reports/"} {
