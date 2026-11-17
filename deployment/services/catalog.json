@@ -207,7 +207,12 @@
       },
       "environment": {
         "AUTH_PORT": "8083",
-        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318"
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",
+        "AUTH_PRIORITY_ENABLED": "true",
+        "AUTH_MAX_INFLIGHT": "32",
+        "AUTH_FIELD_RESERVED": "8",
+        "AUTH_DB_FIELD_RESERVED": "4",
+        "DB_MAX_OPEN_CONNS": "16"
       },
       "ready": {
         "path": "/ready",
@@ -223,7 +228,8 @@
       "metrics_port": 8083,
       "required_secret_keys": [
         "DATABASE_URL",
-        "AUTH_INTERNAL_KEY"
+        "AUTH_INTERNAL_KEY",
+        "AUTH_PRIORITY_KEY"
       ]
     },
     {
@@ -247,7 +253,8 @@
         "CLIENT_API_MAX_INFLIGHT_PER_CLIENT": "32",
         "CLIENT_API_FIELD_RESERVED": "32",
         "CLIENT_API_AUTH_MAX_INFLIGHT": "32",
-        "INGESTION_BASE_URL": "http://ingestion:8080"
+        "INGESTION_BASE_URL": "http://ingestion:8080",
+        "CLIENT_API_AUTH_FIELD_RESERVED": "8"
       },
       "ready": {
         "path": "/ready",
@@ -265,7 +272,8 @@
       "required_secret_keys": [
         "AUTH_INTERNAL_KEY",
         "ANALYTICS_SERVICE_TOKEN",
-        "FIELD_REPORT_SERVICE_TOKEN"
+        "FIELD_REPORT_SERVICE_TOKEN",
+        "AUTH_PRIORITY_KEY"
       ]
     },
     {

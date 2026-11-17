@@ -16,11 +16,13 @@ import (
 )
 
 type api struct {
-	cfg        config
-	log        logger
-	client     *http.Client
-	chatClient *http.Client
-	authSlots  chan struct{}
+	cfg            config
+	log            logger
+	client         *http.Client
+	chatClient     *http.Client
+	authSlots      chan struct{}
+	fieldAuthSlots chan struct{}
+	fieldClient    *http.Client
 }
 
 type logger interface {
@@ -52,7 +54,11 @@ func (a *api) call(c *gin.Context, service, method, endpoint string, payload any
 		req.Header.Set("X-Internal-Key", a.cfg.AuthInternalKey)
 	}
 	start := time.Now()
-	resp, err := a.client.Do(req)
+	client := a.client
+	if c.GetBool("field_auth_lane") && a.fieldClient != nil {
+		client = a.fieldClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		a.log.Warn("outbound request", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "latency_ms", time.Since(start).Milliseconds(), "success", false, "error", err.Error())
 		return 0, errUpstream

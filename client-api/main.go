@@ -24,6 +24,8 @@ type config struct {
 	PriorityEnabled      bool
 	FieldReserved        int
 	AuthMaxInFlight      int
+	AuthFieldReserved    int
+	AuthPriorityKey      string
 	IngestionURL         string
 	FieldReportToken     string
 	SituationURL         string
@@ -97,6 +99,16 @@ func loadConfig() (config, error) {
 		cfg.AuthMaxInFlight, err = envInt(settings, "CLIENT_API_AUTH_MAX_INFLIGHT", 1, 65536)
 		if err != nil {
 			return config{}, err
+		}
+		if key := os.Getenv("AUTH_PRIORITY_KEY"); key != "" {
+			if len(key) < 32 || key == cfg.AuthInternalKey {
+				return config{}, fmt.Errorf("distinct AUTH_PRIORITY_KEY of at least 32 bytes required")
+			}
+			cfg.AuthPriorityKey = key
+			cfg.AuthFieldReserved, err = envInt(map[string]string{"CLIENT_API_AUTH_FIELD_RESERVED": os.Getenv("CLIENT_API_AUTH_FIELD_RESERVED")}, "CLIENT_API_AUTH_FIELD_RESERVED", 1, cfg.AuthMaxInFlight-1)
+			if err != nil || cfg.AuthMaxInFlight < 2 {
+				return config{}, fmt.Errorf("valid CLIENT_API_AUTH_FIELD_RESERVED below authentication capacity required")
+			}
 		}
 	}
 	return cfg, nil

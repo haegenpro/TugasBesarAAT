@@ -35,6 +35,15 @@ func (s *sessionStore) collectMetrics(ctx context.Context) {
 			return
 		case <-ticker.C:
 			st := s.db.Stats()
+			if s.fieldDB != nil {
+				field := s.fieldDB.Stats()
+				platform.Gauge("auth_field_db_connections_in_use", float64(field.InUse))
+				platform.Gauge("auth_field_db_pool_wait_total", float64(field.WaitCount))
+				platform.Gauge("auth_general_db_connections_in_use", float64(st.InUse))
+				st.InUse += field.InUse
+				st.Idle += field.Idle
+				st.WaitCount += field.WaitCount
+			}
 			platform.Gauge("db_connections_in_use", float64(st.InUse))
 			platform.Gauge("db_connections_idle", float64(st.Idle))
 			platform.Gauge("db_pool_wait_total", float64(st.WaitCount))
