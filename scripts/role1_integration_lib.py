@@ -29,6 +29,9 @@ def render(inventory, aggregator_config, config, aggregator_image, ingestion_ima
     deployment = next(x for x in result["items"] if x["kind"] == "Deployment")
     pod = deployment["spec"]["template"]["spec"]
     container = pod["containers"][0]
+    require(type(config.get('field_priority_enabled',False))is bool,'field_priority_enabled must be boolean')
+    if config.get('field_priority_enabled',False):
+        container['env']+=values({'FIELD_READ_PRIORITY_ENABLED':'true','FIELD_READ_DB_RESERVED':'4','GENERAL_READ_MAX_INFLIGHT':'8','FIELD_READ_MAX_INFLIGHT':'4'})+[secret_env('FIELD_READ_TOKEN',config['runtime_secret'])]
     for feature in ("analytics_enabled", "audit_sessions_enabled"):
         require(type(config.get(feature, False)) is bool, feature + " must be boolean")
     if config.get("analytics_enabled", False):

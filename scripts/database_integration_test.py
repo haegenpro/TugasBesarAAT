@@ -46,7 +46,7 @@ class DatabaseIntegrationChecks(unittest.TestCase):
             root=Path(folder)
             catalog=json.loads((ROOT/"deployment/services/catalog.json").read_text())
             owner=json.loads((ROOT/"deployment/role1/config.example.json").read_text())
-            owner.update(analytics_enabled=True,bmkg_namespace="bmkg-test-release",satellite_namespace="satellite-test-release")
+            owner.update(analytics_enabled=True,field_priority_enabled=True,bmkg_namespace="bmkg-test-release",satellite_namespace="satellite-test-release")
             owner["r3"]={"field_reports_namespace":"reports-test-release","coastal_namespace":"coastal-test-release","satellite_feed_url":"https://feed.invalid"}
             processor=json.loads((ROOT/"docs/fixtures/wildfire-m6/config.json").read_text())
             processor["namespace"]=owner["satellite_namespace"]

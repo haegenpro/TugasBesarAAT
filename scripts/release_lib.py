@@ -28,6 +28,7 @@ def assemble(inventory,config_path,output):
     if config.get("wildfire_config")and config.get("province_reference"):
         owner["wildfire"]={"config_json":(base/config["wildfire_config"]).read_text(encoding="utf-8"),"province_json":(base/config["province_reference"]).read_text(encoding="utf-8")}
     require(owner.get("analytics_enabled")is True,"release must enable the required analytics dashboard")
+    require(owner.get('field_priority_enabled')is True,'integrated release requires Field read pool isolation')
     require(isinstance(owner.get("wildfire"),dict)and isinstance(owner.get("r3"),dict),"release needs explicit wildfire and R3 configuration")
     for name in ("bmkg_namespace","satellite_namespace"):
         require(not owner[name].startswith(("synthetic-","fixture-")),"replace synthetic release source namespaces")

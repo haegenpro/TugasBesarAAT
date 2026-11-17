@@ -228,6 +228,38 @@ func main() {
 		}
 		defer stopSnapshots()
 	}
+	if platform.Bool("FIELD_READ_PRIORITY_ENABLED", false) {
+		token := os.Getenv("FIELD_READ_TOKEN")
+		if len(token) < 32 {
+			logger.Error("dedicated FIELD_READ_TOKEN of at least 32 bytes required")
+			os.Exit(1)
+		}
+		for _, key := range []string{"CANONICAL_SERVICE_TOKEN", "PROCESSOR_SERVICE_TOKEN", "INGESTION_SERVICE_TOKEN", "HISTORY_SERVICE_TOKEN", "AUDIT_TOKEN", "AGGREGATOR_ADMIN_TOKEN", "ANALYTICS_SERVICE_TOKEN", "AUTH_INTERNAL_KEY"} {
+			if token == os.Getenv(key) {
+				logger.Error("Field read credential must be distinct")
+				os.Exit(1)
+			}
+		}
+		view, closeView, e := st.NewFieldReadView(ctx)
+		if e != nil {
+			logger.Error("invalid Field read pool configuration", "error", e)
+			os.Exit(1)
+		}
+		defer closeView()
+		fieldDeps := &api.Dependencies{}
+		fieldDeps.SetReadReady(true)
+		fieldDeps.SetStoreReady(true)
+		fieldAPI := api.New(view, status, fieldDeps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
+		fieldAPI.Coastal = a.Coastal
+		server.RegisterFieldReads(router, fieldAPI, token, platform.Int("FIELD_READ_MAX_INFLIGHT", 4))
+		go view.CollectFieldReadMetrics(ctx)
+		go func() {
+			<-ctx.Done()
+			fieldDeps.SetReadReady(false)
+			fieldDeps.SetStoreReady(false)
+			fieldDeps.SetDraining(true)
+		}()
+	}
 	if analyticsEnabled {
 		token := os.Getenv("ANALYTICS_SERVICE_TOKEN")
 		if token == "" {

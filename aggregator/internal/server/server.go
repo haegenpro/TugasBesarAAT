@@ -22,10 +22,14 @@ func New(logger *slog.Logger, a *api.API) *gin.Engine {
 
 	r.GET("/health", api.Health)
 	r.GET("/ready", a.Ready)
-	r.GET("/internal/hazards", a.ListHazards)
-	r.GET("/internal/hazards/:id", a.GetHazard)
-	r.GET("/internal/notices", a.ListNotices)
-	r.GET("/internal/notices/:id", a.GetNotice)
+	reads := r.Group("/internal")
+	if platform.Bool("FIELD_READ_PRIORITY_ENABLED", false) {
+		reads.Use(readAdmission(platform.Int("GENERAL_READ_MAX_INFLIGHT", 8), "general_read_capacity_rejected_total"))
+	}
+	reads.GET("/hazards", a.ListHazards)
+	reads.GET("/hazards/:id", a.GetHazard)
+	reads.GET("/notices", a.ListNotices)
+	reads.GET("/notices/:id", a.GetNotice)
 
 	return r
 }

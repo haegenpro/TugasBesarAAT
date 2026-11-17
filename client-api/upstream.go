@@ -49,6 +49,19 @@ func (a *api) call(c *gin.Context, service, method, endpoint string, payload any
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if service == "aggregator" && a.cfg.FieldReadToken != "" {
+		if value, ok := c.Get("principal"); ok {
+			if p, valid := value.(principal); valid && p.Role == "field" {
+				for _, prefix := range []string{"/internal/hazards", "/internal/notices"} {
+					if req.URL.Path == prefix || strings.HasPrefix(req.URL.Path, prefix+"/") {
+						req.URL.Path = "/internal/field" + strings.TrimPrefix(req.URL.Path, "/internal")
+						req.Header.Set("X-Field-Read-Key", a.cfg.FieldReadToken)
+						break
+					}
+				}
+			}
+		}
+	}
 	req.Header.Set("X-Correlation-ID", c.GetString("correlation_id"))
 	if internal {
 		req.Header.Set("X-Internal-Key", a.cfg.AuthInternalKey)

@@ -277,10 +277,10 @@ func (w *response) Write(b []byte) (int, error) {
 func (w *response) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func route(path string) string {
 	switch path {
-	case "/health", "/ready", "/metrics", "/hazards", "/notices", "/internal/hazards", "/internal/notices", "/internal/login", "/internal/logout", "/internal/refresh", "/internal/introspect", "/auth/login", "/auth/logout", "/auth/refresh", "/records", "/history", "/seismic-events", "/tsunami-warnings", "/volcanic-reports", "/admin/outage", "/admin/schema-version", "/internal/field-reports", "/internal/coastal/status", "/internal/ingestion/failures", "/internal/ingestion/replays", "/internal/ingestion/legacy-replays", "/internal/audit/unprocessed":
+	case "/internal/field/hazards", "/internal/field/notices", "/health", "/ready", "/metrics", "/hazards", "/notices", "/internal/hazards", "/internal/notices", "/internal/login", "/internal/logout", "/internal/refresh", "/internal/introspect", "/auth/login", "/auth/logout", "/auth/refresh", "/records", "/history", "/seismic-events", "/tsunami-warnings", "/volcanic-reports", "/admin/outage", "/admin/schema-version", "/internal/field-reports", "/internal/coastal/status", "/internal/ingestion/failures", "/internal/ingestion/replays", "/internal/ingestion/legacy-replays", "/internal/audit/unprocessed":
 		return path
 	}
-	for _, prefix := range []string{"/hazards/", "/notices/", "/internal/hazards/", "/internal/notices/", "/internal/field-reports/", "/internal/ingestion/replays/"} {
+	for _, prefix := range []string{"/internal/field/hazards/", "/internal/field/notices/", "/hazards/", "/notices/", "/internal/hazards/", "/internal/notices/", "/internal/field-reports/", "/internal/ingestion/replays/"} {
 		if strings.HasPrefix(path, prefix) {
 			return prefix + ":id"
 		}

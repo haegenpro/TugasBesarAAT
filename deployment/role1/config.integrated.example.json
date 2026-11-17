@@ -16,5 +16,6 @@
     "satellite_feed_url": "https://satellite.naufarrel.dev",
     "pvmbg_adapter_version": 2,
     "pantai_secret": "pantai-runtime"
-  }
+  },
+  "field_priority_enabled": true
 }

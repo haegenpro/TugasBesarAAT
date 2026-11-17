@@ -273,7 +273,8 @@
         "AUTH_INTERNAL_KEY",
         "ANALYTICS_SERVICE_TOKEN",
         "FIELD_REPORT_SERVICE_TOKEN",
-        "AUTH_PRIORITY_KEY"
+        "AUTH_PRIORITY_KEY",
+        "FIELD_READ_TOKEN"
       ]
     },
     {

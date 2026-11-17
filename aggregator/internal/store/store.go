@@ -50,6 +50,13 @@ func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, 
 		return nil, err
 	}
 	cfg.MaxConns = int32(platform.Int("DB_MAX_OPEN_CONNS", 16))
+	if platform.Bool("FIELD_READ_PRIORITY_ENABLED", false) {
+		reserved := int32(platform.Int("FIELD_READ_DB_RESERVED", 4))
+		if reserved < 1 || reserved >= cfg.MaxConns {
+			return nil, errors.New("FIELD_READ_DB_RESERVED must be below total DB_MAX_OPEN_CONNS")
+		}
+		cfg.MaxConns -= reserved
+	}
 	cfg.MinConns = 0
 	cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(platform.Duration("DB_STATEMENT_TIMEOUT", 5*time.Second).Milliseconds(), 10)
 	cfg.ConnConfig.RuntimeParams["lock_timeout"] = strconv.FormatInt(platform.Duration("DB_LOCK_TIMEOUT", 2*time.Second).Milliseconds(), 10)

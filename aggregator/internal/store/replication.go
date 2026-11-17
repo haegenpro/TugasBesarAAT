@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"aggregator/internal/canonical"
+	"aggregator/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -110,6 +111,9 @@ func (s *Store) ConfigureReplication(ctx context.Context, path string) error {
 			return fmt.Errorf("missing or invalid replication DSN for group %d", group.ID)
 		}
 		pc.MaxConns, pc.MinConns = 2, 0
+		if platform.Bool("FIELD_READ_PRIORITY_ENABLED", false) {
+			pc.MaxConns = 1
+		}
 		pc.ConnConfig.ConnectTimeout = time.Second
 		pc.ConnConfig.RuntimeParams["statement_timeout"] = "1500"
 		pc.ConnConfig.RuntimeParams["synchronous_commit"] = "on"

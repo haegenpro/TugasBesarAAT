@@ -24,8 +24,8 @@ def main():
    if time.monotonic()>deadline:raise RuntimeError('temporary PostgreSQL startup deadline')
    time.sleep(.2)
   runner=network+'-go';docker('run','-d','--name',runner,'--label','aat.priority.check='+run,'--network',network,'--memory','2g','--cpus','3','--mount','type=bind,src='+str(ROOT)+',dst=/src,readonly','-v','r3-go-mod:/go/pkg/mod','-v','r3-go-build:/root/.cache/go-build','golang:1.27.1-alpine3.24','tail','-f','/dev/null');created.append(runner)
-  for module in ('auth-service','client-api'):
-   result=docker('exec','-e','TEST_POSTGRES_URL','-w','/src/'+module,runner,'go','test','-mod=readonly','-count=1','-timeout=90s','-json','./...','-run','TestPriority|TestSignedField|TestSessionSurvives|TestConcurrentRefresh|TestPerClient',check=False)
+  for module in ('auth-service','client-api','aggregator'):
+   result=docker('exec','-e','TEST_POSTGRES_URL','-w','/src/'+module,runner,'go','test','-mod=readonly','-count=1','-timeout=90s','-json',*(['./internal/store','./internal/server']if module=='aggregator'else['./...']),'-run','TestPriority|TestSignedField|TestVerifiedField|TestSessionSurvives|TestConcurrentRefresh|TestPerClient',check=False)
    (output/(module+'.log')).write_text((result.stdout+result.stderr).replace(password,'[redacted]'))
    counts={'pass':0,'fail':0,'skip':0}
    for line in result.stdout.splitlines():

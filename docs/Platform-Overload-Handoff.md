@@ -40,11 +40,33 @@ with a hint. Coordinate the shared key across replicas. Key rotation changes hin
 classification without bypassing live session validation. There is no token cache.
 
 These reservations protect admitted requests and connections. Physical database
-CPU/I/O, table locks, network and canonical read capacity remain shared resources
+CPU/I/O, table locks and network remain shared resources
 requiring target-host overload measurements. A revoked Field token can retain a
 valid scheduling hint until its signed expiry, but the live DB check still rejects
 it. Initial login at the public Client API has no prevalidated role and uses the
 general login bound.
+
+The integrated release additionally enables `FIELD_READ_PRIORITY_ENABLED` in
+Aggregator and requires a separate shared `FIELD_READ_TOKEN` in Client API and
+role1 runtime Secrets. After actual Auth verification, Client API alone selects
+the private `/internal/field/hazards` and `/internal/field/notices` routes and
+sets that credential. Incoming role/key headers are not forwarded. Other
+principal roles keep the ordinary routes. Only GET routes are registered.
+
+Aggregator splits the existing 16 data connections into 12 general and 4 Field
+connections. Each replication observer group's original two connections split
+into one general and one Field connection. The Field repository uses independent
+read-only pools and repeats the same captured-identity, topology, authority,
+visibility and partial-result checks. Its inventory callbacks are bound to those
+independent pools. Closing the view does not close shared control connections.
+General HTTP reads are bounded at eight and private Field reads at four per
+Aggregator. This changes neither VM count nor database topology or total declared
+connection budgets. Analytics and other owner endpoints retain their own paths.
+
+General-pool health samples do not preempt the Field read lane. Each Field query
+checks its own authoritative storage and remains bounded by the canonical read
+deadline; database loss still returns the established partial/unavailable result.
+Physical PostgreSQL session limits and CPU/I/O can still constrain both lanes.
 
 During later validation, fill Media capacity while issuing authenticated field
 requests; report both roles' successful throughput, latency, 429, unexpected
@@ -68,3 +90,8 @@ budget. Its Client API HTTP check fills general introspection, rejects tampered
 hints and confirms that a live Auth rejection is never cached away. Successful
 run `evidence/platform-priority/0866eb4ad46d`: Auth 4 passed, Client API 15 passed,
 no failures/skips. Physical database/network saturation remains deferred.
+The expanded run `evidence/platform-priority/c945a862ff43` passed Auth 4,
+Client API 16 and Aggregator 2 tests without skips. It also verifies real primary
+pool exhaustion with continuing read-only Field queries, no increase in the
+combined connection budget, rejection of Field DDL, private-route authentication,
+and Field HTTP progress while the ordinary read lane is full.

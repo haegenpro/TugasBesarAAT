@@ -84,6 +84,8 @@ loki.write "local" {
         ("Acquired cohort error-budget use (review coverage)","max(app_coastal_slo_error_budget_used and on(pod) (app_coastal_slo_collection_success == 1))"),
         ("Cohort coverage / p95 completeness / clock anomalies","{__name__=~\"app_coastal_slo_(coverage_complete|p95_complete|clock_anomalies|collection_success)\"}"),
         ("Critical cohort p95 lower bound (seconds)","max(app_coastal_slo_p95_lower_bound_seconds and on(pod) (app_coastal_slo_collection_success == 1))"),
+        ("Auth reserved/general DB connections","{__name__=~\"app_auth_(field|general)_db_connections_in_use\"}"),
+        ("Reserved Field read DB connections","{__name__=~\"app_field_read_db_connections_(in_use|max)\"}"),
         ("Controlled API rejections","sum by (service) (rate(app_http_requests_total{status=\"429\"}[1m]))"),
         ("Field reserve / authentication rejections","{__name__=~\"app_admission_(role_capacity|authentication_capacity)_rejected_total\"}"))
     for title,expr in signals:
