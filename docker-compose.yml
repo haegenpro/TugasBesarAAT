@@ -249,6 +249,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:${OTLP_HTTP_PORT:?Set OTLP_HTTP_PORT in root .env}
       DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:?Set DB_STATEMENT_TIMEOUT in root .env}
       DB_LOCK_TIMEOUT: ${DB_LOCK_TIMEOUT:?Set DB_LOCK_TIMEOUT in root .env}
+      SITUATION_BASE_URL: ${SITUATION_BASE_URL:-}
     healthcheck:
       test:
       - CMD-SHELL
@@ -272,6 +273,24 @@ services:
       BNPB_API_URL: http://client-api:${CLIENT_API_PORT:?Set CLIENT_API_PORT in root .env or the shell}
     networks:
     - client
+  situation-summarizer:
+    build: ./situation-summarizer
+    profiles:
+    - ai
+    env_file:
+    - ./situation-summarizer/.env
+    environment:
+      AGGREGATOR_BASE_URL: http://aggregator:${AGGREGATOR_PORT:?Set AGGREGATOR_PORT in root .env or the shell}
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - wget -q --spider "http://localhost:$$SUMMARIZER_PORT/health"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+    - backend
+    stop_grace_period: 15s
   consumer-dashboard:
     build: ./consumer-dashboard
     env_file:

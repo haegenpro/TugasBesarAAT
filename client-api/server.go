@@ -53,6 +53,9 @@ func (a *api) router() *gin.Engine {
 	if a.cfg.AnalyticsEnabled {
 		protected.GET("/analytics/summary", a.analyticsSummary)
 	}
+	if a.cfg.SituationURL != "" {
+		protected.GET("/situation", a.situation)
+	}
 	if a.cfg.IngestionURL != "" {
 		protected.POST("/field-reports", a.submitFieldReport)
 		protected.GET("/field-reports/:receipt_id", a.fieldReportStatus)

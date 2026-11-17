@@ -26,6 +26,7 @@ type config struct {
 	AuthMaxInFlight      int
 	IngestionURL         string
 	FieldReportToken     string
+	SituationURL         string
 }
 
 func loadConfig() (config, error) {
@@ -70,6 +71,12 @@ func loadConfig() (config, error) {
 		if cfg.FieldReportToken == cfg.AuthInternalKey || cfg.FieldReportToken == cfg.AnalyticsToken {
 			return config{}, fmt.Errorf("dedicated FIELD_REPORT_SERVICE_TOKEN required")
 		}
+	}
+	if raw := os.Getenv("SITUATION_BASE_URL"); raw != "" {
+		if err = envURL(map[string]string{"SITUATION_BASE_URL": raw}, "SITUATION_BASE_URL", "http", "https"); err != nil {
+			return config{}, err
+		}
+		cfg.SituationURL = raw
 	}
 	if raw := os.Getenv("CLIENT_API_PRIORITY_ENABLED"); raw != "" && raw != "false" && raw != "true" {
 		return config{}, fmt.Errorf("CLIENT_API_PRIORITY_ENABLED must be true or false")
