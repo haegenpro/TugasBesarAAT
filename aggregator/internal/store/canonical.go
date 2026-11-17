@@ -29,8 +29,10 @@ type Durability interface {
 	Confirm(context.Context, string) error
 }
 type CanonicalOptions struct {
-	Fence                Fence
-	Durability           Durability
+	Fence      Fence
+	Durability Durability
+	// Test-only compatibility for single-copy protocol fixtures. Production
+	// requires the durability provider's live PrepareBatch capability instead.
 	MultiEntityValidated bool
 }
 
@@ -90,7 +92,10 @@ func (s *Store) ApplyBatch(ctx context.Context, b canonical.Batch) (canonical.Re
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return canonical.Result{}, canonical.Unavailable()
 	}
-	if s.Canonical.Fence == nil || s.Canonical.Durability == nil || (len(b.Mutations) > 1 && !s.Canonical.MultiEntityValidated) {
+	multi, multiCapable := s.Canonical.Durability.(interface {
+		PrepareBatch(context.Context, pgx.Tx) error
+	})
+	if s.Canonical.Fence == nil || s.Canonical.Durability == nil || (len(b.Mutations) > 1 && !multiCapable && !s.Canonical.MultiEntityValidated) {
 		return canonical.Result{}, canonical.Unavailable()
 	}
 	tx, err := s.beginMutation(ctx)
@@ -98,6 +103,11 @@ func (s *Store) ApplyBatch(ctx context.Context, b canonical.Batch) (canonical.Re
 		return canonical.Result{}, canonical.Unavailable()
 	}
 	defer tx.Rollback(context.Background())
+	if len(b.Mutations) > 1 && multiCapable {
+		if err := multi.PrepareBatch(ctx, tx); err != nil {
+			return canonical.Result{}, canonical.Unavailable()
+		}
+	}
 	// Lock batch, source-scoped operation identities and target identities in one
 	// deterministic order. Unique constraints remain the authority, not hash equality.
 	keys := []string{"batch:" + b.BatchID}
