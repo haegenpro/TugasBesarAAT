@@ -49,6 +49,12 @@ flushed original copies. The controller holds only the already-lost member's
 workload controllers at zero while restoring its paths. Surviving replicas and
 application workloads continue; the supplied Tester Agent is never modified.
 Original replica counts and every phase are recorded.
+Before changing any controller, the workflow inspects all affected identities,
+namespace/cluster/formation labels, fixed-node placement and claim ownership.
+It records original UIDs and replica counts before the first hold. Each hold
+and release uses an atomic API-server JSON Patch with UID and replica-count
+tests. A recreated or concurrently scaled controller is refused; a source that
+was intentionally at zero stays at zero.
 
 The host helper verifies its ownership marker, VM UUID, attached disk paths and
 shut-off state. It retains old disks in a run-specific quarantine and recreates
@@ -73,6 +79,23 @@ Failures keep journals, quarantine and uncertain workloads for explicit repair;
 the top-level controller is not yet a fully resumable phase engine. It never
 silently rolls back data or boots old storage. Do not declare automatic recovery
 under interrupted replacement until those phase-fault scenarios are exercised.
+
+Version 2 controller reports are replaced atomically with file/directory fsync.
+They record original WAL anchors, controller UIDs/counts, mutation intents,
+per-controller hold/release completion, DCS membership and learner IDs, provider
+quarantine and restore hashes. An interrupted report therefore identifies the
+last durable checkpoint without requiring the failed machine to answer.
+
+```sh
+# Local evidence only: no VM, Kubernetes or provider access.
+python3 scripts/platform-node-replacement.py status \
+  --inventory /private/four-hosts.json --node aat-fourhost-b \
+  --run ORIGINAL_32_CHARACTER_RUN_ID
+```
+
+Status checks bind the report to its original run/node/cluster. Inspect it and
+the host journal before repairing or retrying; this command does not resume,
+roll back or declare logical reconciliation complete.
 
 ## Verification status
 

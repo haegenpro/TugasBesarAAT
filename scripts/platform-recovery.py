@@ -100,10 +100,13 @@ class Recovery:
         survivor=f"{formation}-etcd-{next(chr(97+i)for i in range(3)if i!=index)}-0"
         members=json.loads(self.etcd(survivor,"member","list","--write-out=json").stdout)["members"]
         old=next(m for m in members if m["name"]==target)
+        self.record('DCS member removal intent',original_members=members,member_id=format(old['ID'],'x'))
         self.etcd(survivor,"member","remove",format(old["ID"],"x"))
+        self.record('lost DCS member removed',member_id=format(old['ID'],'x'))
         peer=f"https://{target}.{formation}-etcd-members.{self.storage['namespace']}.svc.cluster.local:2380"
         added=json.loads(self.etcd(survivor,"member","add",target,"--peer-urls="+peer,"--learner","--write-out=json").stdout)
         new_id=added["member"]["ID"]
+        self.record('replacement DCS learner admitted',member_id=format(new_id,'x'),members=added['members'])
         names=[]
         for member in added["members"]:
             name=member.get("name") or (target if member["ID"]==new_id else "")

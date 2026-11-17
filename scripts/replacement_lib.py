@@ -2,14 +2,72 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tarfile
+import tempfile
 
 from bundle_lib import inspect
 from platform_lib.inventory import fingerprint
 from storage_lib import require
 
 ROOT=Path(__file__).resolve().parent.parent
+
+def write_report(path,value):
+    """Durably replace a private report without exposing a truncated journal."""
+    path=Path(path);temporary=None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w',dir=path.parent,prefix='.replacement-',delete=False)as stream:
+            temporary=Path(stream.name);json.dump(value,stream,indent=2);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+        os.replace(temporary,path)
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
+    finally:
+        if temporary is not None:temporary.unlink(missing_ok=True)
+
+def controller_holds(cluster,prepared):
+    """Inspect every lost-member controller before any replica-count mutation."""
+    result={};ns=prepared['namespace'];target=prepared['target']['name']
+    formations={f['plan']['formation']for f in prepared['formations']}
+    def owned(labels):
+        cluster_label=labels.get('platform.aat/cluster');formation=labels.get('platform.aat/formation')
+        return cluster_label in(None,cluster.cfg['cluster_id'])and(formation is None or formation in formations)and(cluster_label==cluster.cfg['cluster_id']or formation in formations)
+    for volume in prepared['volumes']:
+        owner=volume['controller'];key=owner['kind'].lower()+'/'+owner['name']
+        current=json.loads(cluster.kubectl('get',key,'-n',ns,'-o','json').stdout)
+        meta=current['metadata'];labels=meta.get('labels',{})
+        require(meta['name']==owner['name']and meta['namespace']==ns and current['kind']==owner['kind'],'live persistent controller identity differs')
+        require(owned(labels),'refusing to hold an unowned or conflicting controller')
+        pod=current['spec']['template']
+        require(owned(pod['metadata']['labels']),'persistent pod ownership differs from controller')
+        require(pod['spec'].get('nodeSelector',{}).get('kubernetes.io/hostname')==target,'persistent controller moved off the lost node')
+        require(pod['metadata']['labels'].get('app.kubernetes.io/name')==owner['app'],'persistent controller owning app differs')
+        require(any(v.get('persistentVolumeClaim',{}).get('claimName')==volume['claim']for v in pod['spec'].get('volumes',[])),'persistent controller no longer owns its recorded claim')
+        count=current['spec'].get('replicas',1)
+        require(type(count)is int and count>=0 and isinstance(meta.get('uid'),str)and meta['uid'],'invalid live controller replica count/UID')
+        identity={'uid':meta['uid'],'replicas':count}
+        require(key not in result or result[key]==identity,'persistent controller changed during preflight')
+        result[key]=identity
+    return result
+
+def set_controller_hold(cluster,namespace,key,identity,restore=False):
+    # JSON Patch tests and mutation execute atomically at the API server. Status
+    # updates can advance resourceVersion without invalidating this identity test.
+    expected=0 if restore else identity['replicas'];desired=identity['replicas']if restore else 0
+    patch=[{'op':'test','path':'/metadata/uid','value':identity['uid']},
+           {'op':'test','path':'/spec/replicas','value':expected},
+           {'op':'replace','path':'/spec/replicas','value':desired}]
+    cluster.kubectl('patch',key,'-n',namespace,'--type=json','-p',json.dumps(patch))
+
+def read_report(inventory,run_id,node_name):
+    import re
+    require(isinstance(run_id,str)and re.fullmatch(r'[0-9a-f]{32}',run_id),'original 32-character recovery run ID required')
+    root=Path(inventory['state_dir'])/'evidence'/('integrated-replacement-'+run_id)
+    require(root.resolve()==root and not(root/'result.json').is_symlink(),'recovery report path must not use symlinks')
+    value=json.loads((root/'result.json').read_text())
+    require(value.get('run_id')==run_id and value.get('node')==node_name and value.get('cluster_id')==inventory['cluster_id'],'recovery report belongs to another run/node/cluster')
+    return value
 
 def validate_archive(path):
     # Deliberately accept bounded uncompressed tar only; a compressed bomb or

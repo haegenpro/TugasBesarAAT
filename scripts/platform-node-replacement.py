@@ -15,7 +15,7 @@ import uuid
 
 from platform_lib.cluster import Cluster
 from platform_lib.inventory import load
-from replacement_lib import RESTORE,load_plan,recovery_module
+from replacement_lib import RESTORE,controller_holds,load_plan,read_report,recovery_module,set_controller_hold,write_report
 from storage_lib import require,write_json
 
 ROOT=Path(__file__).resolve().parent.parent
@@ -24,9 +24,9 @@ def execute(inventory,prepared):
     require(prepared["ready"],"resolve every recovery blocker before mutating the node")
     c=Cluster(inventory);target=prepared["target"];ns=inventory["namespace"];run_id=uuid.uuid4().hex
     output=c.state/"evidence"/("integrated-replacement-"+run_id)
-    report={"version":1,"run_id":run_id,"node":target["name"],"passed":False,"started_at":datetime.now(timezone.utc).isoformat(),"events":[],"scope":"original replica placement and retained-prefix recovery; independent accepted-operation/checksum reconciliation still required"}
+    report={"version":2,"cluster_id":inventory['cluster_id'],"run_id":run_id,"node":target["name"],"passed":False,"started_at":datetime.now(timezone.utc).isoformat(),"events":[],"scope":"original replica placement and retained-prefix recovery; independent accepted-operation/checksum reconciliation still required"}
     def record(phase,**fields):
-        report["events"].append({"phase":phase,"at":datetime.now(timezone.utc).isoformat(),**fields});write_json(output/"result.json",report);print(phase,flush=True)
+        report["events"].append({"phase":phase,"at":datetime.now(timezone.utc).isoformat(),**fields});write_report(output/"result.json",report);print(phase,flush=True)
     def wait(check,message,seconds=300):
         deadline=time.monotonic()+seconds
         while True:
@@ -54,7 +54,7 @@ def execute(inventory,prepared):
                 helper.cluster=c
                 helper.record=lambda phase,_name=formation["plan"]["formation"],**fields:record(_name+": "+phase,**fields)
                 anchors=helper.validate_survivors();helpers.append((helper,anchors,None))
-            record("all PostgreSQL formations retain two original flushed copies")
+            record("all PostgreSQL formations retain two original flushed copies",original_wal_anchors={h.storage['formation']:a for h,a,_ in helpers})
             def broker_call(volume,operation):
                 workload=volume["controller"]["name"];lost=workload+"-0"
                 original=["broker-"+letter+"-0"for letter in "abc"]
@@ -70,30 +70,35 @@ def execute(inventory,prepared):
             record("broker quorum and original-cluster system credential verified")
             # Stop only the already-lost member controllers. This prevents a
             # freshly booted source from writing into a directory being restored.
-            for volume in prepared["volumes"]:
-                owner=volume["controller"];key=owner["kind"].lower()+"/"+owner["name"]
-                if key in held:continue
-                current=json.loads(c.kubectl("get",key,"-n",ns,"-o","json").stdout)
-                held[key]=current["spec"].get("replicas",1)
-                c.kubectl("scale",key,"-n",ns,"--replicas=0")
-            record("lost-member workload controllers held for safe restoration",original_replicas=held)
+            held=controller_holds(c,prepared);report['held_controllers']=held
+            record("controller hold intent recorded",mutation_intent=True,original_controllers=held)
+            for key,identity in held.items():
+                set_controller_hold(c,ns,key,identity)
+                record('original controller held',controller=key,uid=identity['uid'])
             for volume,baseline in brokers:
                 record("original broker membership retained for same-name empty-storage rejoin",member=volume["controller"]["name"]+"-0",baseline=baseline)
-            for index,(helper,anchors,_)in enumerate(helpers):helpers[index]=(helper,anchors,helper.replace_dcs_member())
+            for index,(helper,anchors,_)in enumerate(helpers):
+                if target['name']in helper.storage['nodes'][:3]:record('DCS replacement intent',formation=helper.storage['formation'],mutation_intent=True)
+                helpers[index]=(helper,anchors,helper.replace_dcs_member())
+            record('fenced Kubernetes node removal intent',mutation_intent=True)
             c.kubectl("delete","node",target["name"],"--wait=true","--timeout=60s",timeout=70)
             for pod in pods:
                 if pod["metadata"]["namespace"]==ns:c.kubectl("delete","pod",pod["metadata"]["name"],"-n",ns,"--grace-period=0","--force","--ignore-not-found=true")
+            record('provider empty-disk replacement intent',mutation_intent=True)
             retained=c.replace_empty(target,run_id);record("provider retained old disks and prepared stopped empty VM",provider=retained)
             c.run(["ssh-keygen","-R",target["address"],"-f",c.private/"known_hosts"],check=False)
+            record('empty replacement boot intent',mutation_intent=True)
             c.vm_action(target,"start");c.wait_ssh(target)
             seed=next(n for n in inventory["nodes"]if n["role"]=="server"and n["name"]!=target["name"])
             token=c.ssh(seed,["sudo","-n","cat","/var/lib/rancher/k3s/server/token"]).stdout.decode().strip()
             require(token.startswith("K10")and"::"in token,"CA-pinned surviving join token required");c.redactions.append(token)
             version=inventory["k3s"]
             binary=c.fetch(version["binary_url"],version["binary_sha256"],"k3s");installer=c.fetch(version["installer_url"],version["installer_sha256"],"k3s-install.sh")
+            record('replacement Kubernetes join intent',seed=seed['name'],mutation_intent=True)
             c.install_node(target,binary,installer,token,False,join_server=seed["address"])
             marker=json.loads((c.state/"owner.json").read_text());marker["bootstrap_seed"]=seed["name"];write_json(c.state/"owner.json",marker)
             spec=importlib.util.spec_from_file_location("storage_setup",ROOT/"scripts/platform-storage.py");setup=importlib.util.module_from_spec(spec);spec.loader.exec_module(setup)
+            record('original volume preparation intent',mutation_intent=True)
             for helper,_,_ in helpers:setup.prepare_disks(c,helper.storage)
             spec=importlib.util.spec_from_file_location("service_setup",ROOT/"scripts/platform-deploy.py");services=importlib.util.module_from_spec(spec);spec.loader.exec_module(services)
             services.prepare_volumes(c,[Path(p)for p in prepared["volume_requirements"]])
@@ -101,11 +106,17 @@ def execute(inventory,prepared):
                 if volume["kind"]=="restore":
                     archive=Path(volume["archive"]);raw=archive.read_bytes()
                     require(len(raw)<=64<<20 and hashlib.sha256(raw).hexdigest()==volume["sha256"],"restore artifact changed since planning")
+                    record('source checkpoint restore intent',claim=volume['claim'],sha256=volume['sha256'],mutation_intent=True)
                     c.ssh(target,["sudo","-n","python3","-c",RESTORE,json.dumps({k:volume[k]for k in("path","uid","sha256")})],input=raw)
                 elif volume["kind"]=="observability":record("observability volume recreated with declared evidence gap",claim=volume["claim"])
-            for key,replicas in held.items():c.kubectl("scale",key,"-n",ns,"--replicas="+str(replicas))
+            record('original controller release intent',mutation_intent=True)
+            for key,identity in held.items():
+                set_controller_hold(c,ns,key,identity,restore=True)
+                record('original controller released',controller=key,uid=identity['uid'],replicas=identity['replicas'])
             for helper,_,learner in helpers:
-                if learner:wait(lambda h=helper,l=learner:h.etcd(l[0],"member","promote",format(l[1],"x")),"DCS learner catch-up deadline")
+                if learner:
+                    record('DCS learner promotion intent',formation=helper.storage['formation'],member_id=format(learner[1],'x'),mutation_intent=True)
+                    wait(lambda h=helper,l=learner:h.etcd(l[0],"member","promote",format(l[1],"x")),"DCS learner catch-up deadline")
                 anchors=helper.validate_survivors()
                 for group in helper.plan["groups"]:
                     def caught_up(h=helper,g=group):
@@ -134,12 +145,14 @@ def execute(inventory,prepared):
             # Do not boot quarantined old disks or release uncertain data behind
             # the operator's back. Keep original identities and all journals.
             raise
-        finally:write_json(output/"result.json",report)
+        finally:write_report(output/"result.json",report)
 
 def main():
     os.umask(0o077);p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action",choices=["plan","replace-node"]);p.add_argument("--inventory",type=Path,required=True);p.add_argument("--config",type=Path,required=True);p.add_argument("--node",required=True)
-    a=p.parse_args();inventory=load(a.inventory);prepared=load_plan(inventory,a.config,a.node)
+    p.add_argument("action",choices=["plan","replace-node","status"]);p.add_argument("--inventory",type=Path,required=True);p.add_argument("--config",type=Path);p.add_argument("--node",required=True);p.add_argument('--run')
+    a=p.parse_args();inventory=load(a.inventory)
+    if a.action=='status':print(json.dumps(read_report(inventory,a.run,a.node),indent=2));return
+    require(a.config,'plan/replacement requires --config');prepared=load_plan(inventory,a.config,a.node)
     if a.action=="plan":print(json.dumps(prepared,indent=2));return
     execute(inventory,prepared)
 
