@@ -6,7 +6,7 @@ RAM and disk capacity remain operator inputs. Do not use the former single-host
 
 `scripts/platform-release.py` assembles the canonical Citus formation, independent
 ingestion PostgreSQL formation, service catalog, owner processing, isolation and
-monitoring into one dependency-ordered bundle. It does not build images, start
+monitoring and four owned HA service databases into one dependency-ordered bundle. It does not build images, start
 VMs, rotate credentials, migrate databases or apply resources.
 
 Copy `release.example.json` into a private directory and provide its referenced
@@ -33,9 +33,13 @@ python3 scripts/platform-deploy.py plan --inventory /private/four-hosts.json \
   --bundle /private/releases/RUN/bundle.json
 ```
 
-The bundle handles canonical and ingestion ownership separately, records their
-Secret references and avoids duplicate Aggregator/Namespace resources. Missing
-owner-database artifacts, captured PostgreSQL identities, offline migration/
+The bundle handles all six database formations separately, records their
+Secret references and avoids duplicate Aggregator/Namespace resources. Service
+databases are rendered automatically when `owner_databases` is null; an explicit
+artifact path remains available for reviewed alternatives. See
+[owned service databases](../../docs/Platform-Owned-Service-Databases.md) for
+credentials, administrator initialization and their 8.5 GiB memory cost.
+Missing captured PostgreSQL identities, service schema initialization, migration/
 cutover, or capacity remain visible blockers. Complete those prerequisites before
 removing their corresponding unresolved entries. Review exact artifact hashes in
 the plan; application apply uses the validated bytes rather than rereading files.

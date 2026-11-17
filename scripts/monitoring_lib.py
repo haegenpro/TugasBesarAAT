@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 IMAGES = ("prometheus", "loki", "tempo", "grafana", "alloy", "nats-exporter", "node-exporter", "platform-metrics")
 
 
-def configs(inventory, storage):
+def configs(inventory, storage, additional_storages=()):
     ns = inventory["namespace"]
     relabel = [
         {"source_labels":["__meta_kubernetes_pod_annotation_prometheus_io_scrape"],"action":"keep","regex":"true"},
@@ -23,9 +23,9 @@ def configs(inventory, storage):
     for source, label in (("namespace","namespace"),("pod_name","pod"),("pod_node_name","node"),("pod_label_app_kubernetes_io_name","service"),("pod_label_role","role")):
         relabel.append({"source_labels":["__meta_kubernetes_"+source],"target_label":label})
     jobs = [{"job_name":"applications","kubernetes_sd_configs":[{"role":"pod","namespaces":{"names":[ns]}}],"relabel_configs":relabel}]
-    jobs.append({"job_name":"patroni","static_configs":[{"targets":[m["host"]+":8008"],"labels":{"node":m["node"],"group":str(g["id"]),"member":m["name"]}} for g in storage["groups"] for m in g["members"]]})
-    formation = storage["formation"]
-    jobs.append({"job_name":"storage-etcd","static_configs":[{"targets":[f"{formation}-etcd-{letter}-0.{formation}-etcd-members.{ns}.svc.cluster.local:2381"]} for letter in "abc"]})
+    formations=(storage,*additional_storages)
+    jobs.append({"job_name":"patroni","static_configs":[{"targets":[m["host"]+":8008"],"labels":{"formation":s["formation"],"node":m["node"],"group":str(g["id"]),"member":m["name"]}} for s in formations for g in s["groups"] for m in g["members"]]})
+    jobs.append({"job_name":"storage-etcd","static_configs":[{"targets":[f"{s['formation']}-etcd-{letter}-0.{s['formation']}-etcd-members.{ns}.svc.cluster.local:2381"],"labels":{"formation":s["formation"]}} for s in formations for letter in "abc"]})
     jobs.append({"job_name":"nodes","static_configs":[{"targets":[n["address"]+":9100"],"labels":{"node":n["name"]}} for n in inventory["nodes"]]})
     jobs.append({"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]})
     prom = {"global":{"scrape_interval":"15s","evaluation_interval":"15s"},"rule_files":["/etc/prometheus/alerts.json"],"scrape_configs":jobs}
@@ -92,8 +92,8 @@ loki.write "local" {
     return {"prometheus-config":{"prometheus.json":json.dumps(prom),"alerts.json":json.dumps(alerts)},"loki-config":{"config.json":json.dumps(loki)},"tempo-config":{"config.json":json.dumps(tempo)},"alloy-config":{"config.alloy":alloy},"grafana-datasources":{"sources.json":json.dumps(sources)},"grafana-providers":{"providers.json":json.dumps(provider)},"platform-dashboards":{"platform.json":json.dumps(dashboard),"application.json":(ROOT/"monitoring/templates/grafana/application.json").read_text()}}
 
 
-def render(inventory, storage, images):
-    require(storage["namespace"]==inventory["namespace"] and storage["cluster_id"]==inventory["cluster_id"],"storage plan belongs to another cluster")
+def render(inventory, storage, images, additional_storages=()):
+    require(all(s["namespace"]==inventory["namespace"] and s["cluster_id"]==inventory["cluster_id"]for s in(storage,*additional_storages)),"storage plan belongs to another cluster")
     for name in IMAGES:
         require(isinstance(images.get(name),str) and DIGEST.fullmatch(images[name]),"supply immutable image for "+name)
     definitions = [
@@ -123,7 +123,7 @@ def render(inventory, storage, images):
     ns=inventory["namespace"];items=resources["items"]
     def add(api,kind,name,**fields):
         items.append({"apiVersion":api,"kind":kind,"metadata":{"name":name,"namespace":ns},**fields})
-    for name,data in configs(inventory,storage).items():add("v1","ConfigMap",name,data=data)
+    for name,data in configs(inventory,storage,additional_storages).items():add("v1","ConfigMap",name,data=data)
     add("v1","ServiceAccount","platform-monitoring",automountServiceAccountToken=False)
     add("rbac.authorization.k8s.io/v1","Role","platform-monitoring",rules=[{"apiGroups":[""],"resources":["pods","services","endpoints"],"verbs":["get","list","watch"]},{"apiGroups":[""],"resources":["pods/log"],"verbs":["get"]},{"apiGroups":["metrics.k8s.io"],"resources":["pods"],"verbs":["get","list"]}])
     add("rbac.authorization.k8s.io/v1","RoleBinding","platform-monitoring",roleRef={"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":"platform-monitoring"},subjects=[{"kind":"ServiceAccount","name":"platform-monitoring","namespace":ns}])

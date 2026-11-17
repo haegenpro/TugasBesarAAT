@@ -23,7 +23,7 @@ explicit recovery strategy; an unknown live claim or hostPath stops execution.
 
 | Data | Recovery path |
 | --- | --- |
-| Canonical/ingestion PostgreSQL | Verify two surviving original copies, replace lost DCS member as learner, rebuild original empty member, check system identity/replayed WAL/primary timeline |
+| Canonical, ingestion and all four service PostgreSQL formations | Verify two surviving original copies, replace lost DCS member as learner, rebuild original empty member, check system identity/replayed WAL/primary timeline |
 | Broker | Verify two current original copies for every declared stream, peer-remove the fenced server, rejoin with empty storage, verify all three stream peers current and no sequence regression |
 | Single-copy source/sensor state | Require an owner-produced consistent backup tar, its exact claim identity and SHA-256; refuse missing, oversized or unsafe restores |
 | Monitoring local data | Explicit `observability` policy recreates it and records an evidence gap; it does not pretend retained logs/traces survived |

@@ -3,11 +3,12 @@ import json
 from pathlib import Path
 
 from bundle_lib import inspect
+from database_lib import render as render_databases
 from isolation_lib import render as render_isolation
 from monitoring_lib import render as render_monitoring
 from role1_integration_lib import render as render_role1
 from service_lib import render as render_services
-from storage_lib import durability_config,manifests,plan,require,write_json
+from storage_lib import SERVICE_DATABASES,durability_config,manifests,plan,require,write_json
 
 ROOT=Path(__file__).resolve().parent.parent
 
@@ -41,7 +42,6 @@ def assemble(inventory,config_path,output):
     service_resources,service_requirements=render_services(inventory,catalog,images)
     canonical=plan(inventory,"citus",images["storage"])
     ingestion=plan(inventory,"postgres",images["storage"],"ingestion")
-    monitoring,monitor_requirements=render_monitoring(inventory,canonical,images)
     flows=read("external_flows")if config.get("external_flows")else []
     require(any(f.get("app")=="ingestion"and 443 in f.get("ports",[])for f in flows),"declare bounded satellite HTTPS egress before deployment")
     stages=[];artifacts={};namespace_written=False
@@ -59,11 +59,15 @@ def assemble(inventory,config_path,output):
     add("ingestion-storage",manifests(ingestion),["canonical-storage"])
     add("isolation",render_isolation(inventory,flows),["ingestion-storage"])
     blockers=list(config.get("unresolved",[]))
+    owner_database_report=None
     if config.get("owner_databases"):
         add("owner-databases",read("owner_databases"),["isolation"])
     else:
-        stages.append({"id":"owner-databases","manifest":"artifacts/owner-databases.json","requires":["isolation"],"wait":[]})
-        blockers.append("Provide owned registry/auth/dashboard/notifier database HA/schema resources")
+        owner_resources,owner_database_report=render_databases(inventory,images["storage"])
+        add("owner-databases",owner_resources,["isolation"])
+        blockers.append("Initialize owned service database schemas with owning applications stopped, including the pinned registry bootstrap")
+    monitored_owners=owner_database_report["formations"]if owner_database_report else []
+    monitoring,monitor_requirements=render_monitoring(inventory,canonical,images,[ingestion,*monitored_owners])
     add("services",service_resources,["owner-databases"],[{"kind":"Job","name":"broker-init"}])
     add("processing",application,["services"],[{"kind":"Deployment","name":inventory["cluster_id"]+"-aggregator"}])
     add("monitoring",monitoring,["processing"])
@@ -87,7 +91,10 @@ def assemble(inventory,config_path,output):
     for stage,resource in artifacts.items():write_json(output/"artifacts"/(stage+".json"),resource)
     write_json(output/"canonical-plan.json",canonical);write_json(output/"ingestion-plan.json",ingestion)
     write_json(output/"service-requirements.json",service_requirements);write_json(output/"monitoring-requirements.json",monitor_requirements)
-    bundle={"version":1,"node_reserve_mib":config.get("node_reserve_mib",512),"stages":stages,"unresolved":blockers}
+    if owner_database_report:
+        write_json(output/"database-requirements.json",owner_database_report)
+        for storage in owner_database_report["formations"]:write_json(output/(storage["formation_suffix"]+"-plan.json"),storage)
+    bundle={"version":1,"formations":[inventory["cluster_id"]+"-"+suffix for suffix in("storage","ingestion",*SERVICE_DATABASES)],"node_reserve_mib":config.get("node_reserve_mib",512),"stages":stages,"unresolved":blockers}
     write_json(output/"bundle.json",bundle)
     report,_=inspect(output/"bundle.json",inventory)
     write_json(output/"plan.json",report)

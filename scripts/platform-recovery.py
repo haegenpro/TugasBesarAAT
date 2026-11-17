@@ -66,7 +66,7 @@ class Recovery:
         print(phase,flush=True)
     def sql(self,member,query):
         result=self.cluster.kubectl("exec","-n",self.storage["namespace"],member["name"],"-c","postgres","--",
-            "psql","-U","postgres","-d","hazards","-Atc",query,timeout=12)
+            "psql","-U","postgres","-d",self.storage.get("database","hazards"),"-Atc",query,timeout=12)
         return json.loads(result.stdout)
     def member_status(self,member):return self.sql(member,"SELECT public.platform_replication_status()")
     def validate_survivors(self):

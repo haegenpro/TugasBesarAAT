@@ -99,6 +99,9 @@ def render(inventory,catalog,images):
             "securityContext":{"allowPrivilegeEscalation":False,"readOnlyRootFilesystem":s.get("read_only_root",True),"capabilities":{"drop":["ALL"]}},
             "volumeMounts":[{"name":"tmp","mountPath":"/tmp"}]}
         if s.get("secret"):container["envFrom"]=[{"secretRef":{"name":s["secret"]}}]
+        for key in s.get("required_secret_keys",[]):
+            require(s.get("secret")and key not in s.get("environment",{}),"required Secret key cannot be shadowed by public environment")
+            container["env"].append({"name":key,"valueFrom":{"secretKeyRef":{"name":s["secret"],"key":key}}})
         if s.get("command"):container["command"]=s["command"]
         for target,field in (("ready","readinessProbe"),("live","livenessProbe")):
             if s.get(target):container[field]={"httpGet":s[target],"periodSeconds":5,"timeoutSeconds":2,"failureThreshold":3}

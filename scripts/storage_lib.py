@@ -6,6 +6,7 @@ import re
 
 ETCD_IMAGE = "gcr.io/etcd-development/etcd@sha256:159cf260a40becd61d289ef582fe9339a53c7d1bd22d7cffebd213e095625183"
 PROXY_IMAGE = "haproxy@sha256:1c3568e520453cc8ba98c39501febcf450429c80e6cc27ecad779961d76e597c"
+SERVICE_DATABASES={"auth-db":("auth","auth_app"),"registry-db":("registry","registry_app"),"dashboard-db":("dashboard","dashboard_app"),"notifier-db":("notifier","notifier_app")}
 
 
 def require(value, message):
@@ -14,12 +15,15 @@ def require(value, message):
 
 
 def plan(inventory, mode, image, formation_suffix="storage"):
-    require(formation_suffix in ("storage", "ingestion"), "supported formation is storage or ingestion")
-    require(formation_suffix != "ingestion" or mode == "postgres", "ingestion has its own PostgreSQL group")
+    require(formation_suffix in ("storage", "ingestion",*SERVICE_DATABASES), "unknown owned storage formation")
+    require(formation_suffix == "storage" or mode == "postgres", "owned service databases require PostgreSQL mode")
     require(mode in ("postgres", "citus"), "mode must be postgres or citus")
     require(re.fullmatch(r"[a-z0-9./:_-]+@sha256:[0-9a-f]{64}", image), "supply the built Patroni image by immutable digest")
     nodes = [n["name"] for n in inventory["nodes"]]
     placement = {0: [0, 1, 2]}
+    if formation_suffix in SERVICE_DATABASES:
+        excluded={"auth-db":0,"registry-db":1,"dashboard-db":2,"notifier-db":3}[formation_suffix]
+        placement={0:[i for i in range(4)if i!=excluded]}
     if mode == "citus":
         placement.update({1: [1, 2, 3], 2: [0, 2, 3], 3: [0, 1, 3], 4: [0, 1, 2]})
     formation = inventory["cluster_id"] + "-" + formation_suffix
@@ -32,7 +36,7 @@ def plan(inventory, mode, image, formation_suffix="storage"):
             name = workload + "-0"
             members.append({"name": name, "workload": workload, "node": nodes[i],
                             "host": f"{name}.{formation}-members.{namespace}.svc.cluster.local", "port": 5432})
-        prefix = "INGESTION_GROUP" if formation_suffix == "ingestion" else "STORAGE_GROUP"
+        prefix = "INGESTION_GROUP" if formation_suffix == "ingestion" else formation_suffix.upper().replace("-","_")+"_GROUP"if formation_suffix in SERVICE_DATABASES else "STORAGE_GROUP"
         groups.append({"id": group, "system_id": "RECORD_AFTER_BOOTSTRAP", "dsn_env": f"{prefix}_{group}_URL", "members": members})
     per_node = {node: 0 for node in nodes}
     for group in groups:
@@ -40,7 +44,7 @@ def plan(inventory, mode, image, formation_suffix="storage"):
             per_node[member["node"]] += 512
     for node in nodes[:3]:
         per_node[node] += 128  # etcd
-    return {**({"formation_suffix": formation_suffix} if formation_suffix != "storage" else {}), "version": 1, "formation": formation, "namespace": namespace,
+    return {**({"formation_suffix": formation_suffix} if formation_suffix != "storage" else {}),**({"database":SERVICE_DATABASES[formation_suffix][0],"runtime_role":SERVICE_DATABASES[formation_suffix][1]}if formation_suffix in SERVICE_DATABASES else{}), "version": 1, "formation": formation, "namespace": namespace,
             "mode": mode, "image": image, "groups": groups,
             "nodes": nodes, "pod_cidr": inventory["pod_cidr"], "cluster_id": inventory["cluster_id"],
             "requests_mib_before_routers": per_node, "router_requests_mib": 256,
@@ -128,8 +132,9 @@ def manifests(storage):
             name, workload, node = member["name"], member["workload"], member["node"]
             persistent(workload, node, "1Gi")
             labels = {**owner, "role": "store", "component": "storage-postgres", "member": name, "storage-group": str(group["id"])}
+            if storage.get("formation_suffix")in SERVICE_DATABASES:labels["app.kubernetes.io/name"]=storage["formation_suffix"]
             values = {"FORMATION": formation, "STORAGE_MODE": storage["mode"], "GROUP_ID": str(group["id"]),
-                      "MEMBER_SERVICE": formation + "-members", "POSTGRES_DB": "hazards", "POD_CIDR": storage["pod_cidr"],
+                      "MEMBER_SERVICE": formation + "-members", "POSTGRES_DB": storage.get("database","hazards"), "APP_USER":storage.get("runtime_role","aggregator_app"),"POD_CIDR": storage["pod_cidr"],
                       "ETCD_ENDPOINTS": ",".join(h + ":2379" for h in etcd_hosts)}
             env = [{"name": k, "value": v} for k, v in values.items()]
             env += [{"name": k, "valueFrom": {"fieldRef": {"fieldPath": v}}} for k, v in
@@ -158,6 +163,7 @@ def manifests(storage):
         service(f"{formation}-g{group['id']}-primary", {**owner, "component": "storage-router"}, [("postgres", 5432, port)])
     obj("ConfigMap", formation + "-router", data={"haproxy.cfg": "\n".join(proxy) + "\n"})
     router_labels = {**owner, "role": "other", "component": "storage-router"}
+    if storage.get("formation_suffix")in SERVICE_DATABASES:router_labels["app.kubernetes.io/name"]=storage["formation_suffix"]
     obj("Deployment", formation + "-router", {"replicas": 2, "selector": {"matchLabels": {**owner, "component": "storage-router"}},
         "template": {"metadata": {"labels": router_labels}, "spec": {"automountServiceAccountToken": False,
             "affinity": {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [{

@@ -52,7 +52,10 @@ def apply(cluster,report,snapshots):
         # requires observation and is covered by the offline node reserve too.
         for c in pod["spec"].get("containers",[]):existing+=memory_mib(c.get("resources",{}).get("requests",{}).get("memory","0"))
     require(report["memory_requests_mib"]+existing<=available,"live allocatable memory is insufficient")
-    for secret in report["required_existing_secrets"]:cluster.kubectl("get","secret",secret,"-n",ns,"-o","name")
+    for secret in report["required_existing_secrets"]:
+        # Return key names only; credential values never enter command output.
+        keys=cluster.kubectl("get","secret",secret,"-n",ns,"-o","go-template={{range $key, $value := .data}}{{$key}}{{\"\\n\"}}{{end}}").stdout.decode().splitlines()
+        require(set(report.get("required_existing_secret_keys",{}).get(secret,[]))<=set(keys),"required Secret keys missing from "+secret)
     for stage in report["stages"]:
         # Use the exact bytes reviewed by the planner, avoiding a file change
         # between validation and apply. Do not print manifest bodies or secrets.

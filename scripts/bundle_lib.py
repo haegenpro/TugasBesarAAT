@@ -40,7 +40,7 @@ def inspect(bundle_path,inventory):
     formations=set(bundle.get("formations",[inventory["cluster_id"]+"-storage",inventory["cluster_id"]+"-ingestion"]))
     require(formations and all(isinstance(f,str) and re.fullmatch(re.escape(inventory["cluster_id"])+r"-[a-z0-9-]+",f)for f in formations),"declare only this cluster's storage formations")
     blocked=[];objects=[];seen=set();snapshots={};planned=[]
-    total=0;fixed={n["name"]:0 for n in inventory["nodes"]};external=set();supplied=set();apps=set()
+    total=0;fixed={n["name"]:0 for n in inventory["nodes"]};external=set();supplied=set();apps=set();secret_keys={}
     for stage in ordered:
         require(isinstance(stage.get("manifest"),str),"stage manifest path required")
         artifact=(path.parent/stage["manifest"]).resolve()
@@ -74,7 +74,9 @@ def inspect(bundle_path,inventory):
                 require(memory_mib(container["resources"]["requests"]["memory"])==request and memory_mib(container["resources"]["limits"]["memory"])==limit,"memory budget mismatch on "+name)
                 for env in container.get("env",[]):
                     secret=env.get("valueFrom",{}).get("secretKeyRef")
-                    if secret:external.add(secret["name"])
+                    if secret:
+                        external.add(secret["name"])
+                        secret_keys.setdefault(secret["name"],set()).add(secret["key"])
                 for source in container.get("envFrom",[]):
                     if "secretRef"in source:external.add(source["secretRef"]["name"])
             for volume in pod.get("volumes",[]):
@@ -94,4 +96,4 @@ def inspect(bundle_path,inventory):
     hosts={h["id"]:{"guest_memory_mib":sum(n["memory_mib"]for n in inventory["nodes"]if n["physical_host"]==h["id"]),
            "fixed_requests_mib":sum(fixed[n["name"]]for n in inventory["nodes"]if n["physical_host"]==h["id"]),
            "host_reserve_mib":h["reserve_mib"]}for h in inventory.get("hosts",[])}
-    return {"version":1,"ready_for_apply":not blocked,"blocked":blocked,"stages":planned,"workloads":objects,"memory_requests_mib":total,"estimated_available_mib":available,"fixed_requests_mib":fixed,"physical_hosts":hosts,"formations":sorted(formations),"required_existing_secrets":sorted(external-supplied),"apps":sorted(apps),"note":"Offline lower-bound capacity estimate. Live resources, CPU/disk, scheduling, rollout surge and failover headroom still need verification."},snapshots
+    return {"version":1,"ready_for_apply":not blocked,"blocked":blocked,"stages":planned,"workloads":objects,"memory_requests_mib":total,"estimated_available_mib":available,"fixed_requests_mib":fixed,"physical_hosts":hosts,"formations":sorted(formations),"required_existing_secrets":sorted(external-supplied),"required_existing_secret_keys":{name:sorted(keys)for name,keys in sorted(secret_keys.items())if name not in supplied},"apps":sorted(apps),"note":"Offline lower-bound capacity estimate. Live resources, CPU/disk, scheduling, rollout surge and failover headroom still need verification."},snapshots

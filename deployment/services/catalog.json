@@ -94,7 +94,11 @@
       "environment": {
         "QUARKUS_HTTP_PORT": "8080",
         "QUARKUS_MANAGEMENT_PORT": "9000",
-        "APICURIO_DATASOURCE_URL": "jdbc:postgresql://registry-db:5432/registry"
+        "APICURIO_DATASOURCE_URL": "jdbc:postgresql://registry-db:5432/registry",
+        "APICURIO_STORAGE_KIND": "sql",
+        "APICURIO_STORAGE_SQL_KIND": "postgresql",
+        "APICURIO_SQL_INIT": "false",
+        "REGISTRY_RETRY_DELAY_SEC": "5"
       },
       "ready": {
         "path": "/health/ready",
@@ -107,6 +111,10 @@
       "read_only_root": false,
       "dependencies": [
         "registry-db"
+      ],
+      "required_secret_keys": [
+        "APICURIO_DATASOURCE_USERNAME",
+        "APICURIO_DATASOURCE_PASSWORD"
       ]
     },
     {
@@ -202,7 +210,11 @@
       "dependencies": [
         "auth-db"
       ],
-      "metrics_port": 8083
+      "metrics_port": 8083,
+      "required_secret_keys": [
+        "DATABASE_URL",
+        "AUTH_INTERNAL_KEY"
+      ]
     },
     {
       "name": "client-api",
@@ -239,7 +251,12 @@
         "auth-service",
         "aggregator"
       ],
-      "metrics_port": 8080
+      "metrics_port": 8080,
+      "required_secret_keys": [
+        "AUTH_INTERNAL_KEY",
+        "ANALYTICS_SERVICE_TOKEN",
+        "FIELD_REPORT_SERVICE_TOKEN"
+      ]
     },
     {
       "name": "consumer-dashboard",
@@ -270,7 +287,10 @@
         "broker-init",
         "schema-registry"
       ],
-      "metrics_port": 8091
+      "metrics_port": 8091,
+      "required_secret_keys": [
+        "DATABASE_URL"
+      ]
     },
     {
       "name": "consumer-notifier",
@@ -306,7 +326,11 @@
         "broker-init",
         "schema-registry"
       ],
-      "metrics_port": 8092
+      "metrics_port": 8092,
+      "required_secret_keys": [
+        "DATABASE_URL",
+        "COASTAL_SLO_TOKEN"
+      ]
     },
     {
       "name": "sensor-pantai",

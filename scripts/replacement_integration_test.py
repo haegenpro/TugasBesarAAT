@@ -12,7 +12,7 @@ from platform_lib.host_agent import HostAgent
 from platform_lib.inventory import load,resource_uuid
 from replacement_lib import load_plan,validate_archive
 from service_lib import render as services
-from storage_lib import plan,manifests,durability_config
+from storage_lib import SERVICE_DATABASES,plan,manifests,durability_config
 
 ROOT=Path(__file__).resolve().parent.parent
 
@@ -25,7 +25,7 @@ class ReplacementIntegrationChecks(unittest.TestCase):
     def test_all_formations_are_included_and_unbacked_source_state_blocks(self):
         with tempfile.TemporaryDirectory()as folder:
             root=Path(folder);items=[];formation_inputs=[]
-            for ordinal,suffix in enumerate(("storage","ingestion")):
+            for ordinal,suffix in enumerate(("storage","ingestion",*SERVICE_DATABASES)):
                 storage=plan(self.inventory,"citus"if suffix=="storage"else"postgres",self.image,suffix)
                 config=durability_config(storage)
                 for i,group in enumerate(config["groups"]):group["system_id"]=str(1000+ordinal*10+i)
@@ -36,11 +36,11 @@ class ReplacementIntegrationChecks(unittest.TestCase):
             resource,requirements=services(self.inventory,catalog,images);items+=resource["items"]
             (root/"services-requirements.json").write_text(json.dumps(requirements))
             (root/"resources.json").write_text(json.dumps({"kind":"List","items":items}))
-            (root/"bundle.json").write_text(json.dumps({"version":1,"node_reserve_mib":512,"stages":[{"id":"all","manifest":"resources.json"}]}))
+            (root/"bundle.json").write_text(json.dumps({"version":1,"formations":[self.inventory["cluster_id"]+"-"+s for s in("storage","ingestion",*SERVICE_DATABASES)],"node_reserve_mib":512,"stages":[{"id":"all","manifest":"resources.json"}]}))
             (root/"replacement.json").write_text(json.dumps({"version":1,"bundle":"bundle.json","formations":formation_inputs,"volume_requirements":["services-requirements.json"],"volume_policy":{}}))
             value=load_plan(self.inventory,root/"replacement.json",self.inventory["nodes"][0]["name"])
             self.assertFalse(value["ready"])
-            self.assertEqual(len(value["formations"]),2)
+            self.assertEqual(len(value["formations"]),6)
             self.assertTrue(any("bmkg"in problem for problem in value["blocked"]))
             self.assertTrue(any(v["kind"]=="postgres"and "ingestion"in v["claim"]for v in value["volumes"]))
 

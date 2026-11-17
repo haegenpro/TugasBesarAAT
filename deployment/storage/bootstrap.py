@@ -12,6 +12,7 @@ def main():
     # Patroni supplies a superuser URL and PGPASSFILE. Never print either.
     connection = parse_dsn(sys.argv[1])
     database = os.environ["POSTGRES_DB"]
+    role=os.environ.get("APP_USER","aggregator_app")
     initial = psycopg2.connect(**connection)
     try:
         initial.autocommit = True
@@ -19,9 +20,9 @@ def main():
             cursor.execute("SELECT 1 FROM pg_database WHERE datname=%s", (database,))
             if cursor.fetchone() is None:
                 cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
-            cursor.execute("SELECT 1 FROM pg_roles WHERE rolname='aggregator_app'")
+            cursor.execute("SELECT 1 FROM pg_roles WHERE rolname=%s",(role,))
             if cursor.fetchone() is None:
-                cursor.execute("CREATE ROLE aggregator_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %s",
+                cursor.execute(sql.SQL("CREATE ROLE {} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD %s").format(sql.Identifier(role)),
                                (os.environ["APP_PASSWORD"],))
     finally:
         initial.close()
@@ -35,9 +36,11 @@ def main():
             cursor.execute("SELECT formation,group_id FROM public.platform_storage_identity WHERE singleton")
             if cursor.fetchone() != (formation, group):
                 raise RuntimeError("existing physical storage identity does not match formation/group")
-            cursor.execute("GRANT CONNECT ON DATABASE {} TO aggregator_app".format(sql.Identifier(database).as_string(target)))
-            cursor.execute("GRANT USAGE ON SCHEMA public TO aggregator_app")
-            cursor.execute("GRANT EXECUTE ON FUNCTION public.platform_replication_status() TO aggregator_app")
+            cursor.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(database)))
+            cursor.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+            cursor.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(sql.Identifier(database),sql.Identifier(role)))
+            cursor.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(role)))
+            cursor.execute(sql.SQL("GRANT EXECUTE ON FUNCTION public.platform_replication_status() TO {}").format(sql.Identifier(role)))
     # Application DDL/migrations are a separate offline administrator operation.
 
 
