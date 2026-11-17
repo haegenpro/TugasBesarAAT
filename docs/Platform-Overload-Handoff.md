@@ -37,3 +37,10 @@ Critical coastal delivery must retain its own bounded workers, broker capacity
 and recipient acknowledgements independent of the canonical audit gate.
 Per-source faulty-sensor isolation and critical-operation delivery remain the
 ingestion owner's integration, not effects of this HTTP admission policy.
+
+Focused HTTP integration now verifies the actual Client API router against a
+local Auth test server and a saturated general-read upstream: Media gets 429,
+spoofed role headers do not claim the reserve, verified field reads continue,
+and released slots are reusable. This supplements the middleware/per-client
+regressions; shared Auth/database saturation and the real four-node load scenario
+remain the explicit limits above.
