@@ -51,15 +51,15 @@ Ringkasan AI hanya alat bantu baca dan bukan peringatan resmi. Data otoritatif t
 
 ## Model
 
-Default-nya memakai model gratis OpenRouter:
+Default-nya memakai satu model gratis OpenRouter tanpa cadangan:
 
-| Peran | Model | Alasan |
+| | Model | Alasan |
 |---|---|---|
-| Utama | `nvidia/nemotron-3.5-super-vl:free` | Mematuhi batas token reasoning, mendukung structured output, dan menjawab data 2 jam penuh dalam 10–25 detik. |
-| Cadangan 1 | `baidu/ernie-5.5-flash-preview:free` | Mendukung structured output, tetapi reasoning-nya wajib dan panjangnya tidak stabil sehingga hanya dipakai sebagai cadangan. |
-| Cadangan 2 | `google/gemma-4-31b-it:free` | Bahasa Indonesianya baik, tetapi sering terkena rate limit dari penyedia. |
+| Model | `nvidia/nemotron-3.5-super-vl:free` | Mematuhi batas token reasoning, mendukung structured output, dan menjawab data 2 jam penuh dalam 5–25 detik. |
 
-Setiap panggilan dibatasi `LLM_MAX_TOKENS` (default 16.000) dengan reasoning paling banyak `LLM_REASONING_TOKENS` (default 2.048), supaya model tidak menghabiskan seluruh jatah untuk berpikir sebelum menulis jawaban. Batas atasnya 32.000 karena output Gemma maksimal 32.768 token. Jawaban normal hanya memakai 2.000–3.500 token. Cadangan dikirim lewat field `models`, sehingga OpenRouter otomatis berpindah model bila model utama sedang penuh. Model gratis bisa terkena rate limit atau dihapus sewaktu-waktu. Untuk mengganti model, ubah `SUMMARY_MODEL` atau `SUMMARY_FALLBACK_MODELS` tanpa mengubah kode.
+Model lain yang sudah dicoba tidak dipakai. `baidu/ernie-5.5-flash-preview:free` mewajibkan reasoning dan mengabaikan batasnya, sehingga sering kehabisan token sebelum menulis jawaban. `google/gemma-4-31b-it:free` sering terkena rate limit dari penyedia.
+
+Setiap panggilan dibatasi `LLM_MAX_TOKENS` (default 131.072, batas output Nemotron) dengan reasoning paling banyak `LLM_REASONING_TOKENS` (default 2.048), supaya model tidak menghabiskan seluruh jatah untuk berpikir sebelum menulis jawaban. Jawaban normal hanya memakai 2.000–3.500 token; jawaban yang terlalu panjang tetap dipotong oleh `SUMMARY_LLM_TIMEOUT` dan `CHAT_TIMEOUT`. Bila Nemotron sedang penuh atau mati, ringkasan lama tetap dipakai dan chat menjawab `503`, sementara jalur peringatan tidak terpengaruh. `SUMMARY_FALLBACK_MODELS` tetap bisa diisi bila kelak ingin memakai cadangan. Model gratis bisa terkena rate limit atau dihapus sewaktu-waktu. Untuk mengganti model, ubah `SUMMARY_MODEL` atau `SUMMARY_FALLBACK_MODELS` tanpa mengubah kode.
 
 ## Konfigurasi
 
@@ -71,7 +71,7 @@ Salin `.env.example` ke `.env`, lalu isi `OPENROUTER_API_KEY`. File `.env` sudah
 | `AGGREGATOR_BASE_URL` | wajib | URL internal Aggregator. |
 | `OPENROUTER_API_KEY` | wajib | API key OpenRouter. |
 | `SUMMARY_MODEL` | wajib | Model utama. |
-| `SUMMARY_FALLBACK_MODELS` | kosong | Daftar model cadangan, dipisah koma. |
+| `SUMMARY_FALLBACK_MODELS` | kosong | Opsional, daftar model cadangan dipisah koma. |
 | `SUMMARY_WINDOW` | `2h` | Rentang data yang diringkas. |
 | `SUMMARY_CHECK_INTERVAL` | `1m` | Interval pengambilan snapshot. |
 | `SUMMARY_REFRESH_INTERVAL` | `30m` | Jeda pembaruan untuk perubahan biasa. |
@@ -80,7 +80,7 @@ Salin `.env.example` ke `.env`, lalu isi `OPENROUTER_API_KEY`. File `.env` sudah
 | `SUMMARY_LLM_TIMEOUT` | `60s` | Batas waktu satu panggilan LLM untuk ringkasan. |
 | `SUMMARY_MAX_CALLS_PER_DAY` | `45` | Batas panggilan per hari (UTC). |
 | `SUMMARY_MAX_HIGHLIGHTS` | `8` | Jumlah maksimum sorotan kejadian. |
-| `LLM_MAX_TOKENS` | `16000` | Batas token output per panggilan (reasoning + jawaban), 2000–32000. |
+| `LLM_MAX_TOKENS` | `131072` | Batas token output per panggilan (reasoning + jawaban), 2000–131072. |
 | `LLM_REASONING_TOKENS` | `2048` | Batas token reasoning, paling banyak setengah `LLM_MAX_TOKENS`. |
 | `CHAT_TIMEOUT` | `60s` | Batas waktu satu jawaban chat. Harus di bawah 75 detik, batas tunggu client-api. |
 | `CHAT_MAX_CALLS_PER_DAY` | `150` | Kuota chat per hari (UTC). `0` mematikan chat. |
