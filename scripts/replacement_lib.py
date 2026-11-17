@@ -73,14 +73,16 @@ def validate_archive(path):
     # Deliberately accept bounded uncompressed tar only; a compressed bomb or
     # symlink must be rejected before fencing/replacing a physical member.
     require(path.stat().st_size<=64<<20,"restore tar exceeds 64 MiB bound")
-    count=0;size=0;names=set()
+    count=0;size=0;names={}
     with tarfile.open(path,mode="r:")as archive:
         for item in archive:
             count+=1;size+=item.size
             name=Path(item.name)
             require(count<=10000 and size<=64<<20,"restore archive quota exceeded")
-            require(not name.is_absolute() and ".."not in name.parts and "\\"not in item.name and (item.isdir()or item.isfile()),"unsafe restore archive entry")
-            require(item.name not in names,"duplicate restore archive entry");names.add(item.name)
+            require(not name.is_absolute() and name.as_posix()not in('','.','/') and ".."not in name.parts and "\\"not in item.name and (item.isdir()or item.isfile()),"unsafe restore archive entry")
+            require(name.as_posix()not in names,"duplicate restore archive entry");names[name.as_posix()]=item.isdir()
+        for value in names:
+            require(all(parent.as_posix()not in names or names[parent.as_posix()]for parent in Path(value).parents),'archive file shadows a parent directory')
 
 def recovery_module():
     spec=importlib.util.spec_from_file_location("canonical_recovery",ROOT/"scripts/platform-recovery.py")
@@ -164,34 +166,4 @@ def load_plan(inventory,path,node_name):
     require(storage_claims<={v["claim"]for v in volumes},"bundle omits original storage replicas")
     return {"version":1,"target":target,"ready":not blockers,"blocked":blockers,"formations":formations,"volumes":volumes,"volume_requirements":[str(base/p)for p in config.get("volume_requirements",[])],"namespace":inventory["namespace"],"scope":"Fenced empty-VM recovery; no accepted-data or restore success is inferred from a healthy pod"}
 
-RESTORE=r'''
-import hashlib,io,json,os,pathlib,sys,tarfile
-p=json.loads(sys.argv[1]);root=pathlib.Path(p['path'])
-if root.is_symlink() or not root.is_dir() or root.stat().st_uid!=p['uid'] or any(root.iterdir()):raise RuntimeError('restore requires empty owned volume')
-raw=sys.stdin.buffer.read((64<<20)+1)
-if len(raw)>64<<20 or hashlib.sha256(raw).hexdigest()!=p['sha256']:raise RuntimeError('restore artifact mismatch')
-with tarfile.open(fileobj=io.BytesIO(raw),mode='r:')as archive:
-    entries=[];total=0
-    for entry in archive:
-        total+=entry.size
-        if len(entries)>=10000 or total>64<<20:raise RuntimeError('restore quota exceeded')
-        entries.append(entry)
-        name=pathlib.PurePosixPath(entry.name)
-        if name.is_absolute() or '..'in name.parts or '\\'in entry.name or not(entry.isdir()or entry.isfile()):raise RuntimeError('unsafe archive entry')
-        target=root.joinpath(*name.parts)
-        if not target.resolve().is_relative_to(root.resolve()):raise RuntimeError('restore escapes volume')
-    for entry in entries:
-        target=root.joinpath(*pathlib.PurePosixPath(entry.name).parts)
-        if entry.isdir():target.mkdir(parents=True,exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True,exist_ok=True)
-            with archive.extractfile(entry)as source,target.open('xb')as destination:
-                while True:
-                    block=source.read(65536)
-                    if not block:break
-                    destination.write(block)
-        os.chown(target,p['uid'],p['uid'])
-        os.chmod(target,0o700 if entry.isdir()else 0o600)
-    for directory in root.rglob('*'):
-        if directory.is_dir():os.chown(directory,p['uid'],p['uid']);os.chmod(directory,0o700)
-'''
+RESTORE=(ROOT/'deployment/platform/restore_source.py').read_text()

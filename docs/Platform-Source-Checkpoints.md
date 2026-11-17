@@ -58,6 +58,16 @@ archive to its original deployment, node, volume and owning service; mismatches
 are refused during planning. Owner-produced consistent archives without this
 platform receipt remain supported by the original restore interface.
 
+Restore now builds a verified private staging tree next to the empty volume and
+atomically swaps the completed directory into place. Its file/directory fsyncs,
+exclusive guest lock and hash-bound intent allow retry after a partial copy or
+lost completion reply. A retry verifies already committed bytes; it never
+overwrites a nonempty changed volume. Unknown staging files, links, inconsistent
+intents and unsafe archive paths stop recovery. Archives contain relative file
+paths without a `.` root entry. The same archive checks run before replacement.
+Focused filesystem fault checks cover a lost reply immediately after directory
+commit, partial staging, preserved changed data and unknown-stage refusal.
+
 A checkpoint preserves state **only through its capture time**. If a source
 restarts and writes more data, that older checkpoint does not protect the new
 state. This command is not continuous replication, a live source HA solution,
