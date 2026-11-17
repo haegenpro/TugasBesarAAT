@@ -8,7 +8,10 @@ Executed checks for the first handoff are recorded in the
 [local validation report](Platform-Coordination-Validation.md), including a real
 PostgreSQL race run. The [current integration handoff](Platform-Integration-Handoff.md)
 adds local Citus, source-checkpoint, broker disk-rebuild and controller-guard
-checks. Full four-physical-host deployment/HA scenarios below remain pending.
+checks, guarded recovery resume, reserved Auth/Field read pools, private release
+configuration and ingestion bootstrap migration checks. The complete offline
+Python suite now passes 104 checks. Full four-physical-host deployment/HA
+scenarios below remain pending.
 
 ## Evidence rules
 
@@ -44,7 +47,7 @@ report-ready summaries. Preserve failure counterexamples as failures.
 | VM freeze and resume | stale instance cannot write until authority refreshed; bounded cleanup | All owners | Pending |
 | Acknowledged-write durability | primary/disk loss, all surviving required WAL/decision state, checksum reconciliation | Storage + Platform | Pending |
 | Canonical progress after node loss | safe promotion/routing and commits on two copies before rebuilding | Storage + Platform | Pending |
-| Replacement node | join empty local disk, online rebuilding, restored three-copy placement; no full dataset on one node | Storage + Platform | [Integrated replacement implemented](Platform-Integrated-Node-Replacement.md), including source checkpoints and UID-guarded holds; physical execution and logical reconciliation pending |
+| Replacement node | join empty local disk, online rebuilding, restored three-copy placement; no full dataset on one node | Storage + Platform | [Integrated replacement implemented](Platform-Integrated-Node-Replacement.md), including atomic checkpoints and durable phase resume; local interruption checks pass, physical execution/reconciliation pending |
 | Snapshot ownership/expiry | capture crash/freeze, bounded writer pause, stale cleanup cannot release a successor gate or publish expired capture | Storage + Platform | [Platform gate/expiry/hooks drafted](Platform-Processor-and-Audit-Handoff.md); storage pin/copy/completeness integration and execution pending |
 | Partial read/analytics | bounded responses, truthful missing units and checksum scope during storage loss | Storage | Pending |
 | Service storage isolation | forbidden direct database/network connections fail; required HA and Tester Agent still work | All owners | [Policies drafted](Platform-Isolation-Handoff.md); connectivity evidence pending |
@@ -52,9 +55,9 @@ report-ready summaries. Preserve failure counterexamples as failures.
 | M2 sustained load | >=10,000 VUs, >=120s, replicas 3->5->2; unexpected errors <1%; polling uniqueness preserved | All owners | [Deferred runner drafted](Platform-Game-Day-Runbook.md); not executed |
 | Horizontal throughput | identical workload/data/environment, successful throughput at 3 replicas >=2x at 1 | Storage + Platform | Comparison analyzer drafted; runs and resource review pending |
 | Version rollout | requests and in-flight work survive replacement during load | All owners | Deferred runner drafted; not executed |
-| Satellite burst | 60x playback, catch-up <=60s after burst, entry-to-canonical p95 and lag | Ingestion + Storage | Pending |
+| Satellite burst | 60x playback, catch-up <=60s after burst, entry-to-canonical p95 and lag | Ingestion + Storage | [Bounded resume/payload probe implemented](Platform-Satellite-Probe.md), local fault checks pass; actual live probe and full burst acceptance pending |
 | Critical coastal delivery | zero distinct required critical operations missing; p95 <=5s; recipient inbox reconciliation | Ingestion | Pending |
-| Overload priority/isolation | Tim Lapangan continues while Media is rejected; faulty sensor does not consume all source capacity | Ingestion + API owners | [Authenticated HTTP Field progress check passed](Platform-Overload-Handoff.md); end-to-end shared Auth/read/source saturation evidence pending |
+| Overload priority/isolation | Tim Lapangan continues while Media is rejected; faulty sensor does not consume all source capacity | Ingestion + API owners | [Auth/Field pool and HTTP saturation checks passed](Platform-Overload-Handoff.md); physical CPU/I/O/network, shared locks/session limits and faulty-source saturation remain pending |
 | Observability and resource evidence | discover replicas/nodes, current samples, metrics/logs/traces and alerts without Secret/write access | Platform + owners | [Kubernetes monitoring drafted](Platform-Observability-Handoff.md); startup, overhead, accuracy and owner signals pending |
 | Combined game day | Tester Agent + observed metrics/traces/logs; automatic recovery without intervention during recovery window | All owners | Pending |
 

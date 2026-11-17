@@ -1,5 +1,10 @@
 # Empty-node replacement development draft
 
+This is the historical canonical-only executor. Use the
+[integrated replacement workflow](Platform-Integrated-Node-Replacement.md) for
+the current four-physical-host deployment, all persistent workloads and guarded
+version 3 phase resume. Physical replacement acceptance remains pending.
+
 Implemented, unexecuted. No VM has been stopped, started, replaced or rebuilt
 for this change. Recovery is not part of normal bootstrap and never deletes old
 disks. `plan` is offline; `replace-node` is an explicitly mutating future command.

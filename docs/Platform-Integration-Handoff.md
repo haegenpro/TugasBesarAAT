@@ -11,19 +11,30 @@ subsection without pushing or including either assignment specification file.
 
 | Area | Result | Remaining input or execution |
 | --- | --- | --- |
-| Release assembly | [Release preparation](../deployment/platform/RELEASE.md): six database formations, applications, isolation, monitoring and explicit broker reservations | Actual image digests, Secrets, bootstrap identities, migrations and cutover |
+| Release assembly | [Release preparation](../deployment/platform/RELEASE.md): separate storage bootstrap and full activation bundles, six database formations, Secrets, applications, isolation, monitoring and broker reservations | Actual image digests, bootstrap identities, migrations and cutover |
+| Private configuration | [Configuration generator](Platform-Private-Configuration.md): consistent service keys, six storage PKIs/passwords, restricted DSNs, integrated feature settings and client credentials | Instructor Audit token and agreed province reference remain pending; confirm namespaces/offsets and bounded satellite egress |
 | Four physical hosts | [Four-host setup](Platform-Four-Physical-Hosts.md): one VM per physical host, Linux/libvirt or Windows/VirtualBox | Actual OS mapping, measured resources, identities, LAN addresses and SSH prerequisites |
 | Wildfire batches | [Multi-entity integration](Platform-Multi-Entity-Integration.md): live Citus capability checks retain fencing, transaction recovery and WAL confirmation | Replicated replay and failure validation |
 | Service databases | [Owned databases](Platform-Owned-Service-Databases.md): four HA formations, restricted roles and explicit schema/Registry initialization | Live bootstrap, identity capture and failover checks |
-| Empty-disk recovery | [Integrated replacement](Platform-Integrated-Node-Replacement.md): all declared PG formations, retained broker membership, UID-guarded controller holds and atomic interruption reports | Actual source checkpoints, provider disk-loss runs, interrupted-phase validation and accepted-data reconciliation |
+| Empty-disk recovery | [Integrated replacement](Platform-Integrated-Node-Replacement.md): all PG formations, retained broker membership, UID-guarded holds, atomic source restore and durable phase resume | Actual source checkpoints, physical disk-loss/interrupted-phase runs and accepted-data reconciliation |
 | Source checkpoints | [Stopped-writer capture](Platform-Source-Checkpoints.md): owned volumes, SQLite WAL snapshots, integrity checks and deployment-bound receipts | Choose/capture actual restore points; later source writes need protection and reconciliation |
-| Broker recovery | [Account and recovery wiring](Platform-Broker-Recovery.md): APP/system credentials separated, same-name rebuild, stream/durable quorums and acknowledgement anchors | Actual private Secrets and physical failure validation |
+| Broker recovery | [Account and recovery wiring](Platform-Broker-Recovery.md): APP/system credentials separated, same-name rebuild, stream/durable quorums and acknowledgement anchors | Apply prepared private Secrets; physical failure validation |
+| Live satellite | [Bounded probe](Platform-Satellite-Probe.md): production SSE/normalizer reuse, inclusive overlap/next-offset replay, unchanged payload/session checks, bounded private evidence | Execute against the actual feed; full burst/catch-up/completeness acceptance on real nodes |
 | Monitoring | [Observability](Platform-Observability-Handoff.md): owner metrics, every broker, all six database formations and warning coverage/error-budget signals | Runtime startup, reference/receipt reconciliation and clock accuracy |
-| Field priority | [Overload handoff](Platform-Overload-Handoff.md): authenticated HTTP check confirms Field progress under Media saturation | Shared Auth/database/network saturation and full-system measurements |
+| Field priority | [Overload handoff](Platform-Overload-Handoff.md): verified scheduling hints, reserved Auth/Client lanes, split Auth/read pools and protected Field routes; local saturation checks pass | Physical database CPU/I/O, locks/session limits, network/source saturation and full-system measurements |
 
 ## Prepare the actual release
 
-Copy `deployment/platform/release.example.json` to a private directory. Use
+The private scaffold has been generated at
+`evidence/platform-private/fourhost-release`, using the supplied satellite token.
+Its 45 Secret objects, 24 leaf certificates, application DSNs and catalog key
+wiring were checked without contacting a deployment. Neither instructor Audit
+token nor province table is fabricated; both remain pending as requested.
+The scaffold uses example four-host identities and is **not ready for activation**.
+See [private configuration](Platform-Private-Configuration.md) before editing or
+regenerating it. No credentials are committed.
+
+Alternatively copy `deployment/platform/release.example.json` to a private directory. Use
 `deployment/aggregator/config.integrated.example.json` and
 `deployment/role1/config.integrated.example.json` for analytics, R3, adapter-v2
 and audit-session settings. Ordinary examples remain development profiles.
@@ -34,8 +45,9 @@ Integrated source namespaces are proposed history identities. Confirm them
 before first activation and never reuse them for different/reset histories.
 A bounded satellite practice check returned IDs 0, 1 and 2 for `from=0`; the
 integrated example starts at zero. The token stays private. The connector now
-supplies an explicit User-Agent accepted by the observed feed. Full resume,
-burst, completeness and recovery verification remain pending.
+supplies an explicit User-Agent accepted by the observed feed. The bounded probe
+is implemented and locally checked; actual live resume, burst, completeness and
+recovery verification remain pending.
 
 `deployment/role1/wildfire.integrated.example.json` deliberately contains an
 invalid province-hash placeholder. Supply an agreed real province centre table
@@ -43,13 +55,21 @@ and its exact SHA-256; the repository's `(0,0)` fixture is not deployment data.
 Course reference results for correctness comparison are a separate input.
 
 ```sh
+# Later storage-only bootstrap, before application prerequisites are complete:
+python3 scripts/platform-release.py --phase infrastructure \
+  --inventory /private/four-hosts.json --config /private/release.json \
+  --output /private/releases/BOOTSTRAP
+# Full activation bundle, after supplying its external inputs and identities:
 python3 scripts/platform-release.py --inventory /private/four-hosts.json \
   --config /private/release.json --output /private/releases/RUN
 python3 scripts/platform-deploy.py plan --inventory /private/four-hosts.json \
   --bundle /private/releases/RUN/bundle.json
 ```
 
-Prepare storage paths and Secrets, bootstrap databases, initialize service schemas
+Storage-only preparation does not need the province table or application images.
+It starts no applications and keeps `ready_for_activation` false. It still
+requires a real storage image, all storage credentials and sufficient measured
+capacity before applying. Prepare storage paths and Secrets, bootstrap databases, initialize service schemas
 with owning applications stopped, and capture all original database system IDs.
 Perform canonical/ingestion migrations and BMKG cutover with relevant writers and
 publishers stopped. Resolve actual prerequisites before removing their unresolved
@@ -60,10 +80,13 @@ Application updates use immutable container images; VMs do not need Git pulls.
 Align host-helper revisions on physical hosts when provider code changes.
 Replacement needs all six plan/config pairs and explicit recovery policies for
 every persistent workload. Unknown or unbacked source state blocks replacement.
-The top-level replacement phase engine is not yet fully resumable after errors.
-Use its offline `status` action to inspect the recorded original controller UIDs,
-counts, WAL anchors and mutation checkpoints before explicit repair. Holds and
-releases reject recreated controllers or concurrent replica-count changes.
+The replacement engine supports `resume-node` for version 3 runs with the
+original run ID, inventory, artifacts and checkpoints. Pending phases reconcile
+lost provider/DCS/controller replies; completed restores do not overwrite later
+source writes. Offline `status` exposes durable progress. Changed identities,
+disk files, artifacts or primary timelines stop automatic continuation for
+inspection. Physical fault execution and timeline ancestry reconciliation still
+need validation. Holds/releases reject recreated or concurrently scaled controllers.
 
 ## Capacity and verification
 
@@ -81,24 +104,28 @@ current topology is retained; the user deferred that architecture assessment.
 
 | Focused check | Result |
 | --- | --- |
-| Offline integration checks | 24 passed: release assembly, broker credential boundaries, source WAL capture/restore, recovery identity guards, journal failure injection and existing coverage |
-| Recovery plan/analyzer checks | 16 passed |
-| Existing renderer checks | 16 passed |
-| Inventory/provider regressions | 33 passed, including the temporary loopback HTTP test |
+| Complete offline Python regressions | 104 passed, including 37 integration checks, renderer/recovery checks and provider regressions; temporary loopback test included |
+| Interrupted recovery checks | Eight phase boundaries, actual atomic restore filesystem checks, lost DCS/provider replies and changed-input/controller/disk refusal; no physical VM fault |
+| Private configuration | 45 Secret objects; 24 leaf certificates verified; DSN passwords and required catalog keys match; external inputs remain absent |
+| Ingestion bootstrap migration | 8 real PostgreSQL checks passed, no skips: fresh/Patroni initialization, repeat/checksum guard, foreign data/canonical identity/wrong group/empty identity refusal |
 | Isolated Citus/payload checks | 12 passed, no skips: batch atomicity/retry/rollback, lost commit reply and observed payload |
 | Isolated service database/Registry checks | All four schemas initialize/repeat; unsafe privileges, legacy schemas and checksum mismatch refused; real Registry bootstrap/runtime ready |
 | Three real broker processes | 2 passed, no skips: empty-storage rebuild retains 48 accepted payloads and durable-consumer progress; privileged decommission is a separate operation |
-| Other focused Go checks | Notifier metrics and authenticated Field priority passed |
+| Auth/Field priority | Auth 4, Client API 16 and Aggregator 2 passed without skips; actual PostgreSQL general-pool saturation and live revocation included |
+| Satellite tooling | Local SSE success/fault checks pass; all Aggregator packages compile; this does not replace a live probe |
 
 Raw evidence remains ignored, including successful Citus run
 `evidence/platform-integration/2e7581e9726c` and database run
 `evidence/platform-databases/075aeb9759a5`, plus broker recovery run
 `evidence/platform-broker-recovery/a7b4c298ac21`. Temporary resources were cleaned up;
-earlier failed attempts are preserved. These are local/protocol checks, not
+the ingestion bootstrap run is `evidence/platform-ingestion-bootstrap/8896a22c5d7b`
+and expanded priority run is `evidence/platform-priority/c945a862ff43`.
+Earlier failed attempts are preserved. These are local/protocol checks, not
 replicated failover, physical capacity or zero-loss acceptance results.
 
-Next supply exact per-host RAM/disk/OS/network details, the agreed real province
-reference and comparison data, image digests and consistent source backups.
+Next supply exact per-host RAM/disk/OS/network details, image digests and consistent
+source backups. The instructor Audit token, agreed real province reference and
+comparison data remain pending; they are needed before full acceptance.
 Then prepare the four-host deployment and execute the
 [acceptance matrix](Platform-Acceptance-Plan.md) and
 [game-day runbook](Platform-Game-Day-Runbook.md). Reconcile original operation
