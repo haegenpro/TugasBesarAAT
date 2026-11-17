@@ -66,7 +66,7 @@ func (a *app) run() {
 			continue
 		}
 		fmt.Printf("Login: %s (%s)\n", a.session.ClientID, a.session.Role)
-		fmt.Println("\n1. Daftar hazard\n2. Daftar dengan filter\n3. Detail hazard\n4. Minta data raw\n5. Uji token lama\n6. Logout\n7. Laporan awal\n8. Detail laporan awal\n9. Riwayat laporan awal\n0. Keluar")
+		fmt.Println("\n1. Daftar hazard\n2. Daftar dengan filter\n3. Detail hazard\n4. Minta data raw\n5. Uji token lama\n6. Logout\n7. Laporan awal\n8. Detail laporan awal\n9. Riwayat laporan awal\n10. Ringkasan situasi (AI)\n0. Keluar")
 		switch a.prompt("Pilih") {
 		case "1":
 			a.list("")
@@ -86,6 +86,8 @@ func (a *app) run() {
 			a.noticeDetail()
 		case "9":
 			a.notices(true)
+		case "10":
+			a.situation()
 		case "0":
 			return
 		}

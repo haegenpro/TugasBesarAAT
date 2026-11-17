@@ -79,6 +79,8 @@ Ringkasan dapat dibaca melalui client-api dengan token yang sudah login:
 curl -H "Authorization: Bearer <token>" http://localhost:<CLIENT_API_PORT>/situation
 ```
 
+Ringkasan juga bisa dibuka dari `client-tui` melalui menu `10. Ringkasan situasi (AI)` setelah login dengan role apa pun.
+
 Bila `SITUATION_BASE_URL` kosong, route `/situation` tidak didaftarkan dan sistem berjalan seperti tanpa bonus.
 
 ## Endpoint
