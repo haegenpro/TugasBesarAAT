@@ -4,6 +4,12 @@ The target is four physical hosts, each with one VM. Actual addresses, provider,
 RAM and disk capacity remain operator inputs. Do not use the former single-host
 7 GiB bootstrap allocation as a full release capacity claim.
 
+The [input-driven workflow](../../docs/Platform-Input-Driven-Workflow.md) now
+automates image build/publish/digest capture, external input completion, cluster
+and storage preparation, stopped-writer maintenance, activation and measured
+source/combined game-day validation. Declared machine allocation may remain an
+assumption until execution; no hardware questionnaire is needed to write a plan.
+
 `scripts/platform-release.py` assembles the canonical Citus formation, independent
 ingestion PostgreSQL formation, service catalog, owner processing, isolation and
 monitoring and four owned HA service databases into one dependency-ordered bundle. It does not build images, start
@@ -71,8 +77,13 @@ writers/publishers stopped. Preserve the original identity captures for recovery
 
 After those operations and the pending external inputs are complete, prepare a
 **new full release** with captured canonical/ingestion durability files and
-recorded initialization/migration evidence. Resolve only the corresponding
-explicit blockers. Prepare application/monitoring local paths from the full
+recorded initialization/migration evidence. `platform-maintenance.py` captures all
+original formations and executes/verifies owner initialization, migrations and
+BMKG cutover. Its `release-ready.json` includes a receipt bound to current
+tools/migration hashes, images, inventory, namespaces and original identities;
+the full renderer resolves matching initialization blockers automatically.
+Changed or incomplete receipts are refused. `platform-inputs.py` fills supplied
+external inputs without regenerating internal credentials. Prepare application/monitoring local paths from the full
 release requirement files before its apply. Do not apply processing merely to
 discover whether its schema is ready. No bootstrap/apply step has been run yet.
 
@@ -85,8 +96,9 @@ artifact path remains available for reviewed alternatives. See
 [owned service databases](../../docs/Platform-Owned-Service-Databases.md) for
 credentials, administrator initialization and their 8.5 GiB memory cost.
 Missing captured PostgreSQL identities, service schema initialization, migration/
-cutover, or capacity remain visible blockers. Complete those prerequisites before
-removing their corresponding unresolved entries. Review exact artifact hashes in
+cutover, or capacity remain visible blockers. Use verified maintenance receipts
+and completed external inputs rather than manually removing initialization gates.
+Review exact artifact hashes in
 the plan; application apply uses the validated bytes rather than rereading files.
 
 The broker catalog now reserves five 1 GiB raw/critical streams plus three

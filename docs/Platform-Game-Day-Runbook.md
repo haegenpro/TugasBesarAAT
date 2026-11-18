@@ -4,6 +4,14 @@ Implementation only: no workload, VM fault, rollout or comparison has been run.
 Do not use the lightweight laptop profile for the full 10,000-VU acceptance run.
 Measure capacity first and preferably use a separate load-generator machine.
 
+The [input-driven workflow](Platform-Input-Driven-Workflow.md) now provides
+automatic session login/logout, generator samples, a combined scale/rollout/VM
+pause scenario and reference-based source/recipient/Audit reconciliation.
+`platform-acceptance.py` runs those selected stages without requiring manually
+asserted success flags. The legacy reconciliation format below remains available
+for additional owner evidence; it is not a substitute for the actual source
+reference. No physical load/fault scenario has been run yet.
+
 ## Workload preparation
 
 Provide a private token inventory containing objects with `role` (`field` or
@@ -28,6 +36,11 @@ python3 scripts/platform-game-day.py run --scenario scale --seconds 150 \
 
 Other scenarios are `rollout --image repository@sha256:...`,
 `node-pause --node aat-m2-a`, and `baseline --baseline-replicas 1` or `3`.
+`combined` requires both `--image` and `--node`, and executes scaling, rollout
+and pause/resume in one window. `--output` selects a new evidence directory;
+`--generator-network-mbps` supplies the later link budget for measured generator
+headroom. The new image must become Ready during load and differ from the
+original image. Controller patches test UID/count/image ownership before mutation.
 Prepare the requested baseline before execution; this runner never starts VMs.
 The scale scenario requests five replicas at 30% and two at 65% of the window.
 The node scenario pauses at 30% and resumes at 55%, with an additional finally

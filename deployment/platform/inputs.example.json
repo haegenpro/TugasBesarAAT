@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "images": "/private/image-release/images.json",
+  "images": "/private/aat-run/images/images.json",
   "audit_token_file": "/private/instructor-audit-token",
   "satellite_token_file": "/private/satellite-token",
   "province_reference": "/private/approved-provinces.json",

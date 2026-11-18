@@ -10,7 +10,10 @@ PostgreSQL race run. The [current integration handoff](Platform-Integration-Hand
 adds local Citus, source-checkpoint, broker disk-rebuild and controller-guard
 checks, guarded recovery resume, reserved Auth/Field read pools, private release
 configuration and ingestion bootstrap migration checks. The complete offline
-Python suite now passes 104 checks. Full four-physical-host deployment/HA
+Python suite now passes 124 checks. The
+[input-driven workflow](Platform-Input-Driven-Workflow.md) adds image/maintenance
+automation, source/recipient comparison and selected combined load/fault stages.
+Full four-physical-host deployment/HA
 scenarios below remain pending.
 
 ## Evidence rules
@@ -53,13 +56,13 @@ report-ready summaries. Preserve failure counterexamples as failures.
 | Service storage isolation | forbidden direct database/network connections fail; required HA and Tester Agent still work | All owners | [Policies drafted](Platform-Isolation-Handoff.md); connectivity evidence pending |
 | Broker/202/recipient durability | crash immediately around acknowledgements, accepted identity reconciliation, disk loss, queue capacity | Ingestion | [Broker empty-disk protocol check passed](Platform-Broker-Recovery.md) with 48 payloads and durable progress; full 202/recipient/physical evidence pending |
 | M2 sustained load | >=10,000 VUs, >=120s, replicas 3->5->2; unexpected errors <1%; polling uniqueness preserved | All owners | [Deferred runner drafted](Platform-Game-Day-Runbook.md); not executed |
-| Horizontal throughput | identical workload/data/environment, successful throughput at 3 replicas >=2x at 1 | Storage + Platform | Comparison analyzer drafted; runs and resource review pending |
+| Horizontal throughput | identical workload/data/environment, successful throughput at 3 replicas >=2x at 1 | Storage + Platform | Automated comparison verifies unchanged canonical generation/templates/upstream specs and measured generator samples; physical runs pending |
 | Version rollout | requests and in-flight work survive replacement during load | All owners | Deferred runner drafted; not executed |
-| Satellite burst | 60x playback, catch-up <=60s after burst, entry-to-canonical p95 and lag | Ingestion + Storage | [Bounded resume/payload probe implemented](Platform-Satellite-Probe.md), local fault checks pass; actual live probe and full burst acceptance pending |
-| Critical coastal delivery | zero distinct required critical operations missing; p95 <=5s; recipient inbox reconciliation | Ingestion | Pending |
+| Satellite burst | 60x playback, catch-up <=60s after burst, entry-to-canonical p95 and lag | Ingestion + Storage | [Measured 60x disconnect/catch-up and bounded entry timing](Platform-Input-Driven-Workflow.md) implemented; local checks pass, real provider/deployment and broader burst cases pending |
+| Critical coastal delivery | zero distinct required critical operations missing; p95 <=5s; recipient inbox reconciliation | Ingestion | Source reference/expectation/durable-recipient reconciliation and conservative clock-bound latency analyzer implemented; real execution pending |
 | Overload priority/isolation | Tim Lapangan continues while Media is rejected; faulty sensor does not consume all source capacity | Ingestion + API owners | [Auth/Field pool and HTTP saturation checks passed](Platform-Overload-Handoff.md); physical CPU/I/O/network, shared locks/session limits and faulty-source saturation remain pending |
 | Observability and resource evidence | discover replicas/nodes, current samples, metrics/logs/traces and alerts without Secret/write access | Platform + owners | [Kubernetes monitoring drafted](Platform-Observability-Handoff.md); startup, overhead, accuracy and owner signals pending |
-| Combined game day | Tester Agent + observed metrics/traces/logs; automatic recovery without intervention during recovery window | All owners | Pending |
+| Combined game day | Tester Agent + observed metrics/traces/logs; automatic recovery without intervention during recovery window | All owners | Selected scale/rollout/VM-pause runner and reference reconciliation implemented; physical demonstration and remaining fault combinations pending |
 
 ## Signals and reliability accounting
 

@@ -7,11 +7,17 @@ started during this integration. Focused local checks were authorized and run;
 four-host load/fault validation remains deferred. Changes are committed by
 subsection without pushing or including either assignment specification file.
 
+The remaining image, maintenance and source/game-day scripts are now assembled
+in the [input-driven workflow](Platform-Input-Driven-Workflow.md). Supply the
+private input files and select its stages later. Declared machine allocation
+remains an assumption; runtime capacity checks still apply. Real-node execution
+can reveal integration issues and is not replaced by these local checks.
+
 ## Implemented integration
 
 | Area | Result | Remaining input or execution |
 | --- | --- | --- |
-| Release assembly | [Release preparation](../deployment/platform/RELEASE.md): separate storage bootstrap and full activation bundles, six database formations, Secrets, applications, isolation, monitoring and broker reservations | Actual image digests, bootstrap identities, migrations and cutover |
+| Release assembly | [Release preparation](../deployment/platform/RELEASE.md): image publishing/digest capture, bootstrap/activation bundles and verified maintenance receipts | Supply registry/input files; execute bootstrap and maintenance on real nodes |
 | Private configuration | [Configuration generator](Platform-Private-Configuration.md): consistent service keys, six storage PKIs/passwords, restricted DSNs, integrated feature settings and client credentials | Instructor Audit token and agreed province reference remain pending; confirm namespaces/offsets and bounded satellite egress |
 | Four physical hosts | [Four-host setup](Platform-Four-Physical-Hosts.md): one VM per physical host, Linux/libvirt or Windows/VirtualBox | Actual OS mapping, measured resources, identities, LAN addresses and SSH prerequisites |
 | Wildfire batches | [Multi-entity integration](Platform-Multi-Entity-Integration.md): live Citus capability checks retain fencing, transaction recovery and WAL confirmation | Replicated replay and failure validation |
@@ -19,9 +25,10 @@ subsection without pushing or including either assignment specification file.
 | Empty-disk recovery | [Integrated replacement](Platform-Integrated-Node-Replacement.md): all PG formations, retained broker membership, UID-guarded holds, atomic source restore and durable phase resume | Actual source checkpoints, physical disk-loss/interrupted-phase runs and accepted-data reconciliation |
 | Source checkpoints | [Stopped-writer capture](Platform-Source-Checkpoints.md): owned volumes, SQLite WAL snapshots, integrity checks and deployment-bound receipts | Choose/capture actual restore points; later source writes need protection and reconciliation |
 | Broker recovery | [Account and recovery wiring](Platform-Broker-Recovery.md): APP/system credentials separated, same-name rebuild, stream/durable quorums and acknowledgement anchors | Apply prepared private Secrets; physical failure validation |
-| Live satellite | [Bounded probe](Platform-Satellite-Probe.md): production SSE/normalizer reuse, inclusive overlap/next-offset replay, unchanged payload/session checks, bounded private evidence | Execute against the actual feed; full burst/catch-up/completeness acceptance on real nodes |
+| Live satellite | [Bounded probe](Platform-Satellite-Probe.md) plus reference-based SQL reconciliation and measured 60x disconnect/catch-up runner | Supply independent reference data and execute against the real feed/deployment |
 | Monitoring | [Observability](Platform-Observability-Handoff.md): owner metrics, every broker, all six database formations and warning coverage/error-budget signals | Runtime startup, reference/receipt reconciliation and clock accuracy |
 | Field priority | [Overload handoff](Platform-Overload-Handoff.md): verified scheduling hints, reserved Auth/Client lanes, split Auth/read pools and protected Field routes; local saturation checks pass | Physical database CPU/I/O, locks/session limits, network/source saturation and full-system measurements |
+| Combined validation | [Workflow](Platform-Input-Driven-Workflow.md): fresh private load sessions, generator samples, readiness checks, stable 1/3-replica comparison, combined scale/rollout/VM pause and source/recipient/Audit reconciliation | Reference dataset, different compatible rollout image and actual load/fault execution |
 
 ## Prepare the actual release
 
@@ -72,8 +79,9 @@ requires a real storage image, all storage credentials and sufficient measured
 capacity before applying. Prepare storage paths and Secrets, bootstrap databases, initialize service schemas
 with owning applications stopped, and capture all original database system IDs.
 Perform canonical/ingestion migrations and BMKG cutover with relevant writers and
-publishers stopped. Resolve actual prerequisites before removing their unresolved
-bundle entries. A flag or healthy pod is not durability evidence. Application
+publishers stopped. The maintenance runner records and verifies these operations;
+the renderer resolves their blockers from bound receipts. External inputs are
+completed separately. A flag or healthy pod is not durability evidence. Application
 apply uses the exact reviewed bytes and stops without destructive rollback.
 
 Application updates use immutable container images; VMs do not need Git pulls.
@@ -104,7 +112,9 @@ current topology is retained; the user deferred that architecture assessment.
 
 | Focused check | Result |
 | --- | --- |
-| Complete offline Python regressions | 104 passed, including 37 integration checks, renderer/recovery checks and provider regressions; temporary loopback test included |
+| Complete offline Python regressions | 124 passed, including workflow, receipt/input, reference reconciliation, load/session/headroom, renderer/recovery and provider regressions; temporary loopback test included |
+| Source observer SQL | Four real PostgreSQL checks passed: complete fixture, missing recipient, changed payload and wrong original member identity; no live source or replication claim |
+| Maintenance wrapper | Go command/DSN encoding checks passed; simulated API workflow verifies ordered DDL/cutover, receipt refusal and full-release gate completion |
 | Interrupted recovery checks | Eight phase boundaries, actual atomic restore filesystem checks, lost DCS/provider replies and changed-input/controller/disk refusal; no physical VM fault |
 | Private configuration | 45 Secret objects; 24 leaf certificates verified; DSN passwords and required catalog keys match; external inputs remain absent |
 | Ingestion bootstrap migration | 8 real PostgreSQL checks passed, no skips: fresh/Patroni initialization, repeat/checksum guard, foreign data/canonical identity/wrong group/empty identity refusal |
@@ -120,12 +130,16 @@ Raw evidence remains ignored, including successful Citus run
 `evidence/platform-broker-recovery/a7b4c298ac21`. Temporary resources were cleaned up;
 the ingestion bootstrap run is `evidence/platform-ingestion-bootstrap/8896a22c5d7b`
 and expanded priority run is `evidence/platform-priority/c945a862ff43`.
+Latest source-observer SQL evidence is
+`evidence/platform-source-validation/fef669e0574b`, with no cleanup pending.
 Earlier failed attempts are preserved. These are local/protocol checks, not
 replicated failover, physical capacity or zero-loss acceptance results.
 
-Next supply exact per-host RAM/disk/OS/network details, image digests and consistent
-source backups. The instructor Audit token, agreed real province reference and
-comparison data remain pending; they are needed before full acceptance.
+Keep the declared allocation as an assumption for now. Later supply connection/
+provider inventory, registry inputs and consistent source backups. Image digests
+are produced by the publishing script. The instructor Audit token, agreed real
+province reference and comparison data remain pending; they are needed before
+full acceptance. No immediate machine-capacity assessment is requested.
 Then prepare the four-host deployment and execute the
 [acceptance matrix](Platform-Acceptance-Plan.md) and
 [game-day runbook](Platform-Game-Day-Runbook.md). Reconcile original operation

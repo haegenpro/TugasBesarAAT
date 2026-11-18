@@ -36,8 +36,11 @@ IDs/secrets for later login/load tests. It must remain private too. The source
 namespaces/offsets are proposed identities: confirm them against the actual
 session before first activation and preserve them across normal rollouts.
 
-Complete the missing files and update the corresponding `release.json`
-unresolved entries only after their prerequisites are satisfied. Build/publish
+Use `platform-inputs.py` from the
+[input-driven workflow](Platform-Input-Driven-Workflow.md) to fill missing files
+and resolve their generated pending entries without rotating internal credentials.
+Its maintenance runner resolves initialization gates from verified receipts.
+Build/publish
 real immutable images; never fill nulls with invented digests. Declare bounded
 satellite egress CIDRs in `external-flows.json`; generic NetworkPolicy cannot
 follow changing DNS addresses. Then use `platform-release.py` to assemble a new

@@ -6,6 +6,8 @@ from pathlib import Path
 from source_validation_lib import http_json
 from storage_lib import require,write_json
 
+ROOT=Path(__file__).resolve().parent.parent
+
 
 def credentials(path):
     path=Path(path);require(path.is_file()and not path.is_symlink()and path.stat().st_mode&0o077==0,"private client-credentials file required")
@@ -17,6 +19,8 @@ def credentials(path):
 @contextmanager
 def token_inventory(base_url,credential_path,output,seconds):
     values=credentials(credential_path);output=Path(output);require(not output.exists(),"load token output exists; preserve private session evidence")
+    resolved=output.resolve()
+    require(not resolved.is_relative_to(ROOT)or resolved.is_relative_to(ROOT/"evidence"),"private load tokens must stay outside the repository or under ignored evidence/")
     sessions=[];tokens=[]
     try:
         for role in("field","media"):
