@@ -34,9 +34,6 @@ func (s *SourceStore) QuarantineResponse(ctx context.Context, id, media, reason 
 	if err = s.Durability.Prepare(ctx, tx); err != nil {
 		return err
 	}
-	if err = s.Fence.Protect(ctx, tx, owner, []canonical.Mutation{{Source: domain.Source(s.Source)}}); err != nil {
-		return err
-	}
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(726118)`); err != nil {
 		return err
 	}
@@ -96,6 +93,11 @@ func (s *SourceStore) QuarantineResponse(ctx context.Context, id, media, reason 
 		return err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO ingestion_failure_attempts(namespace,message_id,attempt,reason)VALUES($1,$2,1,$3)`, s.Namespace, message, reason); err != nil {
+		return err
+	}
+	// Do not hold the acquisition row lock while reading an unreliable HTTP
+	// body. Fence the staged rows at COMMIT, after the complete stream arrived.
+	if err = s.Fence.Protect(ctx, tx, owner, []canonical.Mutation{{Source: domain.Source(s.Source)}}); err != nil {
 		return err
 	}
 	if err = tx.Commit(ctx); err != nil {

@@ -90,7 +90,13 @@ current attempt while `last_success` retains the original receipt's conservative
 snapshot boundary. Assessment history has a separate lane from regular history
 so concurrent readers cannot replace each other's unfinished receipts. Station
 validators read the owner's shared database snapshot instead of opening their
-own upstream connections.
+own upstream connections. Station refresh runs in a separate owner-scoped loop;
+its latency, breaker or malformed response cannot hold observation acquisition.
+A refresh failure retains the last valid snapshot. If no snapshot exists yet,
+raw observations can still be retained/published while validators retry metadata
+lookup. This cannot guarantee timely validation without any known station data.
+The refresh loop is cancelled and drained before releasing its source generation;
+`coastal_station_refresh_unavailable` exposes failed refresh separately.
 
 Requests carry `X-Acquisition-Request-ID`, `X-Acquisition-Epoch` and
 `X-Acquisition-Recovery`. The ID survives a lost-response recovery; the recovery
@@ -240,3 +246,22 @@ retention and retirement, malformed/missing envelope fields, invalid UTF-8,
 complete streamed bytes and digest through Ops-only inspection, partial/quota
 rollback and oversized raw capture. The process-crash case still committed one
 HazardEvent in 15,607 ms using natural lease expiry.
+
+The station isolation follow-up at
+`evidence/platform-acquisition-dispatch/d8748454dde2/result.json` passed 40 checks
+with zero skips/failures and complete cleanup. A five-second metadata request
+was held in flight while observation generation advanced within one second and
+a critical observation validated using the saved snapshot. Progress continued
+after the refresh returned 503, the station breaker prevented request growth,
+and cancellation drained the metadata loop. A separate malformed-200 station
+refresh test retained its previous snapshot, quarantined the exact bad bytes,
+and fetched the recovered metadata without changing observation progress.
+
+The final combined run at
+`evidence/platform-acquisition-dispatch/380059ebac5f/result.json` passed 42 checks
+with zero failures/skips and no cleanup remaining. Quarantine stages bytes without
+holding the acquisition ownership row during network reads, then fences them at
+COMMIT. A held body does not block lease renewal; takeover during that read still
+makes the obsolete quarantine transaction roll back. The 124 offline regressions
+and focused client/command checks also passed. These remain local proofs, not
+four-node or live-source acceptance.

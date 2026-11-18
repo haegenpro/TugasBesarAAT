@@ -35,6 +35,12 @@ type Acquirer struct {
 }
 
 func (a *Acquirer) Run(ctx context.Context) {
+	if a.RefreshStations != nil {
+		metadata, stop := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); a.refreshStations(metadata) }()
+		defer func() { stop(); <-done }()
+	}
 	failures := 0
 	for ctx.Err() == nil {
 		more, err := a.Step(ctx)
@@ -85,11 +91,6 @@ func (a *Acquirer) Step(ctx context.Context) (more bool, retErr error) {
 		}()
 	}
 	ctx = withResponseQuarantine(ctx, a.Progress)
-	if a.RefreshStations != nil {
-		if err := a.RefreshStations(ctx); err != nil {
-			return false, err
-		}
-	}
 	progress, err := a.Progress.Progress(ctx, a.Start)
 	if err != nil {
 		return false, err
@@ -188,4 +189,38 @@ func (a *Acquirer) Step(ctx context.Context) (more bool, retErr error) {
 
 func same(a, b *string) bool {
 	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
+// Metadata refresh must not delay observation acquisition. Both use the source
+// owner context, but independent HTTP lanes/breakers. Drain refresh before the
+// coordinator releases this ownership generation.
+func (a *Acquirer) refreshStations(ctx context.Context) {
+	defer platform.Gauge("coastal_station_refresh_unavailable", 0)
+	failures := 0
+	for ctx.Err() == nil {
+		err := a.RefreshStations(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		delay := time.Second
+		switch {
+		case err == nil:
+			failures = 0
+			platform.Gauge("coastal_station_refresh_unavailable", 0)
+		default:
+			platform.Gauge("coastal_station_refresh_unavailable", 1)
+			if wait, waiting := acquisition.WaitDelay(err); waiting {
+				delay = wait
+			} else {
+				failures++
+				delay = rawinput.Backoff(failures)
+			}
+			if a.Logger != nil {
+				a.Logger.Warn("coastal station refresh unavailable; observation acquisition continues", "error", err)
+			}
+		}
+		if !rawinput.Sleep(ctx, delay) {
+			return
+		}
+	}
 }

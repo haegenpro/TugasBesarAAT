@@ -129,3 +129,16 @@ The isolated killed-process proof measures natural-lease takeover separately.
 Physical four-node recovery, real feed limits and actual upstream log acceptance
 remain deferred; no unconditional 60-second guarantee is claimed through an
 upstream outage or loss of database quorum.
+
+Station refresh is independent from observation acquisition. The dashboard exposes
+`app_coastal_station_refresh_unavailable` and a one-minute warning alert, alongside
+the existing station breaker. The source can continue receiving observations and
+validating against its saved station snapshot while refresh is slow or failing.
+The signal is cleared when the owner-scoped refresh loop stops; it does not turn
+missing initial metadata into successful validation. Invalid outer HTTP responses
+are retained in the ingestion failure ledger and inspected through the existing
+Ops-only payload endpoint, including complete streamed bodies above cache limits.
+
+Quarantine streaming does not hold the acquisition row while waiting on the
+sensor. Its staged writes are fenced at commit, keeping metadata failure isolated
+from lease renewal while still rejecting a resumed obsolete writer.

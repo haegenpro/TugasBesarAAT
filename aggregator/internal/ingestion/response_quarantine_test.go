@@ -2,6 +2,7 @@ package ingestion
 
 import (
 	"aggregator/internal/acquisition"
+	"aggregator/internal/canonical"
 	"aggregator/internal/ownership"
 	"aggregator/internal/pagecursor"
 	"aggregator/internal/rawinput"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -138,4 +140,85 @@ func TestResponseCaptureOverflowKeepsAllBytes(t *testing.T) {
 		require.NoError(t, store.DB.Pool.QueryRow(owned, `SELECT state FROM acquisition_dispatch WHERE scope='acquisition:BMKG'`).Scan(&state))
 		require.Equal(t, "consumed", state)
 	})
+}
+
+type blockedResponseReader struct {
+	*bytes.Reader
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *blockedResponseReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.started); <-r.release })
+	return r.Reader.Read(p)
+}
+func TestResponseQuarantineSlowBodyDoesNotHoldOwnershipLock(t *testing.T) {
+	store, _ := ingestionLab(t)
+	authority := store.Fence.(*ownership.Authority)
+	source := &SourceStore{DB: store.DB, Durability: store.Durability, Fence: authority, Source: "SENSOR_PANTAI", Namespace: "slow-response"}
+	coordinator, err := acquisition.New(authority, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	coordinator.Run(context.Background(), source.Source, func(owned context.Context) {
+		body := &blockedResponseReader{Reader: bytes.NewReader([]byte("bad metadata")), started: make(chan struct{}), release: make(chan struct{})}
+		var release sync.Once
+		defer release.Do(func() { close(body.release) })
+		retained := make(chan error, 1)
+		go func() {
+			retained <- source.QuarantineResponse(owned, "slow-receipt", "application/json", "invalid metadata", body)
+		}()
+		select {
+		case <-body.started:
+		case <-time.After(time.Second):
+			t.Fatal("quarantine did not begin reading")
+		}
+		owner, err := acquisition.Token(owned, source.Source)
+		require.NoError(t, err)
+		call, cancel := context.WithTimeout(owned, 500*time.Millisecond)
+		defer cancel()
+		_, err = authority.Renew(call, owner)
+		require.NoError(t, err, "slow metadata retention must not block the source lease renewal")
+		release.Do(func() { close(body.release) })
+		select {
+		case err = <-retained:
+			require.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("quarantine did not finish")
+		}
+	})
+}
+func TestResponseQuarantineStagedBytesStillRejectExpiredOwnerAtCommit(t *testing.T) {
+	store, _ := ingestionLab(t)
+	authority := store.Fence.(*ownership.Authority)
+	source := &SourceStore{DB: store.DB, Durability: store.Durability, Fence: authority, Source: "SENSOR_PANTAI", Namespace: "late-commit"}
+	coordinator, err := acquisition.New(authority, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+	coordinator.Run(context.Background(), source.Source, func(owned context.Context) {
+		body := &blockedResponseReader{Reader: bytes.NewReader([]byte("bad metadata")), started: make(chan struct{}), release: make(chan struct{})}
+		var release sync.Once
+		defer release.Do(func() { close(body.release) })
+		retained := make(chan error, 1)
+		go func() {
+			retained <- source.QuarantineResponse(owned, "late-receipt", "application/json", "invalid metadata", body)
+		}()
+		select {
+		case <-body.started:
+		case <-time.After(time.Second):
+			t.Fatal("quarantine did not begin reading")
+		}
+		_, err := store.DB.Pool.Exec(context.Background(), `UPDATE canonical_ownership SET expires_at=clock_timestamp()-interval '1 second' WHERE scope='acquisition:SENSOR_PANTAI'`)
+		require.NoError(t, err)
+		_, err = authority.Acquire(context.Background(), canonical.AcquireOwnership{Scope: "acquisition:SENSOR_PANTAI", Holder: "successor"})
+		require.NoError(t, err)
+		release.Do(func() { close(body.release) })
+		select {
+		case err = <-retained:
+			require.Error(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("expired quarantine did not finish")
+		}
+	})
+	var count int
+	require.NoError(t, store.DB.Pool.QueryRow(context.Background(), `SELECT count(*) FROM ingestion_failure_payloads`).Scan(&count))
+	require.Zero(t, count)
 }

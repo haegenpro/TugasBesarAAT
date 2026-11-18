@@ -37,7 +37,11 @@ REQUIRED = {
     "TestResponseQuarantineStreamsExactBytesThroughOpsOnlyInspection",
     "TestResponseQuarantineIncompleteOrOverQuotaRollsBack",
     "TestResponseCaptureOverflowKeepsAllBytes",
+    "TestResponseQuarantineSlowBodyDoesNotHoldOwnershipLock",
+    "TestResponseQuarantineStagedBytesStillRejectExpiredOwnerAtCommit",
     "TestSharedStationsOnlySourceOwnerFetches",
+    "TestSharedStationsSlowOrFailedRefreshDoesNotBlockObservations",
+    "TestSharedStationsMalformedRefreshRetainsPreviousSnapshotAndRecovers",
     "TestCoastalEmptyPageAdvancesDispatchGeneration",
 }
 
