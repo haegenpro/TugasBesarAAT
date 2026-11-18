@@ -10,6 +10,7 @@
   "secrets": "secrets.json",
   "external_flows": "external-flows.json",
   "owner_databases": null,
+  "initialization_receipt": null,
   "canonical_durability": null,
   "ingestion_durability": null,
   "unresolved": [

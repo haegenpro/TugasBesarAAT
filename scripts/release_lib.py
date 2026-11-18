@@ -35,6 +35,13 @@ def assemble(inventory,config_path,output):
     aggregator=read("aggregator")
     require(aggregator["storage_mode"]=="citus","full release requires the distributed canonical formation")
     catalog=read("services")
+    initialized=False;initialization=None
+    if config.get("initialization_receipt"):
+        from maintenance_lib import verify_receipt
+        require(not config.get("owner_databases"),"initialization receipt requires the owned database renderer")
+        initialization=read("initialization_receipt")
+        verify_receipt(initialization,inventory,aggregator,owner,images)
+        initialized=True
     client=next(s for s in catalog["services"]if s["name"]=="client-api")
     client["environment"].update({"ANALYTICS_ENABLED":"true","INGESTION_BASE_URL":"http://ingestion:8080"})
     catalog.setdefault("external",[]).extend(n for n in ("ingestion","coastal-processor")if n not in catalog.get("external",[]))
@@ -72,7 +79,7 @@ def assemble(inventory,config_path,output):
     else:
         owner_resources,owner_database_report=render_databases(inventory,images["storage"])
         add("owner-databases",owner_resources,["isolation"])
-        blockers.append("Initialize owned service database schemas with owning applications stopped, including the pinned registry bootstrap")
+        if not initialized:blockers.append("Initialize owned service database schemas with owning applications stopped, including the pinned registry bootstrap")
     monitored_owners=owner_database_report["formations"]if owner_database_report else []
     monitoring,monitor_requirements=render_monitoring(inventory,canonical,images,[ingestion,*monitored_owners])
     add("services",service_resources,["owner-databases"],[{"kind":"Job","name":"broker-init"}])
@@ -84,6 +91,9 @@ def assemble(inventory,config_path,output):
             blockers.append("Capture original three-copy PostgreSQL identities for "+storage["formation"])
             continue
         value=read(key);expected=durability_config(storage)
+        if initialized:
+            suffix="storage"if key=="canonical_durability"else "ingestion"
+            require(value==initialization["durability"][suffix],"release identities differ from original maintenance capture")
         require(len(value.get("groups",[]))==len(expected["groups"]),"durability group count differs")
         import re
         for planned,actual in zip(expected["groups"],value["groups"]):
@@ -93,7 +103,7 @@ def assemble(inventory,config_path,output):
         captured.append({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":map_name,"namespace":inventory["namespace"]},"data":{"durability.json":json.dumps(value,separators=(",",":"))}})
     if captured:
         artifacts["isolation"]["items"].extend(captured)
-    blockers.append("Run recorded canonical/ingestion offline migrations and BMKG cutover with writers stopped before first activation")
+    if not initialized:blockers.append("Run recorded canonical/ingestion offline migrations and BMKG cutover with writers stopped before first activation")
     output.mkdir(parents=True,mode=0o700);(output/"artifacts").mkdir(mode=0o700)
     for stage,resource in artifacts.items():write_json(output/"artifacts"/(stage+".json"),resource)
     write_json(output/"canonical-plan.json",canonical);write_json(output/"ingestion-plan.json",ingestion)
