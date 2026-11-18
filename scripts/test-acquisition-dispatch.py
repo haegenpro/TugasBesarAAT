@@ -21,6 +21,7 @@ REQUIRED = {
     "TestDispatchFailedWorkKeepsReceiptGenerationAndSnapshotBoundary",
     "TestDispatchLostReceiptAckReusesSavedResponse",
     "TestDispatchUnconfirmedIntentNeverReachesNetwork",
+    "TestDispatchTLSUsesHTTP1WithoutHiddenHTTP2Retries",
     "TestSharedStationsOnlySourceOwnerFetches",
     "TestCoastalEmptyPageAdvancesDispatchGeneration",
 }

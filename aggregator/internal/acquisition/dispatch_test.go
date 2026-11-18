@@ -1,7 +1,10 @@
 package acquisition
 
 import (
+	"aggregator/internal/platform"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
@@ -76,5 +79,32 @@ func TestDispatchUnconfirmedIntentNeverReachesNetwork(t *testing.T) {
 		_, err = client.Do(req)
 		require.ErrorIs(t, err, ErrDispatchPending)
 		require.EqualValues(t, 0, calls.Load())
+	})
+}
+
+func TestDispatchTLSUsesHTTP1WithoutHiddenHTTP2Retries(t *testing.T) {
+	repo := &repositoryFixture{}
+	c := fixtureCoordinator(t, repo)
+	var protocol atomic.Int64
+	source := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protocol.Store(int64(r.ProtoMajor))
+		_, _ = w.Write([]byte("original"))
+	}))
+	source.EnableHTTP2 = true
+	source.StartTLS()
+	defer source.Close()
+	journal := &lostReceiptReply{receipts: map[string]Receipt{}}
+	client, err := Client(journal, "BMKG", source.URL, time.Second, 4096)
+	require.NoError(t, err)
+	transport := client.Transport.(*dispatchTransport).next.(platform.Transport).Base.(*http.Transport)
+	roots := x509.NewCertPool()
+	roots.AddCert(source.Certificate())
+	transport.TLSClientConfig = &tls.Config{RootCAs: roots}
+	c.Run(context.Background(), "BMKG", func(owned context.Context) {
+		req, err := http.NewRequestWithContext(WithRequestKey(owned, "namespace:0"), "GET", source.URL+"/seismic-events", nil)
+		require.NoError(t, err)
+		_, err = client.Do(req)
+		require.ErrorIs(t, err, ErrDispatchPending) // fixture loses completion acknowledgement
+		require.EqualValues(t, 1, protocol.Load(), "HTTP/2 stream retry logic must be outside the acquisition transport")
 	})
 }

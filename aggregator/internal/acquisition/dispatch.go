@@ -74,9 +74,11 @@ func Client(repository DispatchRepository, source, base string, timeout time.Dur
 		return nil, errors.New("dispatch requires repository, source, fixed HTTP base and positive response limit")
 	}
 	t := http.DefaultTransport.(*http.Transport).Clone()
-	// net/http may transparently retry GETs on reused connections. A fresh
-	// connection per admitted request prevents that second, unjournalled send.
+	// net/http may retry GETs on reused HTTP/1 connections and HTTP/2 may
+	// retry streams internally. Admit one fresh HTTP/1 connection per request.
 	t.DisableKeepAlives = true
+	t.Protocols = new(http.Protocols)
+	t.Protocols.SetHTTP1(true)
 	t.Proxy = nil
 	t.MaxConnsPerHost = 8
 	return &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &dispatchTransport{repository: repository, source: source, base: u, maxBody: maxBody, next: platform.Transport{Base: t}}}, nil
