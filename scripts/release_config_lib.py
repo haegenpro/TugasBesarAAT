@@ -13,6 +13,7 @@ from service_lib import DIGEST
 from storage_lib import SERVICE_DATABASES,formation_layout,require,write_json
 
 ROOT=Path(__file__).resolve().parent.parent
+DEFAULT_PROVINCE_REFERENCE=ROOT/"deployment/role1/provinces.json"
 
 
 def storage_credentials(layout,output):
@@ -53,9 +54,9 @@ def prepare(inventory,output,*,satellite_token_file=None,audit_token_file=None,p
     resolved=output.resolve()
     require(not resolved.is_relative_to(ROOT)or resolved.is_relative_to(ROOT/"evidence"),"private configuration must be outside the repository or under ignored evidence/")
     require(not output.exists()and not output.is_symlink(),"output exists; refuse implicit credential rotation")
-    # Validate external inputs before generating anything. Missing inputs stay absent.
+    # Validate the chosen table and external inputs before generating anything.
     tokens={key:read_token(path)for key,path in (("SATELLITE_FEED_TOKEN",satellite_token_file),("AUDIT_TOKEN",audit_token_file))if path}
-    provinces=province_bytes(province_reference)if province_reference else None
+    provinces=province_bytes(province_reference if province_reference is not None else DEFAULT_PROVINCE_REFERENCE)
     catalog=json.loads((ROOT/"deployment/services/catalog.json").read_text())
     image_names=set(IMAGES)|{"storage","role1"}|{s["image_key"]for s in catalog["services"]if s.get("image_key")}
     supplied_images=json.loads(Path(images_file).read_text())if images_file else {}
@@ -113,10 +114,9 @@ def _write(inventory,output,catalog,image_names,images,flows,tokens,provinces):
     write_json(output/"secrets.json",{"apiVersion":"v1","kind":"List","items":items})
     write_json(output/"client-credentials.json",select(*(p+"_CLIENT_"+k for p in ("MEDIA","FIELD","INTERNAL")for k in ("ID","SECRET"))))
     processor=json.loads((ROOT/"deployment/role1/wildfire.integrated.example.json").read_text())
-    if provinces:
-        (output/"provinces.json").write_bytes(provinces)
-        processor["province_sha256"]=hashlib.sha256(provinces).hexdigest()
-    else:pending.append("Supply the agreed real province-centre reference; provinces.json is intentionally absent")
+    processor["province_file"]="provinces.json"
+    (output/"provinces.json").write_bytes(provinces)
+    processor["province_sha256"]=hashlib.sha256(provinces).hexdigest()
     for key in ("AUDIT_TOKEN","SATELLITE_FEED_TOKEN"):
         if key not in values:pending.append("Supply external credential "+key+"; its Secret key is intentionally absent")
     missing_images=sorted(image_names-images.keys())

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from image_release_lib import REQUIRED
 from isolation_lib import render as isolation
-from release_config_lib import province_bytes,read_token
+from release_config_lib import DEFAULT_PROVINCE_REFERENCE,province_bytes,read_token
 from service_lib import DIGEST
 from storage_lib import require,write_json
 
@@ -50,9 +50,9 @@ def complete(inventory,config_path,inputs_path,output):
     processor.update(namespace=owner["satellite_namespace"],initial_offset=owner["satellite_initial_offset"],province_file="provinces.json")
     province=selected_path("province_reference")
     if province is None and config.get("province_reference")and(base/config["province_reference"]).is_file():province=(base/config["province_reference"]).resolve()
-    raw=province_bytes(province)if province else None
-    if raw:processor["province_sha256"]=hashlib.sha256(raw).hexdigest()
-    else:pending.append("Supply the agreed real province-centre reference")
+    if province is None:province=DEFAULT_PROVINCE_REFERENCE
+    raw=province_bytes(province)
+    processor["province_sha256"]=hashlib.sha256(raw).hexdigest()
     image_path=selected_path("images")
     images=json.loads(image_path.read_text())if image_path else original("images")
     require(isinstance(images,dict)and set(images)<=REQUIRED,"unknown image-map key")
@@ -75,7 +75,7 @@ def complete(inventory,config_path,inputs_path,output):
     try:
         output.mkdir(parents=True,mode=0o700)
         for name,value in values.items():write_json(output/(name+".json"),value)
-        if raw:(output/"provinces.json").write_bytes(raw)
+        (output/"provinces.json").write_bytes(raw)
         write_json(output/"release.json",config)
         report={"version":1,"external_inputs_complete":not config["unresolved"],"pending":config["unresolved"],"capacity_assumption":"Use declared inventory allocation; existing live capacity checks run at deployment. No hardware measurements requested by this command.","internal_credentials":"preserved; only explicitly supplied external credentials updated"}
         write_json(output/"preparation.json",report)

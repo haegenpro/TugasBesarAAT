@@ -15,7 +15,6 @@
   "ingestion_durability": null,
   "unresolved": [
     "Populate four physical host identities and measured VM capacity",
-    "Prepare Secrets and owned local-volume paths from the rendered requirements",
-    "Supply and verify the chosen province reference table against the course mapping contract"
+    "Prepare Secrets and owned local-volume paths from the rendered requirements"
   ]
 }

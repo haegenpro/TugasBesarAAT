@@ -5,7 +5,7 @@
   "algorithm_version": 2,
   "allowed_lateness_seconds": 1800,
   "province_file": "provinces.json",
-  "province_sha256": "REPLACE_WITH_SHA256_OF_APPROVED_PROVINCE_FILE",
+  "province_sha256": "a82363d09ff6f8e85d48db143e4e6a99d6be4283769574fd4a802f82f647cf20",
   "page_rows": 8,
   "cache_bytes": 16777216,
   "staging_bytes": 67108864,

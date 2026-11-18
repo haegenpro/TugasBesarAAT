@@ -127,4 +127,18 @@ class Role1RendererTests(unittest.TestCase):
                 processor=json.loads(config['wildfire']['config_json']);processor['prepared_bytes']=processor['cache_bytes'];config['wildfire']['config_json']=json.dumps(processor)
             with self.assertRaises(ValueError):render(self.inventory,self.aggregator,config,self.image,self.image)
 
+    def test_integrated_province_table_is_embedded_without_reformatting(self):
+        config=copy.deepcopy(self.config)
+        text=(ROOT/'deployment/role1/wildfire.integrated.example.json').read_text(encoding='utf-8')
+        province=(ROOT/'deployment/role1/provinces.json').read_text(encoding='utf-8')
+        processor=json.loads(text)
+        config.update(satellite_namespace=processor['namespace'],satellite_initial_offset=processor['initial_offset'])
+        config['wildfire']={'config_json':text,'province_json':province}
+        result=render(self.inventory,self.aggregator,config,self.image,self.image)
+        table=next(v for v in result['items'] if v['kind']=='ConfigMap' and '-wildfire-' in v['metadata']['name'])
+        self.assertTrue(table['immutable'])
+        self.assertEqual(table['data']['provinces.json'],province)
+        self.assertEqual(len(json.loads(table['data']['provinces.json'])),38)
+        self.assertEqual(json.loads(table['data']['config.json'])['province_sha256'],processor['province_sha256'])
+
 if __name__=='__main__':unittest.main()

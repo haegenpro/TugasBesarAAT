@@ -18,7 +18,7 @@ Copy these examples to a private directory and supply their values:
 | --- | --- |
 | [Four-host inventory](../deployment/platform/inventory.fourhost.example.json) | Actual machine/VM addresses, provider/bridge/SSH paths and declared VM allocation; one VM per physical host |
 | [Image release](../deployment/platform/images.release.example.json) | Registry/repository prefix and actual pinned Tempo/node-exporter images; other application and monitoring images are built |
-| [External inputs](../deployment/platform/inputs.example.json) | Audit/satellite token **file paths**, approved province reference, bounded satellite egress CIDRs, image-map path and chosen stable source identities |
+| [External inputs](../deployment/platform/inputs.example.json) | Audit/satellite token **file paths**, bounded satellite egress CIDRs, image-map path and chosen stable source identities; optional `province_reference` override |
 | [Source reference](../deployment/platform/source-reference.example.json) | Independent expected satellite operations, critical coastal identities and course/reference Audit count/checksum |
 | [Workflow](../deployment/platform/workflow.example.json) | The paths above, private output directory and selected validation stages; a different compatible rollout image, owned pause target and later generator link budget |
 
@@ -29,7 +29,9 @@ and Media sessions before each load stage and log out afterward. A private
 `validation.load.token_file` remains an alternative. Generated sessions use the
 configured clients and their normal per-client limits; they do not create new
 client identities. Never put token values in command arguments or commit private
-configuration. Audit token and real province reference are still pending inputs.
+configuration. The Audit token remains a pending input. Province data defaults to
+the [38-row project reference](Province-Reference.md) when the existing scaffold
+has no table; an existing table is preserved unless explicitly overridden.
 
 Set the external input's `images` path to `OUTPUT/images/images.json` when using
 the workflow's image phase. Registry login uses the local Docker credential

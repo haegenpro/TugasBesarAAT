@@ -15,9 +15,10 @@ python3 scripts/platform-configure.py \
 
 Optional file inputs are `--audit-token-file`, `--province-reference`,
 `--images-file` and `--external-flows-file`. Token files must have private
-permissions; token values never belong in shell arguments. The instructor Audit
-token and agreed real province reference are **pending**. Neither is fabricated.
-Missing image digests remain null, the province file stays absent, and missing
+permissions; token values never belong in shell arguments. The province table
+defaults to the [38-row project reference](Province-Reference.md); use
+`--province-reference` to override it. The instructor Audit token remains pending.
+Missing image digests remain null, and missing
 external credentials are absent Secret keys. `preparation.json` lists these
 inputs without exposing their values. This scaffold is not activation approval.
 

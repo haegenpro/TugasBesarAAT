@@ -1,5 +1,6 @@
 """External input completion preserves credentials and never invents missing data."""
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ from unittest.mock import patch
 
 from image_release_lib import REQUIRED
 from platform_lib.inventory import load
-from release_config_lib import prepare
+from release_config_lib import DEFAULT_PROVINCE_REFERENCE,prepare
 import release_config_integration_test as scaffold_checks
 from release_inputs_lib import complete
 
@@ -38,13 +39,40 @@ class InputCompletionChecks(unittest.TestCase):
             self.assertEqual(json.loads((root/"completed/release.json").read_text())["unresolved"],[])
             with self.assertRaisesRegex(ValueError,"overwrite"):complete(inventory,root/"original/release.json",root/"inputs.json",root/"completed")
 
-    def test_absent_external_values_remain_pending_and_untracked(self):
+    def test_absent_credentials_remain_pending_with_bundled_reference(self):
         inventory=load(ROOT/"deployment/platform/inventory.fourhost.example.json")
         with tempfile.TemporaryDirectory()as folder,patch("release_config_lib.storage_credentials",scaffold_checks.ReleaseConfigurationChecks.fake_storage):
             root=Path(folder);prepare(inventory,root/"original");(root/"inputs.json").write_text('{"version":1}')
             report=complete(inventory,root/"original/release.json",root/"inputs.json",root/"completed")
             self.assertFalse(report["external_inputs_complete"]);self.assertTrue(any("AUDIT_TOKEN"in p for p in report["pending"]))
-            self.assertFalse((root/"completed/provinces.json").exists())
+            self.assertEqual((root/"completed/provinces.json").read_bytes(),DEFAULT_PROVINCE_REFERENCE.read_bytes())
+            self.assertFalse(any("province"in item for item in report["pending"]))
+
+    def test_legacy_scaffold_without_table_uses_bundled_reference(self):
+        inventory=load(ROOT/"deployment/platform/inventory.fourhost.example.json")
+        with tempfile.TemporaryDirectory()as folder,patch("release_config_lib.storage_credentials",scaffold_checks.ReleaseConfigurationChecks.fake_storage):
+            root=Path(folder);prepare(inventory,root/"original")
+            (root/"original/provinces.json").unlink()
+            release=root/"original/release.json";config=json.loads(release.read_text())
+            config["unresolved"].append("Supply the agreed real province-centre reference; provinces.json is intentionally absent")
+            release.write_text(json.dumps(config))
+            (root/"inputs.json").write_text('{"version":1}')
+            report=complete(inventory,release,root/"inputs.json",root/"completed")
+            self.assertEqual((root/"completed/provinces.json").read_bytes(),DEFAULT_PROVINCE_REFERENCE.read_bytes())
+            self.assertFalse(any("province"in item for item in report["pending"]))
+
+    def test_existing_custom_reference_is_preserved_without_override(self):
+        inventory=load(ROOT/"deployment/platform/inventory.fourhost.example.json")
+        with tempfile.TemporaryDirectory()as folder,patch("release_config_lib.storage_credentials",scaffold_checks.ReleaseConfigurationChecks.fake_storage):
+            root=Path(folder);province=root/"custom.json"
+            raw=b'[{"id":"chosen","name":"Chosen Region","latitude":-6.9,"longitude":107.6}]\n'
+            province.write_bytes(raw)
+            prepare(inventory,root/"original",province_reference=province)
+            (root/"inputs.json").write_text('{"version":1}')
+            complete(inventory,root/"original/release.json",root/"inputs.json",root/"completed")
+            self.assertEqual((root/"completed/provinces.json").read_bytes(),raw)
+            processor=json.loads((root/"completed/wildfire.json").read_text())
+            self.assertEqual(processor["province_sha256"],hashlib.sha256(raw).hexdigest())
 
 
 if __name__=="__main__":unittest.main()

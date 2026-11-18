@@ -27,7 +27,10 @@ Use `deployment/aggregator/config.integrated.example.json` and
 `deployment/role1/config.integrated.example.json` for integrated feature settings.
 The role1 input must explicitly enable analytics and contain the R3 source
 configuration. `wildfire_config` and `province_reference` reference UTF-8 files;
-their exact table hash and satellite namespace/start must match. Use the actual
+their exact table hash and satellite namespace/start must match. The configuration
+generator copies the bundled [38-row province reference](../../docs/Province-Reference.md)
+by default; manual preparation must copy it alongside the integrated wildfire
+config (as `wildfire.json`). Use the actual
 feed session and course reference inputs. Audit sessions can be enabled in the
 same input; live Audit API is enabled independently by the owner renderer.
 
@@ -55,7 +58,7 @@ python3 scripts/platform-release.py --phase infrastructure \
 This phase needs only the actual storage image digest from the image map, plus
 supplied or already prepared storage Secrets. It renders all six formations,
 namespace and network isolation, including ingestion replication/admin flows.
-It does not read the missing province table, require other application images,
+It does not read the province table, require other application images,
 or start sources, consumers or application servers. It still enforces declared
 storage memory budgets and Secret keys; live apply still checks all four Ready
 nodes, physical-host prerequisites and allocatable capacity. Add any operator

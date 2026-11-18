@@ -3,7 +3,6 @@
   "images": "/private/aat-run/images/images.json",
   "audit_token_file": "/private/instructor-audit-token",
   "satellite_token_file": "/private/satellite-token",
-  "province_reference": "/private/approved-provinces.json",
   "external_flows": "/private/external-flows.json",
   "source_identity": {
     "bmkg_namespace": "bnpb-bmkg-v1",

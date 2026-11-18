@@ -18,7 +18,7 @@ can reveal integration issues and is not replaced by these local checks.
 | Area | Result | Remaining input or execution |
 | --- | --- | --- |
 | Release assembly | [Release preparation](../deployment/platform/RELEASE.md): image publishing/digest capture, bootstrap/activation bundles and verified maintenance receipts | Supply registry/input files; execute bootstrap and maintenance on real nodes |
-| Private configuration | [Configuration generator](Platform-Private-Configuration.md): consistent service keys, six storage PKIs/passwords, restricted DSNs, integrated feature settings and client credentials | Instructor Audit token and agreed province reference remain pending; confirm namespaces/offsets and bounded satellite egress |
+| Private configuration | [Configuration generator](Platform-Private-Configuration.md): consistent service keys, six storage PKIs/passwords, restricted DSNs, integrated feature settings, client credentials and bundled 38-province reference | Instructor Audit token remains pending; confirm namespaces/offsets and bounded satellite egress |
 | Four physical hosts | [Four-host setup](Platform-Four-Physical-Hosts.md): one VM per physical host, Linux/libvirt or Windows/VirtualBox | Actual OS mapping, measured resources, identities, LAN addresses and SSH prerequisites |
 | Wildfire batches | [Multi-entity integration](Platform-Multi-Entity-Integration.md): live Citus capability checks retain fencing, transaction recovery and WAL confirmation | Replicated replay and failure validation |
 | Service databases | [Owned databases](Platform-Owned-Service-Databases.md): four HA formations, restricted roles and explicit schema/Registry initialization | Live bootstrap, identity capture and failover checks |
@@ -35,8 +35,9 @@ can reveal integration issues and is not replaced by these local checks.
 The private scaffold has been generated at
 `evidence/platform-private/fourhost-release`, using the supplied satellite token.
 Its 45 Secret objects, 24 leaf certificates, application DSNs and catalog key
-wiring were checked without contacting a deployment. Neither instructor Audit
-token nor province table is fabricated; both remain pending as requested.
+wiring were checked without contacting a deployment. The instructor Audit token
+remains pending. For this older scaffold, input completion now supplies the
+[project province table](Province-Reference.md) without regenerating credentials.
 The scaffold uses example four-host identities and is **not ready for activation**.
 See [private configuration](Platform-Private-Configuration.md) before editing or
 regenerating it. No credentials are committed.
@@ -56,9 +57,10 @@ supplies an explicit User-Agent accepted by the observed feed. The bounded probe
 is implemented and locally checked; actual live resume, burst, completeness and
 recovery verification remain pending.
 
-`deployment/role1/wildfire.integrated.example.json` deliberately contains an
-invalid province-hash placeholder. Supply an agreed real province centre table
-and its exact SHA-256; the repository's `(0,0)` fixture is not deployment data.
+`deployment/role1/wildfire.integrated.example.json` now pins the adjacent
+38-row `provinces.json` supplied by the project owner. Release preparation copies
+it by default; explicit table overrides remain supported. The repository's
+`(0,0)` fixture is only for tests. See [reference details](Province-Reference.md).
 Course reference results for correctness comparison are a separate input.
 
 ```sh
@@ -137,8 +139,8 @@ replicated failover, physical capacity or zero-loss acceptance results.
 
 Keep the declared allocation as an assumption for now. Later supply connection/
 provider inventory, registry inputs and consistent source backups. Image digests
-are produced by the publishing script. The instructor Audit token, agreed real
-province reference and comparison data remain pending; they are needed before
+are produced by the publishing script. The instructor Audit token and independent
+comparison data remain pending; they are needed before
 full acceptance. No immediate machine-capacity assessment is requested.
 Then prepare the four-host deployment and execute the
 [acceptance matrix](Platform-Acceptance-Plan.md) and

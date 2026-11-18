@@ -1,12 +1,13 @@
 """Cross-service credential wiring and fail-closed private release preparation."""
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from platform_lib.inventory import load
-from release_config_lib import prepare,province_bytes
+from release_config_lib import DEFAULT_PROVINCE_REFERENCE,prepare,province_bytes
 from storage_lib import write_json
 
 ROOT=Path(__file__).resolve().parent.parent
@@ -25,7 +26,7 @@ class ReleaseConfigurationChecks(unittest.TestCase):
         if layout.get("formation_suffix")=="registry-db":values.update(APICURIO_DATASOURCE_USERNAME="registry_app",APICURIO_DATASOURCE_PASSWORD="registry-private")
         (folder/"application.env").write_text("\n".join(k+"="+v for k,v in values.items()))
 
-    def test_pending_external_inputs_never_become_fake_credentials_or_reference(self):
+    def test_bundled_reference_and_pending_credentials(self):
         with tempfile.TemporaryDirectory()as folder,patch("release_config_lib.storage_credentials",self.fake_storage):
             output=Path(folder)/"release"
             token=Path(folder)/"satellite";token.write_text("not-a-live-token");token.chmod(0o600)
@@ -33,7 +34,14 @@ class ReleaseConfigurationChecks(unittest.TestCase):
             objects=json.loads((output/"secrets.json").read_text())["items"]
             secrets={o["metadata"]["name"]:o["stringData"]for o in objects}
             role=secrets[self.inventory["cluster_id"]+"-role1-runtime"];agg=secrets[self.inventory["cluster_id"]+"-aggregator-runtime"]
-            self.assertNotIn("AUDIT_TOKEN",role);self.assertFalse((output/"provinces.json").exists())
+            self.assertNotIn("AUDIT_TOKEN",role)
+            raw=(output/"provinces.json").read_bytes()
+            self.assertEqual(raw,DEFAULT_PROVINCE_REFERENCE.read_bytes())
+            self.assertEqual(len(json.loads(raw)),38)
+            processor=json.loads((output/"wildfire.json").read_text())
+            self.assertEqual(processor["province_file"],"provinces.json")
+            self.assertEqual(processor["province_sha256"],hashlib.sha256(raw).hexdigest())
+            self.assertFalse(any("province"in item for item in report["pending"]))
             self.assertEqual(role["SATELLITE_FEED_TOKEN"],"not-a-live-token")
             self.assertEqual(role["BMKG_API_KEY"],secrets["bmkg-runtime"]["BMKG_API_KEY"])
             self.assertEqual(agg["PVMBG_TOKEN"],secrets["pvmbg-runtime"]["PVMBG_TOKEN"])
@@ -49,6 +57,16 @@ class ReleaseConfigurationChecks(unittest.TestCase):
             before=(output/"secrets.json").read_bytes()
             with self.assertRaisesRegex(ValueError,"rotation"):prepare(self.inventory,output)
             self.assertEqual((output/"secrets.json").read_bytes(),before)
+
+    def test_explicit_reference_overrides_bundled_table(self):
+        with tempfile.TemporaryDirectory()as folder,patch("release_config_lib.storage_credentials",self.fake_storage):
+            root=Path(folder);province=root/"custom.json"
+            raw=b'[{"id":"chosen","name":"Chosen Region","latitude":-6.9,"longitude":107.6}]\n'
+            province.write_bytes(raw)
+            prepare(self.inventory,root/"release",province_reference=province)
+            self.assertEqual((root/"release/provinces.json").read_bytes(),raw)
+            processor=json.loads((root/"release/wildfire.json").read_text())
+            self.assertEqual(processor["province_sha256"],hashlib.sha256(raw).hexdigest())
 
     def test_fixture_reference_and_public_token_file_are_refused_before_generation(self):
         with tempfile.TemporaryDirectory()as folder,patch("release_config_lib.storage_credentials")as generate:

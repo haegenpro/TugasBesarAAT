@@ -3,3 +3,5 @@
 *.sh text eol=lf
 # Fixture digests are calculated over exact bytes, including line endings.
 docs/fixtures/** text eol=lf
+# The deployed province reference is also pinned by its exact byte digest.
+deployment/role1/provinces.json text eol=lf

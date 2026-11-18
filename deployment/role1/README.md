@@ -11,6 +11,12 @@ digests. `Dockerfile.dockerignore` excludes local credentials and evidence.
 It also includes the read-only [satellite contract probe](../../docs/Platform-Satellite-Probe.md)
 for bounded live resume/payload checks during later validation.
 
+The integrated wildfire config uses the adjacent 38-row `provinces.json`, with
+its exact SHA-256 pinned in `wildfire.integrated.example.json`. Private release
+preparation copies this table by default. See the
+[province reference](../../docs/Province-Reference.md) for provenance, mapping
+rules and explicit overrides.
+
 Ingestion owns a **separate** PostgreSQL formation, credentials and migration
 journal. Reuse the platform storage workflow with `--formation-suffix ingestion
 --mode postgres`; never point it at canonical volumes or databases. The extra
