@@ -63,12 +63,15 @@ def main():
         sql(containers["test-notifier-db-0"],"notifier","DELETE FROM coastal_warning_receipts;")
         missing=observer.collect(reference);missing["audit"]=observed["audit"]
         if analyze(reference,missing,max_clock_uncertainty_ms=2000)["passed"]:raise RuntimeError("missing receipt was incorrectly accepted")
+        sql(containers["test-notifier-db-0"],"notifier","INSERT INTO coastal_warning_receipts VALUES("+literal(ids[0])+",'warning-digest','obs',"+literal(first.isoformat())+","+literal(first.isoformat())+","+literal(committed.isoformat())+");")
         sql(containers["test-storage-0"],"hazards","UPDATE input_history SET original_payload='changed'::bytea WHERE position=0;")
         changed=observer.collect(reference);changed["audit"]=observed["audit"]
-        if analyze(reference,changed,max_clock_uncertainty_ms=2000)["passed"]:raise RuntimeError("changed payload was incorrectly accepted")
+        checked=analyze(reference,changed,max_clock_uncertainty_ms=2000)
+        if checked["passed"]or checked["missing_receipts"]or not any("satellite payload"in failure for failure in checked["failures"]):raise RuntimeError("changed payload was not independently rejected")
         captures["storage"]["groups"][0]["system_id"]="999999"
         try:observer.progress()
-        except ValueError:pass
+        except ValueError as exc:
+            if "original captured physical member"not in str(exc):raise
         else:raise RuntimeError("wrong original identity was incorrectly accepted")
         report.update(passed=True,checks={"actual_read_only_SQL_and_complete_fixture":True,"missing_receipt_refused":True,"changed_payload_refused":True,"wrong_identity_refused":True},observed_clock_uncertainty_ms=initial["clock_uncertainty_ms"])
     finally:
