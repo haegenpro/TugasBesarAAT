@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "images": "/private/image-release/images.json",
+  "audit_token_file": "/private/instructor-audit-token",
+  "satellite_token_file": "/private/satellite-token",
+  "province_reference": "/private/approved-provinces.json",
+  "external_flows": "/private/external-flows.json",
+  "source_identity": {
+    "bmkg_namespace": "bnpb-bmkg-v1",
+    "bmkg_initial_offset": 1,
+    "satellite_namespace": "bnpb-satellite-practice-v1",
+    "satellite_initial_offset": 0
+  }
+}
