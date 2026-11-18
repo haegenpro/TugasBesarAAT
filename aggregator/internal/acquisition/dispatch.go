@@ -115,6 +115,9 @@ type dispatchTransport struct {
 	base       *url.URL
 	maxBody    int64
 	next       http.RoundTripper
+	waitMu     sync.Mutex
+	waitEpoch  int64
+	waiting    map[string]bool
 }
 
 func digest(v string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(v))) }
@@ -169,9 +172,11 @@ func (t *dispatchTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	r, err := t.repository.ReserveDispatch(call, d)
 	cancel()
 	if err != nil {
+		t.markWaiting(owner, lane, true)
 		platform.Add("acquisition_dispatch_blocked_total", 1)
 		return nil, fmt.Errorf("%w: %w", ErrDispatchPending, err)
 	}
+	t.markWaiting(owner, lane, false)
 	identity.mu.Lock()
 	if identity.started.IsZero() || r.StartedAt.Before(identity.started) {
 		identity.started = r.StartedAt
@@ -311,7 +316,31 @@ func RequestStarted(ctx context.Context, fallback time.Time) time.Time {
 }
 
 func (t *dispatchTransport) interrupt(d Dispatch, reason string) {
+	t.markWaiting(d.Owner, d.Lane, true)
 	c, done := context.WithTimeout(context.Background(), canonical.Deadline)
 	defer done()
 	_ = t.repository.InterruptDispatch(c, d, reason)
+}
+
+// A counter of previous waits must not keep a recovery alert firing after
+// acquisition succeeds. Aggregate current waits across lanes of this source.
+func (t *dispatchTransport) markWaiting(owner canonical.Ownership, lane string, waiting bool) {
+	t.waitMu.Lock()
+	defer t.waitMu.Unlock()
+	if owner.Epoch < t.waitEpoch {
+		return
+	}
+	if owner.Epoch > t.waitEpoch || t.waiting == nil {
+		t.waitEpoch = owner.Epoch
+		t.waiting = map[string]bool{}
+	}
+	t.waiting[lane] = waiting
+	value := float64(0)
+	for _, pending := range t.waiting {
+		if pending {
+			value = 1
+			break
+		}
+	}
+	platform.Gauge("acquisition_"+strings.ToLower(t.source)+"_dispatch_waiting", value)
 }

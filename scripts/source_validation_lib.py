@@ -87,10 +87,17 @@ def dispatch_status(observer):
       'epoch',d.epoch,'holder',d.holder,'state',d.state,'streaming',d.streaming,
       'started_at',d.started_at,'completed_at',d.completed_at,'status',d.status,
       'receipt_bytes',octet_length(d.body),
+      'attempt_started_at',d.attempt_started_at,'retry_after',d.retry_after,
+      'stream_open',d.stream_open,'interrupted',d.interrupted,
+      'recovery_count',d.recovery_count,'last_recovery_at',d.last_recovery_at,
+      'previous_dispatch_id',d.previous_dispatch_id,'last_failure',d.last_failure,
+      'recovery_ready',d.state='pending' AND d.retry_after<=clock_timestamp() AND
+        o.holder IS NOT NULL AND o.expires_at>clock_timestamp() AND
+        (o.epoch<>d.epoch OR o.holder IS DISTINCT FROM d.holder OR d.interrupted OR NOT d.stream_open),
       'blocking',d.state='pending' AND (
         o.epoch<>d.epoch OR o.holder IS DISTINCT FROM d.holder OR
-        o.expires_at IS NULL OR o.expires_at<=clock_timestamp() OR
-        (NOT d.streaming AND d.started_at<clock_timestamp()-interval '10 seconds'))
+        o.expires_at IS NULL OR o.expires_at<=clock_timestamp() OR d.interrupted OR
+        (NOT d.stream_open AND d.retry_after<=clock_timestamp()))
       ) ORDER BY d.scope,d.lane),'[]'::jsonb)
       FROM acquisition_dispatch d JOIN canonical_ownership o USING(scope)"""
     for suffix in("storage","ingestion"):
@@ -173,7 +180,7 @@ def analyze(reference,observed,max_clock_uncertainty_ms=500):
     def check(condition,reason):
         if not condition:failures.append(reason)
     dispatch=observed.get("dispatch")
-    check(isinstance(dispatch,dict)and set(dispatch)=={"storage","ingestion"}and all(isinstance(v,list)and all(type(row.get("blocking"))is bool and not row["blocking"]for row in v)for v in dispatch.values()),"source dispatch evidence is missing or an uncertain/stale request blocks acquisition")
+    check(isinstance(dispatch,dict)and set(dispatch)=={"storage","ingestion"}and all(isinstance(v,list)and all(type(row.get("blocking"))is bool and not row["blocking"]for row in v)for v in dispatch.values()),"source dispatch evidence is missing or automatic acquisition recovery remains unfinished")
     expected={r["offset"]:r["payload_sha256"]for r in reference["satellite"]["records"]};rows=observed.get("satellite",[]);actual={r["offset"]:r for r in rows}
     check(len(actual)==len(rows)and set(actual)==set(expected),"satellite reference identities are missing, duplicated or unexpected")
     check(all(actual.get(offset,{}).get("payload_sha256")==digest and actual.get(offset,{}).get("state")=="applied"for offset,digest in expected.items()),"satellite payload changed or canonical work remains unapplied")

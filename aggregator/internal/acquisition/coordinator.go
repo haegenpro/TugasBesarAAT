@@ -193,6 +193,7 @@ func (c *Coordinator) lead(ctx context.Context, source string, acquired canonica
 	platform.Add(metric+"_acquired_total", 1)
 	platform.Gauge(metric+"_active", 1)
 	defer platform.Gauge(metric+"_active", 0)
+	defer platform.Gauge(metric+"_dispatch_waiting", 0)
 	g := &guard{ctx: leaseCtx, cancel: cancel, owner: owner, until: until,
 		repository: c.repository, ready: c.Ready, budget: c.budget}
 	workCtx := context.WithValue(leaseCtx, guardKey{}, g)

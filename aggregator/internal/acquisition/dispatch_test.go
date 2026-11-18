@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,6 +56,9 @@ func TestDispatchLostReceiptAckReusesSavedResponse(t *testing.T) {
 		}
 		_, err := makeRequest()
 		require.ErrorIs(t, err, ErrDispatchPending)
+		metrics := httptest.NewRecorder()
+		platform.Metrics(metrics, httptest.NewRequest("GET", "/metrics", nil))
+		require.True(t, strings.Contains(metrics.Body.String(), "app_acquisition_bmkg_dispatch_waiting 1"))
 		resp, err := makeRequest()
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -62,6 +66,9 @@ func TestDispatchLostReceiptAckReusesSavedResponse(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "original", string(body))
 		require.EqualValues(t, 1, calls.Load())
+		metrics = httptest.NewRecorder()
+		platform.Metrics(metrics, httptest.NewRequest("GET", "/metrics", nil))
+		require.True(t, strings.Contains(metrics.Body.String(), "app_acquisition_bmkg_dispatch_waiting 0"))
 	})
 }
 func TestDispatchUnconfirmedIntentNeverReachesNetwork(t *testing.T) {

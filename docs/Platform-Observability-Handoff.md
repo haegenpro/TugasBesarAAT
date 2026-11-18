@@ -43,7 +43,8 @@ changes. API log collection adds kubelet/API overhead: measure it under load.
 | `app_http_requests_total`, duration histograms | Per-instance rates, status and latency; count controlled 429 separately from transport/5xx errors |
 | `app_acquisition_{bmkg,pvmbg}_active` | Local process believes it owns acquisition; compare authoritative epochs and upstream logs for uniqueness |
 | `app_acquisition_*_renew_failures_total` | Renewal failure observed by this process; freezes require external observation |
-| `app_acquisition_dispatch_{admitted,reused,blocked}_total` | Real dispatch decisions, cached response reuse and rejected sends; use the acquisition status script for durable pending metadata |
+| `app_acquisition_dispatch_{admitted,reused,blocked,recovered}_total` | Dispatch decisions, saved response reuse, rejected admissions and explicit automatic recovery reads |
+| `app_acquisition_{bmkg,pvmbg,satelit,sensor_pantai}_dispatch_waiting` | Current wait aggregated across this source's API lanes; cleared after admission/reuse or generation drain |
 | `app_stale_owner_rejections_total` | Authority rejected stale work; does not count every deferred SQL commit rejection |
 | `app_outbox_pending` | Committed outbox depth; owners add event age, source lag and delivery reconciliation |
 | Patroni `/metrics`, etcd `:2381/metrics` | Member role, WAL positions and DCS health; float WAL metrics are diagnostic, never a durability acknowledgement |
@@ -102,19 +103,29 @@ Configuration references: [Prometheus Kubernetes discovery](https://prometheus.i
 [Alloy Kubernetes log source](https://grafana.com/docs/alloy/latest/reference/components/loki/loki.source.kubernetes/),
 [Patroni metrics](https://patroni.readthedocs.io/en/latest/rest_api.html).
 
-## Durable source dispatch incidents
+## Automatic source recovery
 
-The integrated dashboard includes dispatch admission/reuse/block rates, and
-`AcquisitionDispatchBlocked` alerts on sustained blocked sends. Admission counters
-are diagnostic; reconcile the source's actual request log for uniqueness proof.
+The dashboard separates admitted sends, reused receipts, recovery reads and
+current per-source waits. `AcquisitionDispatchBlocked` alerts only when a current
+wait persists for 60 seconds; earlier counter increments do not keep the alert
+firing after recovery. It is diagnostic and does not measure fault-to-first-
+committed-progress timing by itself.
+
 The [acquisition protocol and runbook](Platform-Acquisition-Implementation.md)
-provides read-only inspection of original captured primaries. It exposes no
-credentials or cached response bodies and never clears an intent.
+provides read-only inspection of captured original primaries. It reports retry
+deadlines, interrupted/open-stream state, recovery counts and superseded nonces,
+without exposing credentials or response bodies. Recovery is automatic: current
+owners retry unfinished GETs from durable progress after bounded grace periods.
+There is no manual force-unlock step in the game-day path.
 
-Source acceptance now requires dispatch metadata from both owning databases. A
-pending old epoch, expired holder or finite request older than ten seconds fails
-acceptance even when the reference dataset was previously applied. A healthy
-current SSE connection remains allowed. Ten seconds is an observation threshold,
-not a safe expiry or permission to retry. Physical-node fencing, upstream outcome
-reconciliation and the <=60-second takeover target remain separate acceptance
-work; no force-unlock shortcut is provided.
+Source acceptance requires dispatch evidence from both owning databases and
+refuses completion while recovery is unfinished. Healthy current SSE connections
+remain allowed. A lost response can require an additional upstream HTTP request;
+compare logical IDs, ownership epochs and recovery flags when reconciling actual
+source logs. Do not equate a recovery retry with duplicate stored HazardEvents,
+or claim that client-generated headers enforce upstream idempotency.
+
+The isolated killed-process proof measures natural-lease takeover separately.
+Physical four-node recovery, real feed limits and actual upstream log acceptance
+remain deferred; no unconditional 60-second guarantee is claimed through an
+upstream outage or loss of database quorum.

@@ -32,7 +32,7 @@ def main():
     values = dispatch_status(Observer(Cluster(inventory), {}, receipt))
     blocked = [row for rows in values.values() for row in rows if row["blocking"]]
     print(json.dumps({"dispatch": values, "blocked_requests": len(blocked), "read_only": True,
-                      "recovery": "Pending requests never expire. Establish the original outcome and fence the sender; this tool cannot force an unlock."}, indent=2))
+                      "recovery": "The current source owner automatically retries unfinished reads after their grace period. Inspect ownership, retry_after and upstream health if recovery stalls; no force unlock is required."}, indent=2))
     return int(bool(blocked))
 
 

@@ -1,199 +1,201 @@
-# Source acquisition and durable HTTP admission
+# Source acquisition and automatic recovery
 
-The coordinated binaries now record durable HTTP dispatch intents before
-contacting a source. A newer lease cannot clear an old intent. This closes the
-check/pause/send race that lease preflights alone left open. Finite successful
-responses are saved before they are delivered to acquisition code, allowing a
-successor to reuse the response after a failed database commit.
+Source acquisition uses a database-backed lease, durable HTTP response reuse,
+and automatic retry of unfinished **read-only GETs**. An uncertain request no
+longer blocks its source indefinitely. A replacement resumes from persisted
+input progress without an operator clearing a lock or choosing a new namespace.
 
-This is an in-process sender guard backed by each source's owning PostgreSQL
-formation. It adds no gateway pods or database formation. The authoritative
-formation must retain its existing replicated durability contract; isolated
-single-copy tests do not establish that HA property.
+The sender guard lives inside the acquisition services and uses their existing
+PostgreSQL formations. It adds no gateway pods or database formation. The
+replicated durability adapter remains mandatory in the integrated deployment.
 
-## Ownership and database writes
+## Ownership and effects
 
-Each process incarnation has a unique holder ID. The coordinator acquires and
-renews a source lease, uses conservative monotonic deadlines, cancels work on
-lease/readiness loss and drains work before releasing. The source scopes are
-separate from public canonical delivery scopes:
-
-| Owning database | Source scope | Work |
+| Owning database | Acquisition scope | Work |
 | --- | --- | --- |
 | Canonical | `acquisition:PVMBG` | volcanic live/history polling and deferred mapping |
 | Ingestion | `acquisition:BMKG` | raw live and archive acquisition |
 | Ingestion | `acquisition:SATELIT` | satellite stream and session metadata |
 | Ingestion | `acquisition:SENSOR_PANTAI` | coastal observations and station metadata |
 
-The optional legacy BMKG poller uses its canonical acquisition scope when raw
-BMKG is disabled. Never run both BMKG acquisition paths against the same feed.
+A unique holder ID identifies each process incarnation. The default lease is
+15 seconds, renewed every five seconds; the configurable lease range remains
+12–30 seconds. Admission uses the authority's clock and conservative monotonic
+local deadlines. Lease loss cancels work. Protected input/canonical transactions
+still check the live epoch/holder at COMMIT, so a resumed obsolete worker cannot
+commit data, cursors, status or failure effects.
 
-Protected data transactions still take the authoritative lease SHARE lock and
-check epoch, holder and database-clock expiry at COMMIT. A stale process can
-finish saving its already-authorized HTTP receipt, using its unique dispatch
-nonce, but cannot use that permission to start another request or commit input,
-canonical data, cursors, status or failure effects.
+The optional legacy BMKG path owns a canonical acquisition scope when raw BMKG
+is disabled. Never run both acquisition paths against the same source. All old
+unguarded binaries must be stopped during the offline schema/image cutover.
 
-## Dispatch protocol
+## Requests and unfinished work
 
-`acquisition.Client` is installed on every coordinated source HTTP client.
-Source code cannot dispatch through it without an active source context and a
-request identity. The protocol is:
+1. The current live owner reserves a source/API-lane nonce and confirms durable
+   storage before HTTP dispatch. A completed HTTP 200 receipt for the same
+   logical request is returned from the database without another upstream call.
+2. A new intent has a ten-second grace period. While an old epoch still has a
+   request inside that period, another owner waits. Admission waits use a
+   500-millisecond retry interval rather than growing exponential backoff.
+3. The sender checks its local ownership and the authoritative nonce again
+   immediately before entering the HTTP transport. A worker resumed after its
+   admission became obsolete fails this check. Superseded nonces cannot overwrite
+   a replacement's saved response or close its stream entry.
+4. Transport/body failures mark the outcome interrupted, shortening the remaining
+   grace period to at most 500 milliseconds. This is **not** a claim that the
+   source never received the request. If that marker could not be saved, the
+   original ten-second period still bounds waiting for an unestablished request.
+5. The current owner can atomically supersede an eligible unfinished request and
+   retry from its committed cursor/generation. Old pending lanes are retired
+   source-wide after their grace periods, so an abandoned metadata request cannot
+   hold the entire source forever. Source ownership is rechecked for every retry.
+6. A successful finite response is saved before it is returned to decoding/input
+   storage. A lost response-save acknowledgement is resolved by finding that saved
+   receipt. Failure after fetching but before committing work does not consume
+   its logical request generation.
 
-1. Validate the source lease under its ownership row lock and reserve a unique
-   dispatch nonce in `acquisition_dispatch`. Commit and confirm the owning
-   formation's durability contract **before** entering the real HTTP transport.
-2. Keep the intent pending while the source request is unfinished. A successor
-   cannot open another request for that lane, or open other lanes while an older
-   epoch still has a pending request. No timeout or lease takeover reclaims it.
-3. For finite responses, read the complete bounded body and save status, headers
-   and bytes durably. A retry of the same logical request returns these bytes
-   without contacting the source again. Only complete HTTP 200 responses are
-   reused; fully received error responses can be retried with normal backoff.
-4. For satellite SSE, retain the intent for the connection's lifetime. Close the
-   underlying response body before recording it closed. A frozen or crashed
-   process cannot authorize another stream simply by losing its lease. Stream
-   reconnects resume from the existing persisted offset; replay remains normal
-   and downstream offset/identity deduplication remains necessary.
+Established satellite streams are recorded separately from unfinished connection
+opens. A live owner's established stream is not reclaimed just because it is
+older than ten seconds. A new owner can supersede an old owner's stream after
+its grace period without requiring the dead process to close the old body.
+Normal close releases its entry after closing the underlying body. Reconnection
+uses the persisted offset and existing immutable receipts/deduplication; it does
+not reset input progress. Satellite connection limits and Retry-After remain
+upstream constraints, not a reason to spin or bypass admission.
 
-A worker frozen before admission fails the authoritative check when it resumes.
-A worker frozen after admission retains the durable intent, so its successor
-waits for the receipt instead of independently issuing the same request.
+Finite network reads are bounded to eight seconds even if a caller supplies no
+shorter deadline. Existing BMKG/PVMBG deadlines are two seconds, coastal requests
+use their configured timeout and satellite metadata uses five seconds. Dial,
+TLS handshake and response-header waits are bounded as well. The transport uses
+fresh HTTP/1 connections, does not follow redirects, ignores environment proxies,
+and restricts methods/hosts/API lanes. It does not add hidden transport retries.
 
-The transport uses fresh HTTP/1 connections to prevent net/http's transparent
-retries on reused connections and HTTP/2 stream retries. It does not follow redirects, use environment proxies,
-accept request bodies, or allow a source context to select another host/API
-lane. Credentials influence a one-way request fingerprint; plaintext request
-credentials are not written to the ledger.
+Coastal admission waits do not count as upstream circuit-breaker failures. Real
+upstream failures still use the existing breaker and backoff. A newly elected
+legacy poller ignores a predecessor's persisted retry delay until it makes
+successful progress; one interrupted initial attempt cannot restore a long wait.
 
-## Request identities and cache bounds
+## Identity, retry semantics and limits
 
-Request generations follow committed work, not correlation UUIDs, lease epochs
-or worker wall clocks:
-
-| Path | Durable identity |
+| Read | Logical identity |
 | --- | --- |
-| Raw BMKG | namespace and next capture position, with API lane/archive cursor |
-| Legacy PVMBG/BMKG | endpoint dispatch generation, advanced only on successful committed polling work, with archive cursor |
-| Coastal observations | namespace and dispatch generation; successful empty pages also advance it |
-| Satellite session metadata | authority database clock window of five seconds |
-| Coastal station metadata | namespace and authority database clock window; only the source owner refreshes the shared snapshot |
+| Raw BMKG | namespace and next capture position, API lane/archive cursor |
+| Legacy PVMBG/BMKG | endpoint dispatch generation, API lane/archive cursor |
+| Coastal observations | namespace and dispatch generation; successful empty pages advance it |
+| Satellite metadata | authority database clock window of five seconds |
+| Coastal stations | namespace/database-clock refresh window, with one shared station snapshot |
 
-Failed health/backoff attempts do not consume a successful cached response.
-`last_attempt` records the current attempt, while `last_success` retains the
-original saved response's snapshot boundary. Polling boundaries and metadata
-windows use the database clock. Assessment history has a separate cache lane
-from regular BMKG history so concurrent loops cannot replace each other's
-unconsumed receipt.
+The generation advances only with committed work. `last_attempt` describes the
+current attempt while `last_success` retains the original receipt's conservative
+snapshot boundary. Assessment history has a separate lane from regular history
+so concurrent readers cannot replace each other's unfinished receipts. Station
+validators read the owner's shared database snapshot instead of opening their
+own upstream connections.
 
-The ledger keeps one response per fixed API lane, replacing consumed generations
-rather than accumulating an archive. Finite bounds are 32 MiB per BMKG/PVMBG
-response, additionally capped by the configured raw BMKG payload quota; 4 MiB
-per coastal response; and 64 KiB for satellite metadata. SSE bodies are streamed
-and are not buffered into this cache. The integrated profile has at most four
-BMKG response lanes, two PVMBG lanes, two coastal lanes and one finite satellite
-lane: about 200.1 MiB of logical receipt bytes at their maximum, before PostgreSQL
-replication, WAL and transient old row versions. These bytes use the existing
-storage formations. Reading a finite response also needs memory up to its bound
-per concurrent request; the cache is not a hardware-capacity proof.
+Requests carry `X-Acquisition-Request-ID`, `X-Acquisition-Epoch` and
+`X-Acquisition-Recovery`. The ID survives a lost-response recovery; the recovery
+flag distinguishes an explicit recovery read. These headers aid reconciliation;
+they do not make an external service implement deduplication or epoch fencing.
+Request credentials are fingerprinted, not stored as plaintext in the ledger.
+The owned BMKG/PVMBG request logs include a validated `acquisition` object with
+`request_id`, `epoch` and `recovery`; these remain caller-reported observations,
+not receiver-side authorization. Rebuild those mock images as well to capture the
+new log fields. External satellite/coastal services are unchanged.
 
-An incomplete or oversized body leaves its intent pending. It never silently
-advances a cursor, discards the uncertainty or triggers an automatic refetch.
+A source can receive an original GET and its recovery retry after the original
+reply was lost. History/SSE replay is also expected. This implementation prevents
+multiple normal pollers and duplicate persisted effects; it does **not** promise
+exactly one physical HTTP arrival under arbitrary crashes, delayed packets or a
+pause after the final validation. No client-only check makes the database decision
+atomic with remote HTTP receipt. That stronger interpretation of P2.2 would need
+receiver-side support or agreement about permitted recovery retries. Upstream
+logs must distinguish recovery from ongoing traffic multiplied by replica count.
 
-## Uncertain outcomes and availability
+Automatic recovery depends on replayable source data: durable history/cursors
+and satellite offsets must still be retained by the source. Retrying a read
+cannot reconstruct a response that an upstream permanently discarded. Source
+outages, exhausted connection limits or loss of database quorum can prevent the
+60-second target; these conditions must be reported rather than called a pass.
 
-A crash after dispatch intent commit and before durable receipt completion is
-ambiguous: the source may have received the request even when no reply survived.
-The safe behavior is to stop automatic acquisition for that source. The ledger
-survives process restarts and ownership changes. Other source scopes, existing
-read traffic and committed outbox work can continue independently.
+The cache retains one finite response per fixed API lane: 32 MiB per BMKG/PVMBG
+response (also capped by the raw BMKG payload quota), 4 MiB per coastal response,
+and 64 KiB for satellite metadata. SSE bodies are streamed. The integrated
+profile's logical finite receipt maximum is about 200.1 MiB before replication,
+WAL and old row versions, using the existing formations. Per-request memory can
+reach its body limit. Incomplete/oversized reads do not advance a cursor; they
+remain failed reads subject to recovery and source backoff, not accepted data.
 
-Do not delete pending rows, clear them after a TTL, restore an older database
-snapshot or force a new namespace to bypass this protection. An operator must
-first make the old sender unable to resume. That alone does not prove a finite
-request was never received: restoring acquisition also needs a verified complete
-receipt or receiver-side evidence/protocol establishing the original outcome.
-Without such evidence the outcome remains unknown and the source stays blocked.
-For streams, verified sender fencing and the durable offset must govern recovery;
-a terminated connection cannot be inferred merely from pod deletion or lease
-expiry. There is deliberately no generic force-unlock command.
+## Diagnosis and deployment
 
-The read-only inspection script needs only the existing inventory and maintenance
-receipt; it does not need the pending Audit token or province/reference inputs:
+Use the existing inventory and maintenance receipt; no Audit token or approved
+province/reference file is needed for this read-only inspection:
 
 ```sh
 python3 scripts/platform-acquisition-status.py \
   --inventory /private/inventory.json --receipt /private/maintenance-receipt.json
 ```
 
-It queries captured original primaries and exits nonzero for a stale/uncertain
-pending dispatch. A current healthy SSE connection is not an incident. Ten
-seconds is a diagnostic threshold for finite requests, never an unlock TTL.
-It prints only metadata and receipt sizes. The source validation runner also
-requires these observations, so already-complete reference data cannot hide
-blocked acquisition. Old observations without dispatch evidence need recollection.
+The script queries captured original primaries and reports non-ready pending
+work, grace deadlines, recovery eligibility, recovery counts and the previous
+nonce. It prints metadata and receipt sizes, never body bytes or credentials.
+Healthy established SSE connections remain allowed. A pending entry is recovery
+state, not a permanent manual lock. Do not manually delete it or invent new
+input identities to unblock it.
 
-For direct inspection on the original primary, the equivalent read-only SQL is:
+Source reference validation refuses to claim completion while automatic recovery
+is unfinished, even if historical reference data was already applied. The
+Prometheus dashboard includes recovery reads and current waiting state. The
+`AcquisitionDispatchBlocked` alert requires a source's current admission wait to
+persist for 60 seconds, and clears when the wait clears; historical counter
+increments do not keep it firing. This diagnostic alert is separate from measured
+fault-to-committed-progress acceptance.
 
-```sql
-SELECT scope,lane,dispatch_id,epoch,holder,state,streaming,started_at,completed_at,
-       status,octet_length(body) AS receipt_bytes
-FROM acquisition_dispatch ORDER BY scope,lane;
-```
+Rebuild the role1 image and run the existing offline maintenance workflow before
+activation. Canonical and ingestion migrations now include the shared additive
+`0016_acquisition_recovery.sql`. Earlier migrations, including 0014/0015, retain
+their original checksums. Maintenance receipts bind the new schema/image contract;
+old receipts cannot authorize activation of the new bundle. No new Secrets or
+machine-spec inputs are required.
 
-The monitoring bundle exposes admitted, reused and blocked dispatch counters,
-a dashboard panel and the `AcquisitionDispatchBlocked` alert. A blocked source
-is an incident, not evidence that acquisition recovered successfully.
+Single-instance legacy development can still opt out with
+`ACQUISITION_ENABLED=false`. The integrated profile requires coordination; raw
+ingestion always installs the guarded clients. Multiple unguarded pollers are
+unsupported.
 
-Safety and an unconditional <=60-second takeover after an indefinitely frozen
-or killed sender cannot both be promised by this client-only protocol when an
-external feed offers no request-ID deduplication or fencing. Receiver-side
-support or a physically fenced acquisition path is still necessary to meet
-that stronger availability requirement. This implementation chooses duplicate
-request safety and reports the unresolved outcome instead of silently weakening
-it. It does not claim mathematically exactly-once execution inside an external
-HTTP server, or eliminate intentional history/SSE replay requests.
-
-## Deployment and validation
-
-Run the existing offline maintenance workflow with the rebuilt role1 image.
-Canonical migrations now include `0014_acquisition_dispatch.sql` and
-`0015_poll_dispatch_progress.sql`. Ingestion applies the shared dispatch table
-migration and its own `0005_dispatch_progress.sql`. Existing migration checksums
-are unchanged. The release maintenance receipt binds the new schema/image
-contract; old receipts must not be reused. Stop all old acquisition binaries
-before migration and activation so an unguarded process cannot bypass admission.
-
-Coordination remains opt-in for single-instance development via
-`ACQUISITION_ENABLED=false`. The integrated replicated profile requires it;
-raw ingestion always installs the guarded clients. Never use multiple unguarded
-legacy pollers. No new release credentials or user-provided machine specs are
-needed for this change.
-
-The isolated proof runner uses temporary labelled PostgreSQL/toolchain containers
-sharing a network-isolated loopback namespace, actual HTTP handlers and controlled
-pause points. It publishes no host ports and contacts no live source:
+## Evidence and remaining acceptance
 
 ```sh
 python3 scripts/test-acquisition-dispatch.py
 ```
 
-It checks freezes before/after durable admission, actual upstream request counts,
-saved response reuse, stale database writes, process restart with a lost response,
-stream handoff, missing/changed request identities, redirects/body bounds, lost
-receipt acknowledgements, unconfirmed intent rejection, retry snapshot boundaries,
-shared station reads and empty coastal pages. It requires all named proofs to
-pass, rejects skips, records evidence and removes only its owned containers.
+The isolated runner publishes no host ports, contacts no live feed and starts no
+VMs. It uses PostgreSQL, actual HTTP/TLS handlers, controlled pauses, and a worker
+subprocess that is actually killed after the upstream accepts a request. Three
+replacement contenders use the normal 15-second lease. The measured interval
+ends after a replacement commits a HazardEvent and protected progress. This
+particular proof never edits lease timestamps, bypasses authority or manually
+clears a request. Replaying the event must leave one stored HazardEvent.
 
-Local evidence `evidence/platform-acquisition-dispatch/e2a961d3aa54/result.json`
-records 17 passes, zero failures/skips and no remaining container cleanup. The
-focused connector suites and 124 offline Python checks also passed. A separate
-observer SQL fixture verifies that healthy streams are accepted and stale or
-aged finite pending dispatches make source validation fail even with complete
-reference data. Its evidence is under `evidence/platform-source-validation/`.
-These diagnostic snapshots do not establish request-by-request upstream log
-uniqueness or a measured takeover latency.
+Final automatic-recovery evidence:
+`evidence/platform-acquisition-dispatch/78f2f678c154/result.json` records 22 passes,
+zero failures/skips and no remaining cleanup. The killed-worker case committed
+progress in 15,446 ms, with one stored HazardEvent and cursor 7. Its upstream saw
+two HTTP requests: the original whose reply was lost and one recovery read with
+the same logical ID. Three contenders did not produce three polling streams.
+This is a measured local process recovery result, **not** four-node HA acceptance.
+The final focused connector suites and 124 offline Python tests also passed;
+`evidence/platform-source-validation/219fc048021f/result.json` records eight real
+PostgreSQL observer checks, including visible automatic-recovery eligibility.
+Both owned source middleware suites verify the new log fields and exclusion of
+credential headers. Temporary containers from both isolated runners were cleaned.
 
-The four-VM freeze, permanent-node-loss, database-promotion, clock-skew, live-feed
-and measured takeover acceptance runs remain deferred. A local protocol pass is
-not a claim that those physical tests or the <=60-second SLA passed.
+The suite also covers before/after-admission freezes, stale writes, completed
+response reuse after takeover, stale nonce completion/close rejection, stream
+recovery without the old caller closing its body, actual satellite connector
+resume, shared station reads, empty pages, missing/changed identities, body bounds,
+redirect rejection, unconfirmed intent rejection and lost receipt acknowledgements.
+
+Four-VM failover, permanent-node loss, database promotion, clock shifts, real
+source request logs, live connection limits and the measured game-day criteria
+remain pending on the actual formation. A local 60-second assertion cannot replace
+those runs or establish unconditional recovery during an upstream/quorum outage.
