@@ -56,13 +56,17 @@ type Connector struct {
 	MaxEventSize  int
 	ExclusiveFrom bool
 	Logger        *slog.Logger
+	MetadataKey   func(context.Context) (string, error)
 
 	published atomic.Int64
 	latest    atomic.Int64
 }
 
 func (c *Connector) Run(ctx context.Context) {
-	go c.watchSession(ctx)
+	sessionCtx, stopSession := context.WithCancel(ctx)
+	sessionDone := make(chan struct{})
+	go func() { defer close(sessionDone); c.watchSession(sessionCtx) }()
+	defer func() { stopSession(); <-sessionDone }()
 	failures := 0
 	for ctx.Err() == nil {
 		err := c.connect(ctx)
@@ -127,6 +131,7 @@ func (c *Connector) connect(ctx context.Context) error {
 	if c.ExclusiveFrom {
 		from--
 	}
+	stream = acquisition.WithRequestKey(stream, "stream:"+c.Progress.Namespace+":"+uuid.NewString())
 	req, err := c.request(stream, "/v1/stream?from="+strconv.FormatInt(from, 10))
 	if err != nil {
 		return err
@@ -263,6 +268,17 @@ func (c *Connector) envelope(ctx context.Context, owner canonical.Ownership, e E
 func (c *Connector) watchSession(ctx context.Context) {
 	for {
 		call, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if c.MetadataKey != nil {
+			key, err := c.MetadataKey(call)
+			if err != nil {
+				cancel()
+				if !rawinput.Sleep(ctx, 5*time.Second) {
+					return
+				}
+				continue
+			}
+			call = acquisition.WithRequestKey(call, "session:"+key)
+		}
 		if req, err := c.request(call, "/v1/session"); err == nil {
 			if resp, err := c.HTTP.Do(req); err == nil {
 				var s struct {

@@ -45,6 +45,11 @@ func (w *Worker) Step(ctx context.Context) error {
 		return err
 	}
 	if pending == nil {
+		key, err := w.Store.RequestKey(ctx)
+		if err != nil {
+			return err
+		}
+		ctx = acquisition.WithRequestKey(ctx, key)
 		task, err := w.Store.Task(ctx)
 		if err != nil {
 			return err
@@ -77,6 +82,7 @@ func (w *Worker) Step(ctx context.Context) error {
 			return err
 		}
 		defer resp.Body.Close()
+		meta.RequestStarted = acquisition.RequestStarted(ctx, meta.RequestStarted)
 		if resp.StatusCode != 200 {
 			return fmt.Errorf("BMKG response %d; source progress unchanged", resp.StatusCode)
 		}

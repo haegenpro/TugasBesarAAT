@@ -32,14 +32,15 @@ type LifecycleEvent struct {
 }
 
 type EndpointStatus struct {
-	Endpoint    string     `json:"endpoint"`
-	State       string     `json:"state"`
-	LastSuccess *time.Time `json:"last_success,omitempty"`
-	LastAttempt *time.Time `json:"last_attempt,omitempty"`
-	StaleSince  *time.Time `json:"stale_since,omitempty"`
-	NextAttempt *time.Time `json:"next_attempt,omitempty"`
-	Failures    int        `json:"failures"`
-	Revision    int64      `json:"revision"`
+	Endpoint           string     `json:"endpoint"`
+	DispatchGeneration int64      `json:"-"`
+	State              string     `json:"state"`
+	LastSuccess        *time.Time `json:"last_success,omitempty"`
+	LastAttempt        *time.Time `json:"last_attempt,omitempty"`
+	StaleSince         *time.Time `json:"stale_since,omitempty"`
+	NextAttempt        *time.Time `json:"next_attempt,omitempty"`
+	Failures           int        `json:"failures"`
+	Revision           int64      `json:"revision"`
 }
 
 type RecordMetadata struct {

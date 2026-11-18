@@ -22,10 +22,15 @@ func startSatellite(ctx context.Context, coordinator *acquisition.Coordinator, d
 		return fmt.Errorf("invalid SATELLITE_INITIAL_OFFSET")
 	}
 	progress := &ingestion.SourceStore{DB: db, Durability: durability, Fence: authority, Source: satellite.Source, Namespace: os.Getenv("SATELLITE_NAMESPACE")}
+	sourceHTTP, err := acquisition.Client(authority, satellite.Source, os.Getenv("SATELLITE_FEED_URL"), 0, 64<<10)
+	if err != nil {
+		return err
+	}
 	connector := &satellite.Connector{
+		MetadataKey:   func(ctx context.Context) (string, error) { return authority.DispatchWindow(ctx, 5*time.Second) },
 		BaseURL:       os.Getenv("SATELLITE_FEED_URL"),
 		Token:         os.Getenv("SATELLITE_FEED_TOKEN"),
-		HTTP:          platform.Client(0),
+		HTTP:          sourceHTTP,
 		Progress:      progress,
 		Sender:        sender,
 		Start:         start,

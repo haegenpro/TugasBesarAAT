@@ -7,7 +7,9 @@ import (
 )
 
 type StationCache struct {
-	Client     *Client
+	Client interface {
+		FetchStations(context.Context) ([]Station, error)
+	}
 	TTL        time.Duration
 	MissDelay  time.Duration
 	mu         sync.Mutex

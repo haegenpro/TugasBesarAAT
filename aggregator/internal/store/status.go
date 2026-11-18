@@ -1,6 +1,7 @@
 package store
 
 import (
+	"aggregator/internal/acquisition"
 	"aggregator/internal/domain"
 	"aggregator/internal/middleware"
 	"context"
@@ -12,11 +13,11 @@ import (
 
 func scanStatus(row pgx.Row) (domain.EndpointStatus, error) {
 	var p domain.EndpointStatus
-	err := row.Scan(&p.Endpoint, &p.State, &p.LastSuccess, &p.LastAttempt, &p.StaleSince, &p.NextAttempt, &p.Failures, &p.Revision)
+	err := row.Scan(&p.Endpoint, &p.State, &p.LastSuccess, &p.LastAttempt, &p.StaleSince, &p.NextAttempt, &p.Failures, &p.Revision, &p.DispatchGeneration)
 	return p, err
 }
 
-const statusColumns = `endpoint,state,last_success,last_attempt,stale_since,next_attempt,failures,revision`
+const statusColumns = `endpoint,state,last_success,last_attempt,stale_since,next_attempt,failures,revision,dispatch_generation`
 
 func (s *Store) PollStatus(ctx context.Context, endpoint string) (domain.EndpointStatus, error) {
 	ctx = middleware.EnsureCorrelationID(ctx)
@@ -69,7 +70,10 @@ func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success
 		return err
 	}
 	previous := p.State
-	now := domain.Now()
+	var now time.Time
+	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return err
+	}
 	attemptedAt := now
 	if len(started) > 0 {
 		attemptedAt = started[0].UTC()
@@ -83,11 +87,16 @@ func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success
 	if p.LastAttempt != nil && !p.LastAttempt.After(now) && attemptedAt.Before(*p.LastAttempt) {
 		return tx.Commit(ctx)
 	}
+	snapshotAt := acquisition.RequestStarted(ctx, attemptedAt)
+	if snapshotAt.IsZero() || snapshotAt.After(now) {
+		return errors.New("source snapshot start must be nonzero and not in the future")
+	}
 	p.LastAttempt = &attemptedAt
 	delay := interval
 	if success {
+		p.DispatchGeneration++
 		p.State = "fresh"
-		p.LastSuccess = &attemptedAt
+		p.LastSuccess = &snapshotAt
 		p.StaleSince = nil
 		p.Failures = 0
 	} else {
@@ -112,7 +121,7 @@ func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success
 	if changed {
 		p.Revision++
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO source_poll_state(endpoint,state,last_success,last_attempt,stale_since,next_attempt,failures,revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(endpoint) DO UPDATE SET state=excluded.state,last_success=excluded.last_success,last_attempt=excluded.last_attempt,stale_since=excluded.stale_since,next_attempt=excluded.next_attempt,failures=excluded.failures,revision=excluded.revision`, p.Endpoint, p.State, p.LastSuccess, p.LastAttempt, p.StaleSince, p.NextAttempt, p.Failures, p.Revision)
+	_, err = tx.Exec(ctx, `INSERT INTO source_poll_state(endpoint,state,last_success,last_attempt,stale_since,next_attempt,failures,revision,dispatch_generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(endpoint) DO UPDATE SET state=excluded.state,last_success=excluded.last_success,last_attempt=excluded.last_attempt,stale_since=excluded.stale_since,next_attempt=excluded.next_attempt,failures=excluded.failures,revision=excluded.revision,dispatch_generation=excluded.dispatch_generation`, p.Endpoint, p.State, p.LastSuccess, p.LastAttempt, p.StaleSince, p.NextAttempt, p.Failures, p.Revision, p.DispatchGeneration)
 	if err != nil {
 		return err
 	}
@@ -226,4 +235,12 @@ func (s *Store) Notice(ctx context.Context, id string) (domain.Notice, []domain.
 		out = append(out, e)
 	}
 	return n, out, rows.Err()
+}
+
+// PollNow keeps acquisition polling boundaries on the authority's clock even
+// when worker wall clocks are deliberately skewed for the M2 fault test.
+func (s *Store) PollNow(ctx context.Context) (time.Time, error) {
+	var now time.Time
+	err := s.Pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now)
+	return now, err
 }

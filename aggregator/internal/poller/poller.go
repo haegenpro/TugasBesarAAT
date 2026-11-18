@@ -11,6 +11,7 @@ import (
 	"aggregator/internal/volcano"
 	"context"
 	"errors"
+	"fmt"
 	"github.com/google/uuid"
 	"log/slog"
 	"sync"
@@ -197,8 +198,22 @@ func (p *Poller) attempt(ctx context.Context, endpoint, cid string, status domai
 	}
 	ctx, span := platform.Start(ctx, "ingest "+endpoint)
 	defer span.End()
+	generation := fmt.Sprintf("%d", status.DispatchGeneration)
+	ctx = acquisition.WithRequestKey(ctx, endpoint+":"+generation)
 	started := domain.Now()
+	if clock, ok := p.Store.(interface {
+		PollNow(context.Context) (time.Time, error)
+	}); ok {
+		var err error
+		started, err = clock.PollNow(ctx)
+		if err != nil {
+			return err
+		}
+	}
 	err := fn(ctx, cid, p.since(endpoint, status.LastSuccess, started))
+	if errors.Is(err, acquisition.ErrDispatchPending) || errors.Is(err, acquisition.ErrDispatchIdentity) {
+		return err
+	}
 	if st, ok := p.Store.(RecoveryStore); ok {
 		// Data is committed by fn before last_success may advance. If this write
 		// fails, the previous cursor survives and the next attempt safely repeats.
@@ -278,10 +293,10 @@ func (p *Poller) pollWarnings(ctx context.Context, cid string, since time.Time) 
 			if err != nil {
 				return err
 			}
-			page, err := p.BMKG.FetchHistory(ctx, cid, "tsunami-warnings", cursor)
+			page, err := p.BMKG.FetchHistory(acquisition.WithRequestLane(ctx, "assessment"), cid, "tsunami-warnings", cursor)
 			complete = err == nil && !page.HasMore && len(page.Data) == 0
 		}
-		return st.CommitWarnings(ctx, warnings, cid, 0, started, complete)
+		return st.CommitWarnings(ctx, warnings, cid, 0, acquisition.RequestStarted(ctx, started), complete)
 	}
 	return nil
 }
@@ -380,6 +395,7 @@ func (p *Poller) replay(ctx context.Context, cid, entity string) error {
 	if err != nil {
 		return err
 	}
+	started = acquisition.RequestStarted(ctx, started)
 	// Commit each replay cursor with its observation and resulting outbox work.
 	for _, item := range page.Data {
 		switch entity {

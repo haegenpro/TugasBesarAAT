@@ -102,9 +102,9 @@ func Token(ctx context.Context, source string) (canonical.Ownership, error) {
 	return g.token(source)
 }
 
-// RequireRequest is installed on both live and history clients. It refreshes
-// authoritative evidence immediately before dispatch; it is not an upstream
-// fencing protocol and does not make HTTP+database work one atomic operation.
+// RequireRequest provides early cancellation for live/history clients. Durable
+// upstream admission is separately enforced by acquisition.Client; this check
+// alone does not close the pause between validation and the socket write.
 func RequireRequest(ctx context.Context, source string) error {
 	g, _ := ctx.Value(guardKey{}).(*guard)
 	owner, err := Token(ctx, source)

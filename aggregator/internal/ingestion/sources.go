@@ -14,8 +14,9 @@ import (
 )
 
 type Progress struct {
-	Position int64
-	Cursor   *string
+	Position   int64
+	Generation int64
+	Cursor     *string
 }
 
 type SourceStore struct {
@@ -36,7 +37,7 @@ func (s *SourceStore) Check(ctx context.Context) error {
 
 func (s *SourceStore) Progress(ctx context.Context, start int64) (Progress, error) {
 	p := Progress{Position: start}
-	err := s.DB.Pool.QueryRow(ctx, `SELECT position,cursor FROM source_progress WHERE source=$1 AND namespace=$2`, s.Source, s.Namespace).Scan(&p.Position, &p.Cursor)
+	err := s.DB.Pool.QueryRow(ctx, `SELECT position,cursor,dispatch_generation FROM source_progress WHERE source=$1 AND namespace=$2`, s.Source, s.Namespace).Scan(&p.Position, &p.Cursor, &p.Generation)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return p, nil
 	}
@@ -140,7 +141,7 @@ func (s *SourceStore) Advance(ctx context.Context, owner canonical.Ownership, p 
 	if err = s.Fence.Protect(ctx, tx, owner, []canonical.Mutation{{Source: domain.Source(s.Source)}}); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO source_progress(source,namespace,position,cursor) VALUES($1,$2,$3,$4) ON CONFLICT(source,namespace) DO UPDATE SET position=excluded.position,cursor=excluded.cursor,updated_at=clock_timestamp() WHERE source_progress.position<=excluded.position`, s.Source, s.Namespace, p.Position, p.Cursor)
+	_, err = tx.Exec(ctx, `INSERT INTO source_progress(source,namespace,position,cursor,dispatch_generation) VALUES($1,$2,$3,$4,1) ON CONFLICT(source,namespace) DO UPDATE SET position=excluded.position,cursor=excluded.cursor,dispatch_generation=source_progress.dispatch_generation+1,updated_at=clock_timestamp() WHERE source_progress.position<=excluded.position`, s.Source, s.Namespace, p.Position, p.Cursor)
 	if err != nil {
 		return err
 	}

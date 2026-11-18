@@ -33,13 +33,20 @@ func startCoastal(ctx context.Context, r gin.IRoutes, coordinator *acquisition.C
 	observations := &coastal.Breaker{Name: "observations", Threshold: platform.Int("COASTAL_BREAKER_THRESHOLD", 3), Cooldown: platform.Duration("COASTAL_BREAKER_COOLDOWN", 2*time.Second), MaxCooldown: platform.Duration("COASTAL_BREAKER_MAX_COOLDOWN", 30*time.Second)}
 	stations := &coastal.Breaker{Name: "stations", Threshold: observations.Threshold, Cooldown: observations.Cooldown, MaxCooldown: observations.MaxCooldown}
 	rate := float64(platform.Int("COASTAL_MAX_REQUESTS_PER_SECOND", 8))
-	client := &coastal.Client{BaseURL: os.Getenv("PANTAI_BASE_URL"), Token: os.Getenv("PANTAI_AUTH_TOKEN"), HTTP: platform.Client(0), Timeout: platform.Duration("COASTAL_REQUEST_TIMEOUT", time.Second), Limiter: &coastal.Limiter{Rate: rate, Burst: rate}, Stations: stations, Observations: observations}
+	sourceHTTP, err := acquisition.Client(authority, coastal.Source, os.Getenv("PANTAI_BASE_URL"), 0, 4<<20)
+	if err != nil {
+		return err
+	}
+	client := &coastal.Client{BaseURL: os.Getenv("PANTAI_BASE_URL"), Token: os.Getenv("PANTAI_AUTH_TOKEN"), HTTP: sourceHTTP, Timeout: platform.Duration("COASTAL_REQUEST_TIMEOUT", time.Second), Limiter: &coastal.Limiter{Rate: rate, Burst: rate}, Stations: stations, Observations: observations}
 	status := &coastal.Status{StaleAfter: platform.Duration("COASTAL_STALE_AFTER", time.Minute), Observations: observations, Stations: stations}
 	progress := &ingestion.SourceStore{DB: db, Durability: durability, Fence: authority, Source: coastal.Source, Namespace: os.Getenv("COASTAL_NAMESPACE")}
 	repository := &coastal.Repository{Source: progress, StaleAfter: status.StaleAfter}
 	acquirer := &coastal.Acquirer{Client: client, Progress: progress, Sender: sender, Start: int64(platform.Int("COASTAL_INITIAL_POSITION", 0)), PageSize: platform.Int("COASTAL_PAGE_SIZE", 100), Interval: platform.Duration("COASTAL_POLL_INTERVAL", 500*time.Millisecond), Status: status, Logger: slog.Default()}
 	acquirer.Repository = repository
-	cache := &coastal.StationCache{Client: client, TTL: platform.Duration("COASTAL_STATION_TTL", 5*time.Minute), MissDelay: 10 * time.Second}
+	stationTTL := platform.Duration("COASTAL_STATION_TTL", 5*time.Minute)
+	sharedStations := coastal.SharedStations{Source: progress}
+	acquirer.RefreshStations = func(ctx context.Context) error { return sharedStations.Refresh(ctx, client, stationTTL) }
+	cache := &coastal.StationCache{Client: sharedStations, TTL: stationTTL, MissDelay: 10 * time.Second}
 	validator := &coastal.Validator{Stations: cache, Quarantine: progress, Warnings: coastal.Warnings{JS: js, Registry: registry, SchemaText: string(warningSchema)}, Registry: registry, Reader: reader, Skew: platform.Duration("COASTAL_CLOCK_SKEW", 2*time.Minute), Logger: slog.Default()}
 	validator.Repository = repository
 	writer := &coastal.CanonicalWriter{Validator: validator, Store: canonical.Client{BaseURL: os.Getenv("AGGREGATOR_BASE_URL"), Token: os.Getenv("CANONICAL_SERVICE_TOKEN"), HTTP: platform.Client(canonical.Deadline + 500*time.Millisecond)}, Logger: slog.Default()}

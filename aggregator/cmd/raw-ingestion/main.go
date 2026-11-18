@@ -236,7 +236,11 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		worker := &ingestion.Worker{Store: owned, Registry: registry, SchemaText: string(schema), Readers: map[string]*avrowire.SourceReader{"seismic-events": seismic, "tsunami-warnings": warnings}, JS: js, HTTP: platform.Client(2 * time.Second), BaseURL: os.Getenv("BMKG_BASE_URL"), APIKey: os.Getenv("BMKG_API_KEY"), Interval: time.Second, Logger: slog.Default()}
+		sourceHTTP, err := acquisition.Client(authority, "BMKG", os.Getenv("BMKG_BASE_URL"), 2*time.Second, min(quota, 32<<20))
+		if err != nil {
+			return err
+		}
+		worker := &ingestion.Worker{Store: owned, Registry: registry, SchemaText: string(schema), Readers: map[string]*avrowire.SourceReader{"seismic-events": seismic, "tsunami-warnings": warnings}, JS: js, HTTP: sourceHTTP, BaseURL: os.Getenv("BMKG_BASE_URL"), APIKey: os.Getenv("BMKG_API_KEY"), Interval: time.Second, Logger: slog.Default()}
 		go coordinator.Run(ctx, "BMKG", worker.Run)
 	}
 	if enabled["field-reports"] {

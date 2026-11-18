@@ -359,3 +359,14 @@ func (s *Store) Failure(ctx context.Context, owner canonical.Ownership, c Captur
 	return tx.Commit(ctx)
 }
 func ReceivedNow() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+
+// RequestKey survives a takeover before Capture commits. Capture advances this
+// position atomically with the immutable bytes, including empty source pages.
+func (s *Store) RequestKey(ctx context.Context) (string, error) {
+	position := s.Start
+	err := s.DB.Pool.QueryRow(ctx, `SELECT next_position FROM ingestion_state WHERE namespace=$1`, s.Namespace).Scan(&position)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = nil
+	}
+	return fmt.Sprintf("%s:%d", s.Namespace, position), err
+}

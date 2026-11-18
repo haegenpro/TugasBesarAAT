@@ -133,6 +133,16 @@ func main() {
 		coordinator.Ready = deps.StoreReady
 		st.Acquisition = authority
 		p.Acquisition = coordinator
+		bmkgClient.HTTP, err = acquisition.Client(authority, "BMKG", cfg.BMKGBaseURL, 2*time.Second, 32<<20)
+		if err != nil {
+			logger.Error("invalid BMKG dispatch", "error", err)
+			os.Exit(1)
+		}
+		pvmbgClient.HTTP, err = acquisition.Client(authority, "PVMBG", cfg.PVMBGBaseURL, 2*time.Second, 32<<20)
+		if err != nil {
+			logger.Error("invalid PVMBG dispatch", "error", err)
+			os.Exit(1)
+		}
 		bmkgClient.BeforeFetch = acquisition.RequireRequest
 		pvmbgClient.BeforeFetch = acquisition.RequireRequest
 	}

@@ -8,6 +8,7 @@ import (
 	"aggregator/internal/rawinput"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -21,15 +22,16 @@ const (
 )
 
 type Acquirer struct {
-	Client     *Client
-	Progress   *ingestion.SourceStore
-	Sender     rawinput.Sender
-	Start      int64
-	PageSize   int
-	Interval   time.Duration
-	Status     *Status
-	Logger     *slog.Logger
-	Repository *Repository
+	Client          *Client
+	Progress        *ingestion.SourceStore
+	Sender          rawinput.Sender
+	Start           int64
+	PageSize        int
+	Interval        time.Duration
+	Status          *Status
+	Logger          *slog.Logger
+	Repository      *Repository
+	RefreshStations func(context.Context) error
 }
 
 func (a *Acquirer) Run(ctx context.Context) {
@@ -79,6 +81,11 @@ func (a *Acquirer) Step(ctx context.Context) (more bool, retErr error) {
 			}
 		}()
 	}
+	if a.RefreshStations != nil {
+		if err := a.RefreshStations(ctx); err != nil {
+			return false, err
+		}
+	}
 	progress, err := a.Progress.Progress(ctx, a.Start)
 	if err != nil {
 		return false, err
@@ -86,6 +93,7 @@ func (a *Acquirer) Step(ctx context.Context) (more bool, retErr error) {
 	cid := uuid.NewString()
 	ctx, span := platform.Start(middleware.WithCorrelationID(ctx, cid), "acquire SENSOR_PANTAI")
 	defer span.End()
+	ctx = acquisition.WithRequestKey(ctx, fmt.Sprintf("%s:%d", a.Progress.Namespace, progress.Generation))
 	page, err := a.Client.FetchObservations(ctx, progress.Cursor, a.PageSize)
 	if err != nil {
 		return false, err
@@ -161,7 +169,7 @@ func (a *Acquirer) Step(ctx context.Context) (more bool, retErr error) {
 	if page.NextCursor != nil && *page.NextCursor != "" {
 		next = page.NextCursor
 	}
-	if len(page.Items) > 0 || !same(next, progress.Cursor) {
+	{ // A successful empty page also commits a new request generation.
 		if err = a.Progress.Advance(ctx, owner, ingestion.Progress{Position: progress.Position + int64(len(page.Items)), Cursor: next}); err != nil {
 			return false, err
 		}
