@@ -110,13 +110,32 @@ class Observer:
         namespace=literal(self.owner["satellite_namespace"])
         return self.query("storage","SELECT to_jsonb(s) FROM input_sessions s WHERE source='SATELIT' AND namespace="+namespace)
 
+    def node_clocks(self):
+        # Pods and PostgreSQL use their VM's kernel clock. Capture one original
+        # canonical member on each VM, including standbys, without SSH guesses.
+        formation=self.receipt["durability"]["storage"];chosen={};intervals=[]
+        for group in formation["groups"]:
+            for member in group["members"]:
+                match=re.search(r"-([a-d])-0$",member["name"])
+                if match and match[1]not in chosen:chosen[match[1]]=(group,member)
+        require(len(chosen)==4,"four original VM clock witnesses required for satellite entry timing")
+        for letter,(group,member)in sorted(chosen.items()):
+            before=time.monotonic()
+            result=self.cluster.kubectl("exec","-n",self.cluster.cfg["namespace"],member["name"],"-c","postgres","--","psql","-qAt","-U","postgres","-d","hazards","-v","ON_ERROR_STOP=1","-c","SELECT jsonb_build_object('physical',public.platform_replication_status(),'clock_epoch',extract(epoch from clock_timestamp()))",timeout=5)
+            after=time.monotonic();value=json.loads(result.stdout);physical=value["physical"]
+            require(physical["formation"]==formation["formation"]and physical["system_id"]==group["system_id"]and physical["member"]==member["name"]and physical["group_id"]==group["id"],"clock witness is not an original captured member")
+            clock=float(value["clock_epoch"])
+            intervals.append([clock-(self.origin_wall+after-self.origin_mono),clock-(self.origin_wall+before-self.origin_mono)])
+        return intervals
+
     def collect(self,reference):
         out={"satellite":[],"coastal_expected":[],"coastal_receipts":[],"clock_samples":{"ingestion":[],"notifier-db":[]}}
         out["progress"]=self.progress()["data"]
         rows=reference["satellite"]["records"];namespace=literal(reference["satellite"]["namespace"])
         for start in range(rows[0]["offset"],rows[-1]["offset"]+1,500):
             end=min(start+499,rows[-1]["offset"])
-            value=self.query("storage","SELECT coalesce(jsonb_agg(jsonb_build_object('offset',position,'payload_sha256',encode(sha256(original_payload),'hex'),'state',state) ORDER BY position),'[]'::jsonb) FROM input_history WHERE source='SATELIT' AND namespace="+namespace+" AND position BETWEEN "+str(start)+" AND "+str(end))
+            value=self.query("storage","SELECT coalesce(jsonb_agg(jsonb_build_object('offset',position,'payload_sha256',encode(sha256(original_payload),'hex'),'state',state,'first_received_at',envelope->>'received_at') ORDER BY position),'[]'::jsonb) FROM input_history WHERE source='SATELIT' AND namespace="+namespace+" AND position BETWEEN "+str(start)+" AND "+str(end))
+            for record in value["data"]:record["applied_observed_epoch"]=self.origin_wall+value["observed_monotonic"]-self.origin_mono
             out["satellite"]+=value["data"]
         ids=reference["coastal"]["critical_notification_ids"];namespace=literal(reference["coastal"]["namespace"])
         for start in range(0,len(ids),500):
@@ -169,11 +188,28 @@ def analyze(reference,observed,max_clock_uncertainty_ms=500):
     expected_audit=reference["audit"];audit=observed.get("audit",{})
     check(audit.get("partial")is False and not audit.get("unavailable_units")and all(audit.get(k)==expected_audit[k]for k in("source","count","checksum")),"Audit result is partial or differs from the independent reference")
     burst=observed.get("burst")
+    entry=None
     if burst is not None:
         check(burst.get("speed")==60 and burst.get("new_source_offsets",0)>0,"60x source activity was not observed during disconnect")
         seconds=burst.get("catchup_seconds")
         check(type(seconds)in(int,float)and math.isfinite(seconds)and 0<=seconds<=60 and burst.get("applied_through",-1)>=burst.get("target_offset",0),"satellite backlog did not catch up within 60 seconds")
-    return {"version":1,"passed":not failures,"failures":failures,"scope":"declared independent satellite/coastal/Audit reference dataset; bounded 60x disconnect if requested","satellite_operations":len(expected),"critical_required":len(ids),"missing_source":missing_source,"missing_receipts":missing_receipts,"clock_uncertainty_ms":uncertainty,"critical_p95_upper_bound_ms":p95,"critical_timely_fraction":timely/len(ids),"burst":burst,"limitations":["Does not infer completeness outside the supplied reference dataset.","Clock measurements bound current query-time uncertainty; clock-shift scenarios require separate timing evidence.","Load, all storage groups, placement and physical fault acceptance use their separate runners."]}
+        intervals=observed.get("satellite_node_clock_intervals",[]);start=burst.get("initial_applied_through");target=burst.get("target_offset")
+        valid_clocks=len(intervals)==4 and all(isinstance(v,list)and len(v)==2 and all(type(x)in(int,float)and math.isfinite(x)for x in v)and v[0]<=v[1]for v in intervals)
+        timing=[];count=target-start if type(start)is int and type(target)is int else 0
+        complete=valid_clocks and 0<count<=100000 and min(expected)<=start+1 and max(expected)>=target
+        span=(max(v[1]for v in intervals)-min(v[0]for v in intervals))*1000 if valid_clocks else None
+        if complete:
+            for offset in range(start+1,target+1):
+                row=actual.get(offset,{})
+                if row.get("state")!="applied"or not row.get("first_received_at")or type(row.get("applied_observed_epoch"))not in(int,float):complete=False;break
+                timing.append((row["applied_observed_epoch"]-timestamp(row["first_received_at"])+max(v[1]for v in intervals))*1000)
+            complete=complete and all(math.isfinite(v)and v>=0 for v in timing)
+        check(complete and span<=max_clock_uncertainty_ms,"satellite entry timing lacks complete burst reference coverage, timestamps or bounded VM clock witnesses")
+        timing.sort();entry_p95=timing[math.ceil(.95*len(timing))-1]if timing else None
+        entry={"complete":complete,"operations":len(timing),"p95_upper_bound_ms":entry_p95,"clock_span_ms":span,"scope":"first BNPB acquisition to observed committed applied state for offsets newly applied across this disconnect; historical timings are not fabricated"}
+        limit=reference["satellite"].get("entry_p95_max_ms")
+        if limit is not None:check(type(limit)in(int,float)and math.isfinite(limit)and limit>0 and entry_p95 is not None and entry_p95<=limit,"satellite entry p95 exceeds supplied evaluator limit")
+    return {"version":1,"passed":not failures,"failures":failures,"scope":"declared independent satellite/coastal/Audit reference dataset; bounded 60x disconnect if requested","satellite_operations":len(expected),"satellite_entry_timing":entry,"critical_required":len(ids),"missing_source":missing_source,"missing_receipts":missing_receipts,"clock_uncertainty_ms":uncertainty,"critical_p95_upper_bound_ms":p95,"critical_timely_fraction":timely/len(ids),"burst":burst,"limitations":["Does not infer completeness outside the supplied reference dataset.","Clock measurements bound current query-time uncertainty; clock-shift scenarios require separate timing evidence.","Load, all storage groups, placement and physical fault acceptance use their separate runners."]}
 
 
 def patch_replicas(cluster,deployment,uid,before,after):
@@ -189,6 +225,7 @@ def burst(cluster,observer,feed_url,token,disconnect_seconds,output):
     require(labels.get("platform.aat/cluster")==cluster.cfg["cluster_id"]and labels.get("app.kubernetes.io/name")=="ingestion"and replicas>=1,"owned running ingestion deployment required")
     first=http_json(feed_url.rstrip("/")+"/v1/session",token)
     require(first.get("speed")==60 and isinstance(first.get("group"),str)and type(first.get("latest_offset"))is int,"live 60x satellite session metadata required")
+    initial=(observer.progress()["data"]or{}).get("applied_through",observer.owner.get("satellite_initial_offset",0)-1)if observer is not None else -1
     state={"deployment":name,"uid":uid,"original_replicas":replicas,"hold_intent":True,"restored":False,"source_session":{key:first.get(key)for key in("group","profile","speed","latest_offset")}};write_json(output/"burst-state.json",state)
     try:
         patch_replicas(cluster,name,uid,replicas,0)
@@ -214,7 +251,7 @@ def burst(cluster,observer,feed_url,token,disconnect_seconds,output):
             write_json(output/"burst-samples.json",samples)
             if progress.get("applied_through",-1)>=target:break
             time.sleep(.5)
-        value={"group":first["group"],"profile":first.get("profile"),"speed":60,"target_offset":target,"new_source_offsets":target-first["latest_offset"],"catchup_seconds":time.monotonic()-started,"applied_through":progress.get("applied_through",-1)}
+        value={"group":first["group"],"profile":first.get("profile"),"speed":60,"initial_applied_through":initial,"target_offset":target,"new_source_offsets":target-first["latest_offset"],"catchup_seconds":time.monotonic()-started,"applied_through":progress.get("applied_through",-1)}
         write_json(output/"burst-result.json",value);return value
     finally:
         # Reconcile an API reply lost after applying the hold/restore. Refuse a
@@ -246,7 +283,8 @@ def run(cluster,config_path,output,scenario="reconcile"):
             observed=observer.collect(reference)
             audit_token=read_token(base/config["audit_token_file"])
             observed["audit"]=http_json(config["audit_base_url"].rstrip("/")+"/internal/audit/checksum?"+urlencode({"source":reference["audit"]["source"]}),audit_token)
-            if measured_burst is not None:observed["burst"]=measured_burst
+            if measured_burst is not None:
+                observed["burst"]=measured_burst;observed["satellite_node_clock_intervals"]=observer.node_clocks()
             write_json(output/"observation.json",observed)
             summary={**analyze(reference,observed,config.get("max_clock_uncertainty_ms",500)),"reference_sha256":sha,"scenario":scenario}
             write_json(output/"result.json",summary)

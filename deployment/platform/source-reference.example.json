@@ -2,6 +2,7 @@
   "version": 1,
   "satellite": {
     "namespace": "bnpb-satellite-practice-v1",
+    "entry_p95_max_ms": null,
     "records": [
       {"offset": 0, "payload_sha256": "SUPPLY_SHA256_OF_NORMALIZED_OPERATION_BYTES"},
       {"offset": 1, "payload_sha256": "SUPPLY_SHA256_OF_NORMALIZED_OPERATION_BYTES"}

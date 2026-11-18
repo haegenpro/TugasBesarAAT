@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from source_validation_lib import analyze,burst,literal,Observer
+from source_validation_lib import analyze,burst,literal,Observer,timestamp
 
 
 class SourceValidationChecks(unittest.TestCase):
@@ -46,6 +46,21 @@ class SourceValidationChecks(unittest.TestCase):
         api=API();observer=Observer(api,{}, {"durability":{"storage":{"formation":"formation","groups":[{"system_id":"123","members":[{"name":"member-0"}]}]}}})
         with self.assertRaisesRegex(ValueError,"original captured"):observer.query("storage","SELECT '{}'::jsonb")
         self.assertTrue(api.sql.startswith("BEGIN READ ONLY"))
+
+    def test_satellite_entry_timing_requires_new_operation_coverage_and_all_vm_clocks(self):
+        reference,observed=self.fixture();reference["satellite"]["entry_p95_max_ms"]=3000
+        observed["burst"]={"speed":60,"new_source_offsets":2,"initial_applied_through":-1,"target_offset":1,"applied_through":1,"catchup_seconds":2}
+        observed["satellite_node_clock_intervals"]=[[-.01,.01]for _ in range(4)]
+        for row in observed["satellite"]:
+            row["first_received_at"]="2026-11-18T00:00:00Z";row["applied_observed_epoch"]=timestamp(row["first_received_at"])+2.5
+        result=analyze(reference,observed)
+        self.assertTrue(result["passed"],result["failures"]);self.assertAlmostEqual(result["satellite_entry_timing"]["p95_upper_bound_ms"],2510,delta=.01)
+        changed=copy.deepcopy(observed);changed["satellite"][0].pop("first_received_at")
+        self.assertFalse(analyze(reference,changed)["passed"])
+        changed=copy.deepcopy(observed);changed["satellite_node_clock_intervals"].pop()
+        self.assertFalse(analyze(reference,changed)["passed"])
+        reference["satellite"]["entry_p95_max_ms"]=1000
+        self.assertFalse(analyze(reference,observed)["passed"])
 
     def test_lost_scale_reply_restores_only_original_controller(self):
         for recreate in(False,True):
