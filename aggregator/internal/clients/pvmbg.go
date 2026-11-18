@@ -246,9 +246,9 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 		return nil, err
 	}
 	defer resp.Body.Close()
-	rawBody, truncated, payloadStream, readErr := readFailureBody(resp.Body)
+	rawBody, truncated, payloadStream, readErr := readResponseFailureBody(resp)
 	defer func() {
-		capture(callCtx, c.CaptureFailure, Failure{Source: "PVMBG", Entity: path, Payload: rawBody, PayloadStream: payloadStream, ContentType: resp.Header.Get("Content-Type"), Truncated: truncated, CorrelationID: correlationID}, &retErr)
+		capture(callCtx, c.CaptureFailure, Failure{Source: "PVMBG", Entity: path, Payload: rawBody, PayloadStream: payloadStream, ContentType: resp.Header.Get("Content-Type"), Truncated: truncated, CorrelationID: correlationID}, &retErr, resp)
 	}()
 	if readErr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrContractViolation, readErr)

@@ -301,11 +301,19 @@ func (h HTTP) failurePayload(c *gin.Context) {
 	defer cancel()
 	var sum, contentType string
 	var body []byte
-	err := h.Store.DB.Pool.QueryRow(ctx, `SELECT content_type,payload,sha256 FROM ingestion_failure_payloads WHERE namespace=$1 AND message_id=$2`, c.Query("namespace"), c.Param("id")).Scan(&contentType, &body, &sum)
+	var chunked bool
+	err := h.Store.DB.Pool.QueryRow(ctx, `SELECT content_type,payload,sha256,chunked FROM ingestion_failure_payloads WHERE namespace=$1 AND message_id=$2`, c.Query("namespace"), c.Param("id")).Scan(&contentType, &body, &sum, &chunked)
 	if err == nil {
 		c.Header("X-Payload-SHA256", sum)
 		c.Header("X-Source-Content-Type", contentType)
-		c.Data(200, "application/octet-stream", body)
+		if !chunked {
+			c.Data(200, "application/octet-stream", body)
+			return
+		}
+		c.Header("Content-Type", "application/octet-stream")
+		if _, err = h.Store.WriteQuarantinedPayload(ctx, c.Query("namespace"), c.Param("id"), c.Writer); err != nil {
+			c.Abort()
+		}
 		return
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {

@@ -269,3 +269,37 @@ func (a *Authority) DispatchWindow(ctx context.Context, width time.Duration) (st
 	}
 	return key, err
 }
+
+// The caller has durably retained the response before this operation. The live
+// consumer may quarantine a cached receipt originally fetched by an old epoch;
+// only this exact nonce/key can be retired, never its replacement.
+func (a *Authority) FinishResponse(ctx context.Context, d acquisition.Dispatch, state string) error {
+	if a.prefix != "acquisition:" || !a.accepts(d.Owner.Scope) || !validOwner(d.Owner) || uuid.Validate(d.ID) != nil || (state != "quarantined" && state != "consumed") {
+		return acquisition.ErrDispatchIdentity
+	}
+	ctx, cancel := context.WithTimeout(ctx, a.budget)
+	defer cancel()
+	tx, err := a.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.Background())
+	r, now, err := lock(ctx, tx, d.Owner.Scope, "SHARE")
+	if err != nil {
+		return err
+	}
+	if !matches(r, d.Owner) || !live(r, now) {
+		return stale()
+	}
+	tag, err := tx.Exec(ctx, `UPDATE acquisition_dispatch SET state=$6,stream_open=false,completed_at=clock_timestamp(),body=NULL,headers=NULL,last_failure=CASE WHEN $6='quarantined' THEN 'invalid_response' ELSE '' END WHERE dispatch_id=$1 AND scope=$2 AND lane=$3 AND request_key=$4 AND fingerprint=$5 AND state IN ('pending','complete',$6)`, d.ID, d.Owner.Scope, d.Lane, d.Key, d.Fingerprint, state)
+	if err != nil {
+		return canonical.Unavailable()
+	}
+	if tag.RowsAffected() != 1 {
+		return acquisition.ErrNotOwner
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return canonical.Unavailable()
+	}
+	return a.confirmDispatch(ctx, d.ID, state)
+}

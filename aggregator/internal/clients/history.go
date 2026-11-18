@@ -46,9 +46,9 @@ func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, ke
 		return p, err
 	}
 	defer resp.Body.Close()
-	rawBody, truncated, payloadStream, readErr := readFailureBody(resp.Body)
+	rawBody, truncated, payloadStream, readErr := readResponseFailureBody(resp)
 	defer func() {
-		capture(ctx, recorder, Failure{Source: strings.ToUpper(source), Entity: "history:" + entity, Payload: rawBody, PayloadStream: payloadStream, ContentType: resp.Header.Get("Content-Type"), Truncated: truncated, CorrelationID: cid}, &retErr)
+		capture(ctx, recorder, Failure{Source: strings.ToUpper(source), Entity: "history:" + entity, Payload: rawBody, PayloadStream: payloadStream, ContentType: resp.Header.Get("Content-Type"), Truncated: truncated, CorrelationID: cid}, &retErr, resp)
 	}()
 	if readErr != nil {
 		if truncated {

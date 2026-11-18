@@ -119,3 +119,5 @@ func TestDispatchTLSUsesHTTP1WithoutHiddenHTTP2Retries(t *testing.T) {
 func (r *lostReceiptReply) CheckDispatch(context.Context, Dispatch) error             { return nil }
 func (r *lostReceiptReply) OpenDispatchStream(context.Context, Dispatch) error        { return nil }
 func (r *lostReceiptReply) InterruptDispatch(context.Context, Dispatch, string) error { return nil }
+
+func (r *lostReceiptReply) FinishResponse(context.Context, Dispatch, string) error { return nil }

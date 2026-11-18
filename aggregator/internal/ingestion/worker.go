@@ -102,6 +102,9 @@ func (w *Worker) Step(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if err = acquisition.ConsumeResponse(call, resp); err != nil {
+			return err
+		}
 	}
 	if pending.Envelope == nil {
 		if err := w.Store.Runnable(ctx, *pending); err != nil {

@@ -122,8 +122,36 @@ response (also capped by the raw BMKG payload quota), 4 MiB per coastal response
 and 64 KiB for satellite metadata. SSE bodies are streamed. The integrated
 profile's logical finite receipt maximum is about 200.1 MiB before replication,
 WAL and old row versions, using the existing formations. Per-request memory can
-reach its body limit. Incomplete/oversized reads do not advance a cursor; they
-remain failed reads subject to recovery and source backoff, not accepted data.
+reach its body limit. These are cache bounds, not permission to discard input.
+Above the bound, the transport hands the complete prefix plus remaining body to
+the application's streaming capture/failure recorder and keeps the connection
+open until that recorder finishes. Oversized raw BMKG bytes can still enter its
+existing bounded-quota capture store before decoding.
+
+### Invalid response disposition
+
+A cached HTTP 200 is only a received response. When application validation rejects
+it, complete original bytes must be durably quarantined before that exact receipt
+can become `quarantined`. The next read may then fetch the same source cursor with
+a new nonce; rejection does not advance a cursor or `dispatch_generation`. A
+retention failure leaves the saved response reusable for another retention
+attempt. A crash after retention but before retirement is idempotently recovered
+from the same response identity, including after an ownership change.
+
+Transient registry/database failures keep a valid response available for retry;
+they do not cause it to be quarantined as invalid. Raw BMKG marks a receipt
+`consumed` only after its immutable capture has been confirmed. Stale consumers
+cannot retire a replacement's nonce.
+
+PVMBG/BMKG live and history clients pass overflow into their existing full-stream
+failure recorder. Coastal outer HTTP envelopes use the ingestion failure ledger,
+with no invented event position. Responses larger than 64 KiB use 64 KiB chunks;
+smaller ones remain inline. The existing Ops-only payload endpoint streams both
+forms, with the complete payload checksum. `FAILED_INPUT_QUOTA_BYTES` defaults to
+256 MiB in each owning database; retained failures are not evicted to admit more.
+Quota exhaustion, incomplete upstream reads or a recorder that does not consume
+its stream cannot claim full retention or retire its receipt. Failed reads do
+not become accepted source data.
 
 ## Diagnosis and deployment
 
@@ -152,8 +180,9 @@ fault-to-committed-progress acceptance.
 
 Rebuild the role1 image and run the existing offline maintenance workflow before
 activation. Canonical and ingestion migrations now include the shared additive
-`0016_acquisition_recovery.sql`. Earlier migrations, including 0014/0015, retain
-their original checksums. Maintenance receipts bind the new schema/image contract;
+`0016_acquisition_recovery.sql` and `0017_acquisition_receipt_disposition.sql`.
+Ingestion also applies its additive `0006_response_quarantine.sql`. Earlier
+migration checksums remain unchanged. Maintenance receipts bind the new schema/image contract;
 old receipts cannot authorize activation of the new bundle. No new Secrets or
 machine-spec inputs are required.
 
@@ -199,3 +228,15 @@ Four-VM failover, permanent-node loss, database promotion, clock shifts, real
 source request logs, live connection limits and the measured game-day criteria
 remain pending on the actual formation. A local 60-second assertion cannot replace
 those runs or establish unconditional recovery during an upstream/quorum outage.
+
+## Receipt-retention review regressions
+
+The two reproductions from `evidence/reassessment-8c75a2f/922833005fd9/` are
+permanent tests in the isolated runner. Both now pass. The extended run at
+`evidence/platform-acquisition-dispatch/cdf224cd7ac3/result.json` records 38 passes,
+zero failures/skips and complete temporary-container cleanup. Besides the
+reported cases, it checks failed retention without eviction, takeover between
+retention and retirement, malformed/missing envelope fields, invalid UTF-8,
+complete streamed bytes and digest through Ops-only inspection, partial/quota
+rollback and oversized raw capture. The process-crash case still committed one
+HazardEvent in 15,607 ms using natural lease expiry.

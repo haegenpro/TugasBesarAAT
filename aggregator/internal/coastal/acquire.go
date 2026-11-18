@@ -84,6 +84,7 @@ func (a *Acquirer) Step(ctx context.Context) (more bool, retErr error) {
 			}
 		}()
 	}
+	ctx = withResponseQuarantine(ctx, a.Progress)
 	if a.RefreshStations != nil {
 		if err := a.RefreshStations(ctx); err != nil {
 			return false, err

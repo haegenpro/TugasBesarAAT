@@ -27,6 +27,16 @@ REQUIRED = {
     "TestDispatchStreamingRecoversWithoutOldBodyClose",
     "TestDispatchProcessCrashTakeoverWithin60Seconds",
     "TestConnectorResumesWithoutGapsOrDuplicates",
+    "TestReassessmentMalformed200MustAllowFreshObservationRead",
+    "TestReassessmentDispatchOverflowMustReachFailureCapture",
+    "TestReassessmentDispatchOverflowRetainsCompletePayloadInOwnedStore",
+    "TestReassessmentDispatchOverflowDoesNotRetireOnRecorderFailure",
+    "TestResponseQuarantineFailureDoesNotEvictCachedInput",
+    "TestResponseQuarantineSurvivesTakeoverBeforeReceiptRetirement",
+    "TestResponseQuarantineRejectsInvalidEnvelopeShapes",
+    "TestResponseQuarantineStreamsExactBytesThroughOpsOnlyInspection",
+    "TestResponseQuarantineIncompleteOrOverQuotaRollsBack",
+    "TestResponseCaptureOverflowKeepsAllBytes",
     "TestSharedStationsOnlySourceOwnerFetches",
     "TestCoastalEmptyPageAdvancesDispatchGeneration",
 }
@@ -61,7 +71,7 @@ def main():
                 raise RuntimeError("temporary database startup deadline")
             time.sleep(.2)
         runner = prefix + "-go"
-        pattern = "TestDispatch|TestPlatformAcquisition|TestSourceProgress|TestSourceReceipt|TestM3IngestionBytes|TestAcquisitionPublishes|TestSharedStations|TestCoastalEmptyPage|TestConnectorResumes"
+        pattern = "TestDispatch|TestPlatformAcquisition|TestSourceProgress|TestSourceReceipt|TestM3IngestionBytes|TestAcquisitionPublishes|TestSharedStations|TestCoastalEmptyPage|TestConnectorResumes|TestReassessment|TestResponse"
         docker("create", "--name", runner, "--label", "aat.dispatch.check=" + run, "--network", "container:" + pg,
                "--memory", "2g", "--cpus", "3", "--mount", "type=bind,src=" + str(ROOT) + ",dst=/src,readonly",
                "-v", "r3-go-mod:/go/pkg/mod", "-v", "r3-go-build:/root/.cache/go-build", "-e", "M2_DATABASE_URL",

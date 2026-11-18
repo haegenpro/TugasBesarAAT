@@ -42,7 +42,7 @@ func (s SharedStations) Refresh(ctx context.Context, client *Client, ttl time.Du
 	if !due {
 		return nil
 	}
-	items, err := client.FetchStations(acquisition.WithRequestKey(ctx, "stations:"+s.Source.Namespace+":"+window))
+	items, err := client.FetchStations(acquisition.WithRequestKey(withResponseQuarantine(ctx, s.Source), "stations:"+s.Source.Namespace+":"+window))
 	if err != nil {
 		return err
 	}

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"aggregator/internal/canonical"
@@ -62,6 +63,7 @@ type DispatchRepository interface {
 	OpenDispatchStream(context.Context, Dispatch) error
 	InterruptDispatch(context.Context, Dispatch, string) error
 	CloseDispatchStream(context.Context, Dispatch) error
+	FinishResponse(context.Context, Dispatch, string) error
 }
 
 type requestKey struct{}
@@ -184,7 +186,7 @@ func (t *dispatchTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	identity.mu.Unlock()
 	if r.State == "complete" {
 		platform.Add("acquisition_dispatch_reused_total", 1)
-		return response(req, r), nil
+		return attachReceipt(response(req, r), t.repository, d, r.ID, false), nil
 	}
 	if r.Recovered {
 		platform.Add("acquisition_dispatch_recovered_total", 1)
@@ -207,10 +209,15 @@ func (t *dispatchTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		return nil, err
 	}
 	networkCtx := ctx
+	var networkCancel context.CancelFunc = func() {}
+	transferred := false
+	defer func() {
+		if !transferred {
+			networkCancel()
+		}
+	}()
 	if !streaming {
-		var cancel context.CancelFunc
-		networkCtx, cancel = context.WithTimeout(ctx, 8*time.Second)
-		defer cancel()
+		networkCtx, networkCancel = context.WithTimeout(ctx, 8*time.Second)
 	}
 	request := req.Clone(networkCtx)
 	request.Header = req.Header.Clone()
@@ -223,6 +230,7 @@ func (t *dispatchTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		t.interrupt(d, "transport")
 		return nil, fmt.Errorf("%w: transport outcome unknown: %v", ErrDispatchPending, err)
 	}
+	resp.Request = req
 	if streaming && resp.StatusCode == http.StatusOK {
 		c, done := context.WithTimeout(context.Background(), canonical.Deadline)
 		err = t.repository.OpenDispatchStream(c, d)
@@ -247,8 +255,17 @@ func (t *dispatchTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	// Do not turn them into a cached infinite stream.
 	r.Status, r.Headers = resp.StatusCode, resp.Header.Clone()
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, t.maxBody+1))
+	if int64(len(body)) > t.maxBody && readErr == nil {
+		// The cache bound is not permission to discard failed input. Give the
+		// bounded prefix and ALL remaining bytes to the application recorder.
+		refResponse := attachReceipt(resp, t.repository, d, r.ID, true)
+		ref := responseReference(refResponse)
+		refResponse.Body = &overflowBody{Reader: io.MultiReader(bytes.NewReader(body), resp.Body), source: resp.Body, cancel: networkCancel, ref: ref, interrupt: func() { t.interrupt(d, "body") }}
+		transferred = true
+		return refResponse, nil
+	}
 	closeErr := resp.Body.Close()
-	if readErr != nil || closeErr != nil || int64(len(body)) > t.maxBody {
+	if readErr != nil || closeErr != nil {
 		t.interrupt(d, "body")
 		return nil, fmt.Errorf("%w: incomplete or oversized upstream response", ErrDispatchPending)
 	}
@@ -266,7 +283,7 @@ func (t *dispatchTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		t.interrupt(d, "receipt")
 		return nil, fmt.Errorf("%w: durable receipt unavailable", ErrDispatchPending)
 	}
-	return response(req, r), nil
+	return attachReceipt(response(req, r), t.repository, d, r.ID, false), nil
 }
 func response(req *http.Request, r Receipt) *http.Response {
 	h := r.Headers.Clone()
@@ -343,4 +360,92 @@ func (t *dispatchTransport) markWaiting(owner canonical.Ownership, lane string, 
 		}
 	}
 	platform.Gauge("acquisition_"+strings.ToLower(t.source)+"_dispatch_waiting", value)
+}
+
+type receiptReferenceKey struct{}
+type receiptReference struct {
+	repository DispatchRepository
+	dispatch   Dispatch
+	overflow   bool
+	settled    atomic.Bool
+}
+
+func attachReceipt(resp *http.Response, repository DispatchRepository, d Dispatch, id string, overflow bool) *http.Response {
+	d.ID = id
+	ref := &receiptReference{repository: repository, dispatch: d, overflow: overflow}
+	resp.Request = resp.Request.WithContext(context.WithValue(resp.Request.Context(), receiptReferenceKey{}, ref))
+	return resp
+}
+func responseReference(resp *http.Response) *receiptReference {
+	if resp == nil || resp.Request == nil {
+		return nil
+	}
+	ref, _ := resp.Request.Context().Value(receiptReferenceKey{}).(*receiptReference)
+	return ref
+}
+func ResponseOverflow(resp *http.Response) bool {
+	ref := responseReference(resp)
+	return ref != nil && ref.overflow
+}
+func ResponseID(resp *http.Response) string {
+	ref := responseReference(resp)
+	if ref == nil {
+		return ""
+	}
+	return ref.dispatch.ID
+}
+
+// QuarantineResponse preserves bytes first. A failed or uncertain retention
+// commit must not invalidate the cached response or authorize a fresh read.
+func QuarantineResponse(ctx context.Context, resp *http.Response, retain func() error) error {
+	if retain == nil {
+		return errors.New("durable response retention required")
+	}
+	if err := retain(); err != nil {
+		return err
+	}
+	return finishResponse(ctx, resp, "quarantined")
+}
+
+// ConsumeResponse is called only after the input-owning store confirms capture.
+func ConsumeResponse(ctx context.Context, resp *http.Response) error {
+	return finishResponse(ctx, resp, "consumed")
+}
+func finishResponse(ctx context.Context, resp *http.Response, state string) error {
+	ref := responseReference(resp)
+	if ref == nil {
+		return nil
+	}
+	owner, err := Token(ctx, strings.TrimPrefix(ref.dispatch.Owner.Scope, "acquisition:"))
+	if err != nil {
+		return err
+	}
+	d := ref.dispatch
+	d.Owner = owner
+	if err = ref.repository.FinishResponse(ctx, d, state); err != nil {
+		return err
+	}
+	ref.settled.Store(true)
+	return nil
+}
+
+type overflowBody struct {
+	io.Reader
+	source    io.ReadCloser
+	cancel    context.CancelFunc
+	ref       *receiptReference
+	interrupt func()
+	once      sync.Once
+	err       error
+}
+
+func (b *overflowBody) Close() error {
+	b.once.Do(func() {
+		b.err = b.source.Close()
+		b.cancel()
+		if !b.ref.settled.Load() {
+			b.interrupt()
+		}
+	})
+	return b.err
 }
