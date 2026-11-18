@@ -88,5 +88,34 @@ class MaintenanceChecks(unittest.TestCase):
                 self.assertFalse(json.loads((root/"maintenance/receipt.json").read_text())["passed"])
                 if fault=="live-writer":self.assertFalse(any(call[0]=="create"for call in api.calls))
 
+    def test_bound_receipt_removes_initialization_blockers_from_full_release(self):
+        from image_release_lib import REQUIRED
+        from release_lib import assemble as full_release
+        import hashlib
+        with tempfile.TemporaryDirectory()as folder:
+            root=Path(folder);inventory,v=self.fixture(root)
+            for node in inventory["nodes"]:node["memory_mib"]=8192
+            # Re-render with this declared test allocation before capturing it.
+            images={k:"registry.invalid/"+k+"@sha256:"+"a"*64 for k in REQUIRED}
+            (root/"images.json").write_text(json.dumps(images))
+            config=json.loads((root/"release.json").read_text())
+            owner=json.loads((root/"role1.json").read_text())
+            province=(ROOT/"docs/fixtures/wildfire-m5/provinces.json").read_bytes()
+            processor=json.loads((ROOT/"deployment/role1/wildfire.integrated.example.json").read_text())
+            processor["province_sha256"]=hashlib.sha256(province).hexdigest()
+            (root/"province.json").write_bytes(province);(root/"wildfire.json").write_text(json.dumps(processor))
+            (root/"services.json").write_text((ROOT/"deployment/services/catalog.json").read_text())
+            (root/"flows.json").write_text('[{"app":"ingestion","cidr":"192.0.2.1/32","ports":[443]}]')
+            config.update(services="services.json",province_reference="province.json",wildfire_config="wildfire.json",external_flows="flows.json")
+            (root/"release.json").write_text(json.dumps(config));assemble(inventory,root/"release.json",root/"infra-complete")
+            values=inputs(inventory,root/"release.json",root/"infra-complete");api=API(inventory,values[6],owner)
+            run(api,root/"release.json",root/"infra-complete",root/"maintenance")
+            report=full_release(inventory,root/"maintenance/release-ready.json",root/"full")
+            self.assertTrue(report["ready_for_apply"],report["blocked"])
+            changed=json.loads((root/"maintenance/storage-durability.json").read_text());changed["groups"][0]["system_id"]="999999"
+            (root/"maintenance/storage-durability.json").write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError,"original maintenance capture"):
+                full_release(inventory,root/"maintenance/release-ready.json",root/"changed")
+
 
 if __name__=="__main__":unittest.main()

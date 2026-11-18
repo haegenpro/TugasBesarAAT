@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "satellite": {
+    "namespace": "bnpb-satellite-practice-v1",
+    "records": [
+      {"offset": 0, "payload_sha256": "SUPPLY_SHA256_OF_NORMALIZED_OPERATION_BYTES"},
+      {"offset": 1, "payload_sha256": "SUPPLY_SHA256_OF_NORMALIZED_OPERATION_BYTES"}
+    ]
+  },
+  "coastal": {
+    "namespace": "bnpb-coastal-v1",
+    "critical_notification_ids": ["SUPPLY_REAL_CRITICAL_NOTIFICATION_ID"]
+  },
+  "audit": {
+    "source": "SATELIT",
+    "count": null,
+    "checksum": "SUPPLY_INDEPENDENT_REFERENCE_CHECKSUM"
+  }
+}
