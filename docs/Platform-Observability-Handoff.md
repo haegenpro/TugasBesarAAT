@@ -43,6 +43,7 @@ changes. API log collection adds kubelet/API overhead: measure it under load.
 | `app_http_requests_total`, duration histograms | Per-instance rates, status and latency; count controlled 429 separately from transport/5xx errors |
 | `app_acquisition_{bmkg,pvmbg}_active` | Local process believes it owns acquisition; compare authoritative epochs and upstream logs for uniqueness |
 | `app_acquisition_*_renew_failures_total` | Renewal failure observed by this process; freezes require external observation |
+| `app_acquisition_dispatch_{admitted,reused,blocked}_total` | Real dispatch decisions, cached response reuse and rejected sends; use the acquisition status script for durable pending metadata |
 | `app_stale_owner_rejections_total` | Authority rejected stale work; does not count every deferred SQL commit rejection |
 | `app_outbox_pending` | Committed outbox depth; owners add event age, source lag and delivery reconciliation |
 | Patroni `/metrics`, etcd `:2381/metrics` | Member role, WAL positions and DCS health; float WAL metrics are diagnostic, never a durability acknowledgement |
@@ -100,3 +101,20 @@ fault evidence remains deferred until both teammates finish their integrations.
 Configuration references: [Prometheus Kubernetes discovery](https://prometheus.io/docs/prometheus/latest/configuration/configuration/),
 [Alloy Kubernetes log source](https://grafana.com/docs/alloy/latest/reference/components/loki/loki.source.kubernetes/),
 [Patroni metrics](https://patroni.readthedocs.io/en/latest/rest_api.html).
+
+## Durable source dispatch incidents
+
+The integrated dashboard includes dispatch admission/reuse/block rates, and
+`AcquisitionDispatchBlocked` alerts on sustained blocked sends. Admission counters
+are diagnostic; reconcile the source's actual request log for uniqueness proof.
+The [acquisition protocol and runbook](Platform-Acquisition-Implementation.md)
+provides read-only inspection of original captured primaries. It exposes no
+credentials or cached response bodies and never clears an intent.
+
+Source acceptance now requires dispatch metadata from both owning databases. A
+pending old epoch, expired holder or finite request older than ten seconds fails
+acceptance even when the reference dataset was previously applied. A healthy
+current SSE connection remains allowed. Ten seconds is an observation threshold,
+not a safe expiry or permission to retry. Physical-node fencing, upstream outcome
+reconciliation and the <=60-second takeover target remain separate acceptance
+work; no force-unlock shortcut is provided.

@@ -34,6 +34,7 @@ def configs(inventory, storage, additional_storages=()):
         {"alert":"MetricsCollectionStale","expr":"platform_metrics_collection_success == 0 or platform_metrics_snapshot_age_seconds > 30","for":"30s","labels":{"severity":"warning"}},
         {"alert":"ApplicationUnexpectedErrors","expr":'sum by (service) (rate(app_http_requests_total{status=~"5.."}[2m])) / clamp_min(sum by (service) (rate(app_http_requests_total{status!="429"}[2m])), 0.001) > 0.01',"for":"1m","labels":{"severity":"critical"}},
         {"alert":"OutboxBacklog","expr":"app_outbox_pending > 1000","for":"2m","labels":{"severity":"warning"}},
+        {"alert":"AcquisitionDispatchBlocked","expr":"sum(increase(app_acquisition_dispatch_blocked_total[2m])) > 0","for":"30s","labels":{"severity":"critical"},"annotations":{"summary":"Upstream dispatch blocked; inspect durable pending intent before recovery, never clear it on lease expiry"}},
         {"alert":"SatelliteLagGrowing","expr":"app_satellite_feed_lag_offsets > 1000","for":"1m","labels":{"severity":"warning"}},
         {"alert":"WildfireOutputBlocked","expr":"app_wildfire_blocked_output > 0","for":"30s","labels":{"severity":"critical"}},
         {"alert":"CoastalSourceUnavailable","expr":"app_coastal_source_stale == 2","for":"30s","labels":{"severity":"warning"}},
@@ -73,6 +74,9 @@ loki.write "local" {
     provider = {"apiVersion":1,"providers":[{"name":"platform","type":"file","options":{"path":"/etc/platform-dashboards"}}]}
     panels=[]
     signals=(("Scrape health","up"),("Pod memory by role","sum by (role) (platform_pod_memory_bytes)"),("Pod CPU by role","sum by (role) (platform_pod_cpu_cores)"),("HTTP request rate","sum by (service,status) (rate(app_http_requests_total[1m]))"),("Pending outbox","app_outbox_pending"),("Patroni roles","patroni_primary"),("Collector age","platform_metrics_snapshot_age_seconds"),
+        ("Acquisition HTTP admitted sends","sum(rate(app_acquisition_dispatch_admitted_total[2m]))"),
+        ("Acquisition saved receipts reused","sum(rate(app_acquisition_dispatch_reused_total[2m]))"),
+        ("Acquisition blocked sends","sum(rate(app_acquisition_dispatch_blocked_total[2m]))"),
         ("Satellite acquisition lag (offsets)","app_satellite_feed_lag_offsets"),
         ("Wildfire received / prepared / applied","{__name__=~\"app_wildfire_(received_through|prepared_through|applied_through)\"}"),
         ("Oldest wildfire correction age","app_wildfire_oldest_correction_age_seconds"),

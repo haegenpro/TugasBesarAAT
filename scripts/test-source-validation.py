@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 
-from source_validation_lib import Observer,analyze,literal
+from source_validation_lib import Observer,analyze,literal,dispatch_status
 
 ROOT=Path(__file__).resolve().parent.parent
 
@@ -39,6 +39,8 @@ def main():
             database="hazards"if suffix!="notifier-db"else "notifier"
             sql(name,"postgres","CREATE DATABASE "+database+";")
             sql(name,database,probe+"\nINSERT INTO platform_storage_identity VALUES(true,'test-"+suffix+"',0);")
+            if suffix in ("storage","ingestion"):
+                sql(name,database,(ROOT/"store/migrations/0004_ownership.sql").read_text()+(ROOT/"store/migrations/0014_acquisition_dispatch.sql").read_text())
             identity=json.loads(sql(name,database,"SELECT public.platform_replication_status();"))["system_id"]
             captures[suffix]={"formation":"test-"+suffix,"groups":[{"id":0,"system_id":identity,"members":[{"name":member}]}]}
         ids=["warning-v1:"+"a"*64];payloads=[b'{"operation":"test-0"}',b'{"operation":"test-1"}']
@@ -60,6 +62,17 @@ def main():
         observed=observer.collect(reference);observed["audit"]={**reference["audit"],"partial":False,"unavailable_units":[]}
         initial=analyze(reference,observed,max_clock_uncertainty_ms=2000)
         if not initial["passed"]:raise RuntimeError("fixture reconciliation failed: "+json.dumps(initial["failures"]))
+        # A healthy active stream must not look like a blocked dispatch, but a
+        # completed reference range cannot hide a stale sender's pending intent.
+        sql(containers["test-ingestion-0"],"hazards","INSERT INTO canonical_ownership(scope,source,epoch,holder,expires_at)VALUES('acquisition:SATELIT','SATELIT',1,'stream-owner',clock_timestamp()+interval '1 minute');INSERT INTO acquisition_dispatch(scope,lane,request_key,fingerprint,dispatch_id,epoch,holder,state,streaming)VALUES('acquisition:SATELIT','/v1/stream','key','fingerprint','00000000-0000-0000-0000-000000000001',1,'stream-owner','pending',true);")
+        if dispatch_status(observer)["ingestion"][0]["blocking"]:raise RuntimeError("healthy active stream was treated as uncertain")
+        sql(containers["test-ingestion-0"],"hazards","UPDATE canonical_ownership SET expires_at=clock_timestamp()-interval '1 second' WHERE scope='acquisition:SATELIT';")
+        blocked=observer.collect(reference);blocked["audit"]=observed["audit"]
+        if analyze(reference,blocked,max_clock_uncertainty_ms=2000)["passed"]:raise RuntimeError("blocked upstream acquisition was hidden by completed old data")
+        sql(containers["test-ingestion-0"],"hazards","UPDATE canonical_ownership SET expires_at=clock_timestamp()+interval '1 minute' WHERE scope='acquisition:SATELIT';UPDATE acquisition_dispatch SET streaming=false,started_at=clock_timestamp()-interval '11 seconds';")
+        aged=observer.collect(reference);aged["audit"]=observed["audit"]
+        if analyze(reference,aged,max_clock_uncertainty_ms=2000)["passed"]:raise RuntimeError("aged finite dispatch was hidden by a live lease")
+        sql(containers["test-ingestion-0"],"hazards","UPDATE acquisition_dispatch SET streaming=true,state='closed';")
         sql(containers["test-notifier-db-0"],"notifier","DELETE FROM coastal_warning_receipts;")
         missing=observer.collect(reference);missing["audit"]=observed["audit"]
         if analyze(reference,missing,max_clock_uncertainty_ms=2000)["passed"]:raise RuntimeError("missing receipt was incorrectly accepted")
@@ -73,7 +86,7 @@ def main():
         except ValueError as exc:
             if "original captured physical member"not in str(exc):raise
         else:raise RuntimeError("wrong original identity was incorrectly accepted")
-        report.update(passed=True,checks={"actual_read_only_SQL_and_complete_fixture":True,"missing_receipt_refused":True,"changed_payload_refused":True,"wrong_identity_refused":True},observed_clock_uncertainty_ms=initial["clock_uncertainty_ms"])
+        report.update(passed=True,checks={"actual_read_only_SQL_and_complete_fixture":True,"missing_receipt_refused":True,"changed_payload_refused":True,"wrong_identity_refused":True,"healthy_stream_not_blocked":True,"stale_dispatch_refused":True,"aged_finite_dispatch_refused":True},observed_clock_uncertainty_ms=initial["clock_uncertainty_ms"])
     finally:
         cleanup=[]
         for name in reversed(created):

@@ -14,15 +14,17 @@ class SourceValidationChecks(unittest.TestCase):
     def fixture(self):
         identity="warning-v1:"+"a"*64
         reference={"satellite":{"namespace":"satellite","records":[{"offset":0,"payload_sha256":"a"*64},{"offset":1,"payload_sha256":"b"*64}]},"coastal":{"namespace":"coastal","critical_notification_ids":[identity]},"audit":{"source":"SATELIT","count":2,"checksum":"c"*64}}
-        observed={"satellite":[dict(r,state="applied")for r in reference["satellite"]["records"]],"progress":{"received_through":1,"prepared_through":1,"applied_through":1},"coastal_expected":[{"notification_id":identity,"observation_id":"obs","first_received_at":"2026-11-18T00:00:00Z","rejected":False}],"coastal_receipts":[{"notification_id":identity,"observation_id":"obs","first_received_at":"2026-11-18T00:00:00Z","committed_at":"2026-11-18T00:00:02Z"}],"coastal_conflicts":0,"clock_samples":{"ingestion":[[-.01,.01]],"notifier-db":[[-.01,.01]]},"audit":dict(reference["audit"],partial=False,unavailable_units=[])}
+        observed={"satellite":[dict(r,state="applied")for r in reference["satellite"]["records"]],"progress":{"received_through":1,"prepared_through":1,"applied_through":1},"coastal_expected":[{"notification_id":identity,"observation_id":"obs","first_received_at":"2026-11-18T00:00:00Z","rejected":False}],"coastal_receipts":[{"notification_id":identity,"observation_id":"obs","first_received_at":"2026-11-18T00:00:00Z","committed_at":"2026-11-18T00:00:02Z"}],"dispatch":{"storage":[],"ingestion":[]},"coastal_conflicts":0,"clock_samples":{"ingestion":[[-.01,.01]],"notifier-db":[[-.01,.01]]},"audit":dict(reference["audit"],partial=False,unavailable_units=[])}
         return reference,observed
 
     def test_zero_loss_checks_use_independent_denominator_and_conservative_latency(self):
         reference,observed=self.fixture();result=analyze(reference,observed)
         self.assertTrue(result["passed"]);self.assertAlmostEqual(result["critical_p95_upper_bound_ms"],2020,delta=.01)
-        for fault in("source-missing","receipt-missing","payload-changed","unapplied","conflict","clock","time-origin","late","partial-audit","failed-burst"):
+        for fault in("source-missing","receipt-missing","payload-changed","unapplied","conflict","clock","time-origin","late","partial-audit","failed-burst","pending-dispatch","missing-dispatch"):
             with self.subTest(fault=fault):
                 changed=copy.deepcopy(observed)
+                if fault=="pending-dispatch":changed["dispatch"]["ingestion"]=[{"blocking":True}]
+                if fault=="missing-dispatch":changed.pop("dispatch")
                 if fault=="source-missing":changed["coastal_expected"]=[]
                 if fault=="receipt-missing":changed["coastal_receipts"]=[]
                 if fault=="payload-changed":changed["satellite"][0]["payload_sha256"]="changed"

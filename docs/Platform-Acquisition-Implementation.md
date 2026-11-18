@@ -60,8 +60,8 @@ A worker frozen before admission fails the authoritative check when it resumes.
 A worker frozen after admission retains the durable intent, so its successor
 waits for the receipt instead of independently issuing the same request.
 
-The transport uses fresh connections to prevent net/http's transparent retries
-on reused connections. It does not follow redirects, use environment proxies,
+The transport uses fresh HTTP/1 connections to prevent net/http's transparent
+retries on reused connections and HTTP/2 stream retries. It does not follow redirects, use environment proxies,
 accept request bodies, or allow a source context to select another host/API
 lane. Credentials influence a one-way request fingerprint; plaintext request
 credentials are not written to the ledger.
@@ -118,7 +118,22 @@ For streams, verified sender fencing and the durable offset must govern recovery
 a terminated connection cannot be inferred merely from pod deletion or lease
 expiry. There is deliberately no generic force-unlock command.
 
-Inspect the original primary's ledger using the read-only command:
+The read-only inspection script needs only the existing inventory and maintenance
+receipt; it does not need the pending Audit token or province/reference inputs:
+
+```sh
+python3 scripts/platform-acquisition-status.py \
+  --inventory /private/inventory.json --receipt /private/maintenance-receipt.json
+```
+
+It queries captured original primaries and exits nonzero for a stale/uncertain
+pending dispatch. A current healthy SSE connection is not an incident. Ten
+seconds is a diagnostic threshold for finite requests, never an unlock TTL.
+It prints only metadata and receipt sizes. The source validation runner also
+requires these observations, so already-complete reference data cannot hide
+blocked acquisition. Old observations without dispatch evidence need recollection.
+
+For direct inspection on the original primary, the equivalent read-only SQL is:
 
 ```sql
 SELECT scope,lane,dispatch_id,epoch,holder,state,streaming,started_at,completed_at,
@@ -169,6 +184,15 @@ stream handoff, missing/changed request identities, redirects/body bounds, lost
 receipt acknowledgements, unconfirmed intent rejection, retry snapshot boundaries,
 shared station reads and empty coastal pages. It requires all named proofs to
 pass, rejects skips, records evidence and removes only its owned containers.
+
+Local evidence `evidence/platform-acquisition-dispatch/e2a961d3aa54/result.json`
+records 17 passes, zero failures/skips and no remaining container cleanup. The
+focused connector suites and 124 offline Python checks also passed. A separate
+observer SQL fixture verifies that healthy streams are accepted and stale or
+aged finite pending dispatches make source validation fail even with complete
+reference data. Its evidence is under `evidence/platform-source-validation/`.
+These diagnostic snapshots do not establish request-by-request upstream log
+uniqueness or a measured takeover latency.
 
 The four-VM freeze, permanent-node-loss, database-promotion, clock-skew, live-feed
 and measured takeover acceptance runs remain deferred. A local protocol pass is

@@ -79,6 +79,25 @@ def load_inputs(inventory,path):
     return config,base,owner,receipt,reference,sha
 
 
+def dispatch_status(observer):
+    """Read original control primaries; include metadata, never receipt bodies."""
+    result={}
+    expression="""SELECT coalesce(jsonb_agg(jsonb_build_object(
+      'scope',d.scope,'lane',d.lane,'dispatch_id',d.dispatch_id,
+      'epoch',d.epoch,'holder',d.holder,'state',d.state,'streaming',d.streaming,
+      'started_at',d.started_at,'completed_at',d.completed_at,'status',d.status,
+      'receipt_bytes',octet_length(d.body),
+      'blocking',d.state='pending' AND (
+        o.epoch<>d.epoch OR o.holder IS DISTINCT FROM d.holder OR
+        o.expires_at IS NULL OR o.expires_at<=clock_timestamp() OR
+        (NOT d.streaming AND d.started_at<clock_timestamp()-interval '10 seconds'))
+      ) ORDER BY d.scope,d.lane),'[]'::jsonb)
+      FROM acquisition_dispatch d JOIN canonical_ownership o USING(scope)"""
+    for suffix in("storage","ingestion"):
+        result[suffix]=observer.query(suffix,expression)["data"]
+    return result
+
+
 class Observer:
     def __init__(self,cluster,owner,receipt):
         self.cluster=cluster;self.owner=owner;self.receipt=receipt;self.origin_wall=time.time();self.origin_mono=time.monotonic();self.preferred={}
@@ -131,6 +150,7 @@ class Observer:
     def collect(self,reference):
         out={"satellite":[],"coastal_expected":[],"coastal_receipts":[],"clock_samples":{"ingestion":[],"notifier-db":[]}}
         out["progress"]=self.progress()["data"]
+        out["dispatch"]=dispatch_status(self)
         rows=reference["satellite"]["records"];namespace=literal(reference["satellite"]["namespace"])
         for start in range(rows[0]["offset"],rows[-1]["offset"]+1,500):
             end=min(start+499,rows[-1]["offset"])
@@ -152,6 +172,8 @@ def analyze(reference,observed,max_clock_uncertainty_ms=500):
     failures=[]
     def check(condition,reason):
         if not condition:failures.append(reason)
+    dispatch=observed.get("dispatch")
+    check(isinstance(dispatch,dict)and set(dispatch)=={"storage","ingestion"}and all(isinstance(v,list)and all(type(row.get("blocking"))is bool and not row["blocking"]for row in v)for v in dispatch.values()),"source dispatch evidence is missing or an uncertain/stale request blocks acquisition")
     expected={r["offset"]:r["payload_sha256"]for r in reference["satellite"]["records"]};rows=observed.get("satellite",[]);actual={r["offset"]:r for r in rows}
     check(len(actual)==len(rows)and set(actual)==set(expected),"satellite reference identities are missing, duplicated or unexpected")
     check(all(actual.get(offset,{}).get("payload_sha256")==digest and actual.get(offset,{}).get("state")=="applied"for offset,digest in expected.items()),"satellite payload changed or canonical work remains unapplied")
