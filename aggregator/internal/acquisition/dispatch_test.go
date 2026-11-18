@@ -108,3 +108,7 @@ func TestDispatchTLSUsesHTTP1WithoutHiddenHTTP2Retries(t *testing.T) {
 		require.EqualValues(t, 1, protocol.Load(), "HTTP/2 stream retry logic must be outside the acquisition transport")
 	})
 }
+
+func (r *lostReceiptReply) CheckDispatch(context.Context, Dispatch) error             { return nil }
+func (r *lostReceiptReply) OpenDispatchStream(context.Context, Dispatch) error        { return nil }
+func (r *lostReceiptReply) InterruptDispatch(context.Context, Dispatch, string) error { return nil }

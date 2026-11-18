@@ -13,15 +13,20 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
 REQUIRED = {
-    "TestDispatchFreezeAfterPermitReusesReceiptAcrossTakeover",
+    "TestDispatchFreezeAfterPermitRejectsStaleSender",
     "TestDispatchFreezeBeforePermitRejectsStaleSender",
-    "TestDispatchLostResponseRemainsBlockedAfterRestart",
+    "TestDispatchLostResponseRecoversAfterRestart",
     "TestDispatchStreamingHandoffWaitsForBodyClose",
     "TestDispatchEnforcesRequestIdentityLimitsAndNoRedirect",
     "TestDispatchFailedWorkKeepsReceiptGenerationAndSnapshotBoundary",
     "TestDispatchLostReceiptAckReusesSavedResponse",
     "TestDispatchUnconfirmedIntentNeverReachesNetwork",
     "TestDispatchTLSUsesHTTP1WithoutHiddenHTTP2Retries",
+    "TestDispatchCompletedResponseReusedAfterTakeover",
+    "TestDispatchSupersededNonceCannotOverwriteRecoveredReceipt",
+    "TestDispatchStreamingRecoversWithoutOldBodyClose",
+    "TestDispatchProcessCrashTakeoverWithin60Seconds",
+    "TestConnectorResumesWithoutGapsOrDuplicates",
     "TestSharedStationsOnlySourceOwnerFetches",
     "TestCoastalEmptyPageAdvancesDispatchGeneration",
 }
@@ -56,12 +61,12 @@ def main():
                 raise RuntimeError("temporary database startup deadline")
             time.sleep(.2)
         runner = prefix + "-go"
-        pattern = "TestDispatch|TestPlatformAcquisition|TestSourceProgress|TestSourceReceipt|TestM3IngestionBytes|TestAcquisitionPublishes|TestSharedStations|TestCoastalEmptyPage"
+        pattern = "TestDispatch|TestPlatformAcquisition|TestSourceProgress|TestSourceReceipt|TestM3IngestionBytes|TestAcquisitionPublishes|TestSharedStations|TestCoastalEmptyPage|TestConnectorResumes"
         docker("create", "--name", runner, "--label", "aat.dispatch.check=" + run, "--network", "container:" + pg,
                "--memory", "2g", "--cpus", "3", "--mount", "type=bind,src=" + str(ROOT) + ",dst=/src,readonly",
                "-v", "r3-go-mod:/go/pkg/mod", "-v", "r3-go-build:/root/.cache/go-build", "-e", "M2_DATABASE_URL",
                "-w", "/src/aggregator", "golang:1.27.1-alpine3.24", "go", "test", "-mod=readonly", "-count=1",
-               "-timeout=180s", "-json", "./internal/store", "./internal/ingestion", "./internal/coastal", "./internal/acquisition", "-run", pattern)
+               "-timeout=180s", "-json", "./internal/store", "./internal/ingestion", "./internal/coastal", "./internal/acquisition", "./internal/satellite", "-run", pattern)
         created.append(runner)
         process = docker("start", "-a", runner, check=False)
         (output / "tests.log").write_text((process.stdout + process.stderr).replace(password, "[redacted]"))
@@ -72,12 +77,14 @@ def main():
                 event = json.loads(line)
             except ValueError:
                 continue
+            if event.get("Output") and "DISPATCH_TAKEOVER_RESULT=" in event["Output"]:
+                report["process_takeover"]=json.loads(event["Output"].split("DISPATCH_TAKEOVER_RESULT=",1)[1])
             if event.get("Test") and event.get("Action") in counts:
                 counts[event["Action"]] += 1
                 if event["Action"] == "pass":
                     passed.add(event["Test"])
         missing = sorted(REQUIRED - passed)
-        report.update(passed=process.returncode == 0 and not missing and counts["skip"] == 0,
+        report.update(passed=process.returncode == 0 and not missing and counts["skip"] == 0 and report.get("process_takeover",{}).get("elapsed_ms",60000)<60000,
                       returncode=process.returncode, counts=counts, missing_required=missing)
     finally:
         cleanup = []

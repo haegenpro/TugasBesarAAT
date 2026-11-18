@@ -87,7 +87,7 @@ func dispatchGet(client *http.Client, ctx context.Context, target, key string) (
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
 }
-func TestDispatchFreezeAfterPermitReusesReceiptAcrossTakeover(t *testing.T) {
+func TestDispatchFreezeAfterPermitRejectsStaleSender(t *testing.T) {
 	s, a := dispatchLab(t)
 	old := dispatchOwner(t, a, "PVMBG")
 	var requests atomic.Int64
@@ -136,17 +136,23 @@ func TestDispatchFreezeAfterPermitReusesReceiptAcrossTakeover(t *testing.T) {
 	close(resume)
 	select {
 	case err = <-result:
-		require.NoError(t, err)
+		require.Error(t, err)
 	case <-time.After(3 * time.Second):
 		t.Fatal("resumed request did not finish")
 	}
-	require.EqualValues(t, 1, requests.Load())
-	// Old ownership can preserve its HTTP receipt but still cannot commit data.
+	require.EqualValues(t, 0, requests.Load(), "resumed sender must revalidate before HTTP")
+	// Old ownership cannot commit data.
 	require.Error(t, s.CommitVolcanic(old, nil, nil, "stale", 0))
-	body, err := dispatchGet(second, next, source.URL+"/volcanic-reports", "live:initial")
-	require.NoError(t, err)
+	var body []byte
+	require.Eventually(t, func() bool {
+		body, err = dispatchGet(second, next, source.URL+"/volcanic-reports", "live:initial")
+		return err == nil
+	}, 3*time.Second, 100*time.Millisecond)
 	require.JSONEq(t, `{"snapshot":"first"}`, string(body))
-	require.EqualValues(t, 1, requests.Load(), "takeover must read the receipt, not fetch it again")
+	require.EqualValues(t, 1, requests.Load(), "only the new owner may send")
+	_, err = dispatchGet(second, next, source.URL+"/volcanic-reports", "live:initial")
+	require.NoError(t, err)
+	require.EqualValues(t, 1, requests.Load(), "retry must reuse the saved response")
 	_, err = dispatchGet(first, old, source.URL+"/volcanic-reports", "live:later")
 	require.Error(t, err)
 	require.EqualValues(t, 1, requests.Load())
@@ -189,38 +195,53 @@ func TestDispatchFreezeBeforePermitRejectsStaleSender(t *testing.T) {
 	require.Error(t, <-result)
 	require.EqualValues(t, 1, requests.Load())
 }
-func TestDispatchLostResponseRemainsBlockedAfterRestart(t *testing.T) {
+func TestDispatchLostResponseRecoversAfterRestart(t *testing.T) {
 	s, a := dispatchLab(t)
 	old := dispatchOwner(t, a, "PVMBG")
 	var requests atomic.Int64
+	var firstID, secondID string
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		connection, _, err := w.(http.Hijacker).Hijack()
-		if err == nil {
-			_ = connection.Close()
+		if requests.Add(1) == 1 {
+			firstID = r.Header.Get("X-Acquisition-Request-ID")
+			connection, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = connection.Close()
+			}
+			return
 		}
+		secondID = r.Header.Get("X-Acquisition-Request-ID")
+		_, _ = w.Write([]byte("recovered"))
 	}))
 	defer source.Close()
 	client, err := acquisition.Client(a, "PVMBG", source.URL, 0, 4096)
 	require.NoError(t, err)
 	_, err = dispatchGet(client, old, source.URL+"/volcanic-reports", "initial")
 	require.ErrorIs(t, err, acquisition.ErrDispatchPending)
-	require.EqualValues(t, 1, requests.Load())
 	expireDispatchOwner(t, s, "PVMBG")
 	restarted, err := ownership.NewAcquisition(s.Pool, 15*time.Second, canonical.Deadline)
 	require.NoError(t, err)
 	next := dispatchOwner(t, restarted, "PVMBG")
 	client, err = acquisition.Client(restarted, "PVMBG", source.URL, 0, 4096)
 	require.NoError(t, err)
-	for _, key := range []string{"initial", "different", "force-retry"} {
-		_, err = dispatchGet(client, next, source.URL+"/volcanic-reports", key)
-		require.ErrorIs(t, err, acquisition.ErrDispatchPending)
-	}
-	require.EqualValues(t, 1, requests.Load(), "timeouts, lease changes and restarts must not authorize another send")
+	var body []byte
+	require.Eventually(t, func() bool {
+		body, err = dispatchGet(client, next, source.URL+"/volcanic-reports", "initial")
+		return err == nil
+	}, 3*time.Second, 100*time.Millisecond)
+	require.Equal(t, "recovered", string(body))
+	require.EqualValues(t, 2, requests.Load())
+	require.NotEmpty(t, firstID)
+	require.Equal(t, firstID, secondID)
 	var state string
-	require.NoError(t, s.Pool.QueryRow(context.Background(), `SELECT state FROM acquisition_dispatch WHERE scope='acquisition:PVMBG'`).Scan(&state))
-	require.Equal(t, "pending", state)
+	var recovered int64
+	require.NoError(t, s.Pool.QueryRow(context.Background(), `SELECT state,recovery_count FROM acquisition_dispatch WHERE scope='acquisition:PVMBG'`).Scan(&state, &recovered))
+	require.Equal(t, "complete", state)
+	require.EqualValues(t, 1, recovered)
+	_, err = dispatchGet(client, next, source.URL+"/volcanic-reports", "initial")
+	require.NoError(t, err)
+	require.EqualValues(t, 2, requests.Load(), "a completed recovery is cached")
 }
+
 func TestDispatchStreamingHandoffWaitsForBodyClose(t *testing.T) {
 	s, a := dispatchLab(t)
 	// Canonical deployments do not own satellite; this fixture provisions its

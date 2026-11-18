@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,9 +21,24 @@ import (
 	"github.com/google/uuid"
 )
 
-// ErrDispatchPending is deliberately not a retry authorization. No TTL, lease
-// change, process restart or HTTP timeout can reclaim an uncertain dispatch.
-var ErrDispatchPending = errors.New("upstream dispatch pending; receipt or sender fencing required")
+// ErrDispatchPending preserves input progress while acquisition retries. Only
+// the authoritative current owner can supersede an interrupted/timed-out nonce.
+var ErrDispatchPending = errors.New("upstream dispatch awaiting automatic recovery")
+
+const DispatchAttemptTimeout = 10 * time.Second
+const DispatchRetryInterval = 500 * time.Millisecond
+
+// DispatchWait is admission contention, not an upstream failure. Source loops
+// must not feed it into exponential backoff or circuit-breaker failure counts.
+type DispatchWait struct{}
+
+func (*DispatchWait) Error() string { return "source dispatch is still in flight" }
+func (*DispatchWait) Unwrap() error { return ErrDispatchPending }
+func WaitDelay(err error) (time.Duration, bool) {
+	var wait *DispatchWait
+	return DispatchRetryInterval, errors.As(err, &wait)
+}
+
 var ErrDispatchIdentity = errors.New("upstream request identity missing or changed")
 
 type Dispatch struct {
@@ -30,15 +47,20 @@ type Dispatch struct {
 	Streaming                  bool
 }
 type Receipt struct {
-	ID, State string
-	Status    int
-	Headers   http.Header
-	Body      []byte
-	StartedAt time.Time
+	ID, State     string
+	Status        int
+	Headers       http.Header
+	Body          []byte
+	StartedAt     time.Time
+	Recovered     bool
+	RecoveryCount int64
 }
 type DispatchRepository interface {
 	ReserveDispatch(context.Context, Dispatch) (Receipt, error)
 	CompleteDispatch(context.Context, Dispatch, Receipt) error
+	CheckDispatch(context.Context, Dispatch) error
+	OpenDispatchStream(context.Context, Dispatch) error
+	InterruptDispatch(context.Context, Dispatch, string) error
 	CloseDispatchStream(context.Context, Dispatch) error
 }
 
@@ -65,8 +87,8 @@ func WithRequestKey(ctx context.Context, key string) context.Context {
 }
 
 // Client is the only network path used by coordinated acquisition. The durable
-// intent is committed before entering the real transport. A paused sender keeps
-// that intent; a successor reuses its receipt or waits, even with a newer lease.
+// intent is committed before entering the real transport. A successor reuses
+// a receipt or performs a bounded read retry from persisted input progress.
 // No extra gateway pods or new database formation are needed.
 func Client(repository DispatchRepository, source, base string, timeout time.Duration, maxBody int64) (*http.Client, error) {
 	u, err := url.Parse(base)
@@ -81,6 +103,9 @@ func Client(repository DispatchRepository, source, base string, timeout time.Dur
 	t.Protocols.SetHTTP1(true)
 	t.Proxy = nil
 	t.MaxConnsPerHost = 8
+	t.DialContext = (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	t.TLSHandshakeTimeout = 3 * time.Second
+	t.ResponseHeaderTimeout = 5 * time.Second
 	return &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &dispatchTransport{repository: repository, source: source, base: u, maxBody: maxBody, next: platform.Transport{Base: t}}}, nil
 }
 
@@ -145,7 +170,7 @@ func (t *dispatchTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	cancel()
 	if err != nil {
 		platform.Add("acquisition_dispatch_blocked_total", 1)
-		return nil, fmt.Errorf("%w: %v", ErrDispatchPending, err)
+		return nil, fmt.Errorf("%w: %w", ErrDispatchPending, err)
 	}
 	identity.mu.Lock()
 	if identity.started.IsZero() || r.StartedAt.Before(identity.started) {
@@ -156,18 +181,60 @@ func (t *dispatchTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		platform.Add("acquisition_dispatch_reused_total", 1)
 		return response(req, r), nil
 	}
-	// There is intentionally no release-on-error defer. A transport error can
-	// mean the source received the request but the reply was lost.
-	platform.Add("acquisition_dispatch_admitted_total", 1)
-	resp, err := t.next.RoundTrip(req)
+	if r.Recovered {
+		platform.Add("acquisition_dispatch_recovered_total", 1)
+	}
+	// A pause after Reserve must not revive the sender that lost ownership.
+	// This narrows the check/send race; the upstream does not enforce our epoch.
+	if _, err = Token(ctx, t.source); err != nil {
+		t.interrupt(d, "preflight")
+		return nil, err
+	}
+	check, stop := context.WithTimeout(ctx, canonical.Deadline)
+	err = t.repository.CheckDispatch(check, d)
+	stop()
 	if err != nil {
+		t.interrupt(d, "preflight")
+		return nil, fmt.Errorf("%w: %w", ErrDispatchPending, err)
+	}
+	if _, err = Token(ctx, t.source); err != nil {
+		t.interrupt(d, "preflight")
+		return nil, err
+	}
+	networkCtx := ctx
+	if !streaming {
+		var cancel context.CancelFunc
+		networkCtx, cancel = context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+	}
+	request := req.Clone(networkCtx)
+	request.Header = req.Header.Clone()
+	request.Header.Set("X-Acquisition-Request-ID", d.Key)
+	request.Header.Set("X-Acquisition-Epoch", strconv.FormatInt(owner.Epoch, 10))
+	request.Header.Set("X-Acquisition-Recovery", strconv.FormatBool(r.Recovered))
+	platform.Add("acquisition_dispatch_admitted_total", 1)
+	resp, err := t.next.RoundTrip(request)
+	if err != nil {
+		t.interrupt(d, "transport")
 		return nil, fmt.Errorf("%w: transport outcome unknown: %v", ErrDispatchPending, err)
 	}
 	if streaming && resp.StatusCode == http.StatusOK {
-		resp.Body = &dispatchStream{ReadCloser: resp.Body, finish: func() error {
+		c, done := context.WithTimeout(context.Background(), canonical.Deadline)
+		err = t.repository.OpenDispatchStream(c, d)
+		done()
+		if err != nil {
+			_ = resp.Body.Close()
+			t.interrupt(d, "receipt")
+			return nil, fmt.Errorf("%w: stream admission unavailable", ErrDispatchPending)
+		}
+		resp.Body = &dispatchStream{ReadCloser: resp.Body, interrupt: func() { t.interrupt(d, "body") }, finish: func() error {
 			c, done := context.WithTimeout(context.Background(), canonical.Deadline)
 			defer done()
-			return t.repository.CloseDispatchStream(c, d)
+			err := t.repository.CloseDispatchStream(c, d)
+			if err != nil {
+				t.interrupt(d, "receipt")
+			}
+			return err
 		}}
 		return resp, nil
 	}
@@ -177,6 +244,7 @@ func (t *dispatchTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, t.maxBody+1))
 	closeErr := resp.Body.Close()
 	if readErr != nil || closeErr != nil || int64(len(body)) > t.maxBody {
+		t.interrupt(d, "body")
 		return nil, fmt.Errorf("%w: incomplete or oversized upstream response", ErrDispatchPending)
 	}
 	r.Body = body
@@ -190,6 +258,7 @@ func (t *dispatchTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		done()
 	}
 	if err != nil {
+		t.interrupt(d, "receipt")
 		return nil, fmt.Errorf("%w: durable receipt unavailable", ErrDispatchPending)
 	}
 	return response(req, r), nil
@@ -205,12 +274,13 @@ func response(req *http.Request, r Receipt) *http.Response {
 
 // Close waits for the underlying transport's body to close before making a
 // subsequent stream open possible. A process frozen before/during Close leaves
-// its durable intent pending. A killed process cannot clear it automatically.
+// its intent pending until the new owner supersedes it after the grace period.
 type dispatchStream struct {
 	io.ReadCloser
-	once   sync.Once
-	finish func() error
-	err    error
+	once      sync.Once
+	finish    func() error
+	interrupt func()
+	err       error
 }
 
 func (s *dispatchStream) Close() error {
@@ -218,6 +288,8 @@ func (s *dispatchStream) Close() error {
 		s.err = s.ReadCloser.Close()
 		if s.err == nil {
 			s.err = s.finish()
+		} else if s.interrupt != nil {
+			s.interrupt()
 		}
 	})
 	return s.err
@@ -236,4 +308,10 @@ func RequestStarted(ctx context.Context, fallback time.Time) time.Time {
 		return fallback
 	}
 	return i.started
+}
+
+func (t *dispatchTransport) interrupt(d Dispatch, reason string) {
+	c, done := context.WithTimeout(context.Background(), canonical.Deadline)
+	defer done()
+	_ = t.repository.InterruptDispatch(c, d, reason)
 }

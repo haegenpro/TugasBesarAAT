@@ -45,7 +45,10 @@ func (a *Acquirer) Run(ctx context.Context) {
 			a.Status.Attempt(err)
 		}
 		delay := a.Interval
+		wait, waiting := acquisition.WaitDelay(err)
 		switch {
+		case waiting:
+			failures, delay = 0, wait
 		case err != nil:
 			failures++
 			delay = rawinput.Backoff(failures)

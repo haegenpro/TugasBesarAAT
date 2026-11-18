@@ -179,7 +179,9 @@ func (w *Worker) Run(ctx context.Context) {
 		err := w.Step(call)
 		cancel()
 		delay := w.Interval
-		if err != nil {
+		if wait, ok := acquisition.WaitDelay(err); ok {
+			failures, delay = 0, wait
+		} else if err != nil {
 			failures++
 			cap := 250 * time.Millisecond
 			for i := 1; i < failures && cap < 30*time.Second; i++ {

@@ -65,7 +65,7 @@ func Migrate(ctx context.Context, c *pgx.Conn, repositoryRoot, role string) erro
 	if _, err = tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS ingestion_migrations(version text PRIMARY KEY,checksum text NOT NULL)`); err != nil {
 		return err
 	}
-	names := []string{"0001_ingestion.sql", "0004_ownership.sql", "0005_replication_probe.sql", "0002_r3.sql", "0003_source_envelopes.sql", "0004_coastal_accounting.sql", "0014_acquisition_dispatch.sql", "0005_dispatch_progress.sql"}
+	names := []string{"0001_ingestion.sql", "0004_ownership.sql", "0005_replication_probe.sql", "0002_r3.sql", "0003_source_envelopes.sql", "0004_coastal_accounting.sql", "0014_acquisition_dispatch.sql", "0005_dispatch_progress.sql", "0016_acquisition_recovery.sql"}
 	embedded := map[string]bool{"0001_ingestion.sql": true, "0002_r3.sql": true, "0003_source_envelopes.sql": true, "0004_coastal_accounting.sql": true, "0005_dispatch_progress.sql": true}
 	var count int
 	if err = tx.QueryRow(ctx, `SELECT count(*) FROM ingestion_migrations WHERE version<>ALL($1)`, names).Scan(&count); err != nil {

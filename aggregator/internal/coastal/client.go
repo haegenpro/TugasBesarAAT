@@ -1,6 +1,7 @@
 package coastal
 
 import (
+	"aggregator/internal/acquisition"
 	"aggregator/internal/middleware"
 	"aggregator/internal/platform"
 	"context"
@@ -78,6 +79,10 @@ func (c *Client) get(ctx context.Context, b *Breaker, path string, out any) erro
 	resp, err := c.HTTP.Do(req)
 	platform.Observe("coastal_"+b.Name+"_request_seconds", time.Since(started).Seconds())
 	if err != nil {
+		if _, waiting := acquisition.WaitDelay(err); waiting {
+			b.Release()
+			return err
+		}
 		if ctx.Err() != nil {
 			b.Release()
 			return ctx.Err()

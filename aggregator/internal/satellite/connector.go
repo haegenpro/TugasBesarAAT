@@ -76,7 +76,10 @@ func (c *Connector) Run(ctx context.Context) {
 		delay := time.Duration(0)
 		var retry *RetryAfter
 		var gap *GapError
+		wait, waiting := acquisition.WaitDelay(err)
 		switch {
+		case waiting:
+			failures, delay = 0, wait
 		case errors.As(err, &retry):
 			failures++
 			delay = max(retry.Delay, rawinput.Backoff(failures))

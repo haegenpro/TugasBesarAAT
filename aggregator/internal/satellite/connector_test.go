@@ -165,7 +165,9 @@ func TestConnectorResumesWithoutGapsOrDuplicates(t *testing.T) {
 	b := &broker{schema: string(schema), registry: client}
 	progress := &ingestion.SourceStore{DB: db, Durability: labDurability{pool: db.Pool}, Fence: authority, Source: Source, Namespace: "session-a"}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	c := &Connector{BaseURL: feed.URL, Token: "t", HTTP: http.DefaultClient, Progress: progress, Sender: rawinput.Sender{JS: b, Registry: client, SchemaText: string(schema)}, Start: 1, IdleTimeout: 500 * time.Millisecond, FlushEvery: 2, FlushAfter: time.Hour, MaxEventSize: 1 << 20, Logger: logger}
+	sourceHTTP, err := acquisition.Client(authority, Source, feed.URL, 0, 64<<10)
+	require.NoError(t, err)
+	c := &Connector{MetadataKey: func(ctx context.Context) (string, error) { return authority.DispatchWindow(ctx, 5*time.Second) }, BaseURL: feed.URL, Token: "t", HTTP: sourceHTTP, Progress: progress, Sender: rawinput.Sender{JS: b, Registry: client, SchemaText: string(schema)}, Start: 1, IdleTimeout: 500 * time.Millisecond, FlushEvery: 2, FlushAfter: time.Hour, MaxEventSize: 1 << 20, Logger: logger}
 	coordinator, err := acquisition.New(authority, logger)
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())

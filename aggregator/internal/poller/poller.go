@@ -151,8 +151,10 @@ func (p *Poller) loop(ctx context.Context, endpoint string, fn pollFunc) {
 			// A status read failure is not an empty cursor. Do not accidentally
 			// fetch a full snapshot or advance a cursor when PostgreSQL is down.
 			if err == nil {
-				firstOwnedAttempt = false
 				err = p.attempt(callCtx, endpoint, cid, status, fn)
+				if err == nil {
+					firstOwnedAttempt = false
+				}
 			}
 			if err != nil {
 				p.logSourceFailure(endpoint, cid, err)
@@ -165,6 +167,9 @@ func (p *Poller) loop(ctx context.Context, endpoint string, fn pollFunc) {
 			}
 			if delay > maxBackoff {
 				delay = maxBackoff
+			}
+			if wait, waiting := acquisition.WaitDelay(err); waiting {
+				failures, delay = 0, wait
 			}
 		}
 		if !sleep(ctx, delay) {
