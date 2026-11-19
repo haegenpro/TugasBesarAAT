@@ -6,7 +6,7 @@ from bundle_lib import inspect
 from database_lib import render as render_databases
 from isolation_lib import render as render_isolation
 from platform_lib.inventory import fingerprint
-from storage_lib import SERVICE_DATABASES,manifests,plan,require,write_json
+from storage_lib import manifests,plan,require,write_json
 
 ROOT=Path(__file__).resolve().parent.parent
 
@@ -67,7 +67,7 @@ def assemble(inventory,config_path,output):
         write_json(output/(suffix+"-plan.json"),storage)
     write_json(output/"database-requirements.json",requirements)
     bundle={"version":1,"phase":"infrastructure","formations":[s["formation"]for s in formations],"node_reserve_mib":config.get("node_reserve_mib",512),"stages":stages,"unresolved":config.get("infrastructure_unresolved",[])}
-    bundle["activation_pending"]=[*config.get("unresolved",[]),"Initialize owned service schemas and pinned Registry schema while owning applications are stopped","Capture original three-copy identities for all six formations","Run offline canonical/ingestion migrations and BMKG cutover before full activation"]
+    bundle["activation_pending"]=[*config.get("unresolved",[]),"Initialize owned service schemas and pinned Registry schema while owning applications are stopped, then verify owner isolation","Capture original three-copy identities for all "+str(len(formations))+" formations","Run offline canonical/ingestion migrations and BMKG cutover before full activation"]
     write_json(output/"bundle.json",bundle)
     report,_=inspect(output/"bundle.json",inventory)
     report.update(phase="infrastructure",inventory_sha256=fingerprint(inventory),note="Storage/Secrets only; no application, source or publisher is started. Full activation remains a separate reviewed release.")

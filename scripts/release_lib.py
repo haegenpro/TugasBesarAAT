@@ -8,7 +8,7 @@ from isolation_lib import render as render_isolation
 from monitoring_lib import render as render_monitoring
 from role1_integration_lib import render as render_role1
 from service_lib import render as render_services
-from storage_lib import SERVICE_DATABASES,durability_config,manifests,plan,require,write_json
+from storage_lib import FORMATIONS,durability_config,manifests,plan,require,write_json
 
 ROOT=Path(__file__).resolve().parent.parent
 
@@ -111,7 +111,7 @@ def assemble(inventory,config_path,output):
     if owner_database_report:
         write_json(output/"database-requirements.json",owner_database_report)
         for storage in owner_database_report["formations"]:write_json(output/(storage["formation_suffix"]+"-plan.json"),storage)
-    bundle={"version":1,"formations":[inventory["cluster_id"]+"-"+suffix for suffix in("storage","ingestion",*SERVICE_DATABASES)],"node_reserve_mib":config.get("node_reserve_mib",512),"stages":stages,"unresolved":blockers}
+    bundle={"version":1,"formations":[inventory["cluster_id"]+"-"+suffix for suffix in FORMATIONS],"node_reserve_mib":config.get("node_reserve_mib",512),"stages":stages,"unresolved":blockers}
     write_json(output/"bundle.json",bundle)
     report,_=inspect(output/"bundle.json",inventory)
     write_json(output/"plan.json",report)

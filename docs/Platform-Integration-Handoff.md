@@ -24,15 +24,15 @@ in addition to the real-node validation listed below.
 | Area | Result | Remaining input or execution |
 | --- | --- | --- |
 | Release assembly | [Release preparation](../deployment/platform/RELEASE.md): image publishing/digest capture, bootstrap/activation bundles and verified maintenance receipts | Supply registry/input files; execute bootstrap and maintenance on real nodes |
-| Private configuration | [Configuration generator](Platform-Private-Configuration.md): consistent service keys, six storage PKIs/passwords, restricted DSNs, integrated feature settings, client credentials and bundled 38-province reference | Instructor Audit token remains pending; confirm namespaces/offsets and bounded satellite egress |
+| Private configuration | [Configuration generator](Platform-Private-Configuration.md): consistent service keys, three storage PKIs/password sets with per-owner service database logins, restricted DSNs, integrated feature settings, client credentials and bundled 38-province reference | Instructor Audit token remains pending; confirm namespaces/offsets and bounded satellite egress |
 | Four physical hosts | [Four-host setup](Platform-Four-Physical-Hosts.md): manual VirtualBox/Wi-Fi onboarding; existing wired Linux/libvirt and Windows/VirtualBox provider retained separately | Actual addresses/capacity, peer connectivity, provider/deployment integration, then measured physical validation |
 | Wildfire batches | [Multi-entity integration](Platform-Multi-Entity-Integration.md): live Citus capability checks retain fencing, transaction recovery and WAL confirmation | Replicated replay and failure validation |
-| Service databases | [Owned databases](Platform-Owned-Service-Databases.md): four HA formations, restricted roles and explicit schema/Registry initialization | Live bootstrap, identity capture and failover checks |
+| Service databases | [Owned databases](Platform-Owned-Service-Databases.md): one shared HA formation with four separately owned databases, per-owner roles/credentials/pg_hba, verified isolation and explicit schema/Registry initialization | Live bootstrap, identity capture and failover checks |
 | Empty-disk recovery | [Integrated replacement](Platform-Integrated-Node-Replacement.md): all PG formations, retained broker membership, UID-guarded holds, atomic source restore and durable phase resume | Actual source checkpoints, physical disk-loss/interrupted-phase runs and accepted-data reconciliation |
 | Source checkpoints | [Stopped-writer capture](Platform-Source-Checkpoints.md): owned volumes, SQLite WAL snapshots, integrity checks and deployment-bound receipts | Choose/capture actual restore points; later source writes need protection and reconciliation |
 | Broker recovery | [Account and recovery wiring](Platform-Broker-Recovery.md): APP/system credentials separated, same-name rebuild, stream/durable quorums and acknowledgement anchors | Apply prepared private Secrets; physical failure validation |
 | Live satellite | [Bounded probe](Platform-Satellite-Probe.md) plus reference-based SQL reconciliation and measured 60x disconnect/catch-up runner | Supply independent reference data and execute against the real feed/deployment |
-| Monitoring | [Observability](Platform-Observability-Handoff.md): owner metrics, every broker, all six database formations and warning coverage/error-budget signals | Runtime startup, reference/receipt reconciliation and clock accuracy |
+| Monitoring | [Observability](Platform-Observability-Handoff.md): owner metrics, every broker, all three database formations and warning coverage/error-budget signals | Runtime startup, reference/receipt reconciliation and clock accuracy |
 | Field priority | [Overload handoff](Platform-Overload-Handoff.md): verified scheduling hints, reserved Auth/Client lanes, split Auth/read pools and protected Field routes; local saturation checks pass | Physical database CPU/I/O, locks/session limits, network/source saturation and full-system measurements |
 | Combined validation | [Workflow](Platform-Input-Driven-Workflow.md): fresh private load sessions, generator samples, readiness checks, stable 1/3-replica comparison, combined scale/rollout/VM pause and source/recipient/Audit reconciliation | Reference dataset, different compatible rollout image and actual load/fault execution |
 
@@ -45,8 +45,12 @@ wiring were checked without contacting a deployment. The instructor Audit token
 remains pending. For this older scaffold, input completion now supplies the
 [project province table](Province-Reference.md) without regenerating credentials.
 The scaffold uses example four-host identities and is **not ready for activation**.
-See [private configuration](Platform-Private-Configuration.md) before editing or
-regenerating it. No credentials are committed.
+It predates the shared service database formation: it holds credentials for four
+separate `*-db` formations and lacks the `service-db` per-owner password keys, so
+the current release renderer reports its Secrets as incomplete. Because nothing
+has been deployed with it, generate a fresh scaffold with `platform-configure.py`
+instead of patching it. See [private configuration](Platform-Private-Configuration.md)
+before editing or regenerating it. No credentials are committed.
 
 Alternatively copy `deployment/platform/release.example.json` to a private directory. Use
 `deployment/aggregator/config.integrated.example.json` and
@@ -94,7 +98,7 @@ apply uses the exact reviewed bytes and stops without destructive rollback.
 
 Application updates use immutable container images; VMs do not need Git pulls.
 Align host-helper revisions on physical hosts when provider code changes.
-Replacement needs all six plan/config pairs and explicit recovery policies for
+Replacement needs all three plan/config pairs and explicit recovery policies for
 every persistent workload. Unknown or unbacked source state blocks replacement.
 The replacement engine supports `resume-node` for version 3 runs with the
 original run ID, inventory, artifacts and checkpoints. Pending phases reconcile
@@ -106,17 +110,18 @@ need validation. Holds/releases reject recreated or concurrently scaled controll
 
 ## Capacity and verification
 
-The current integrated examples request **25,856 MiB (25.25 GiB) RAM across all
-four VMs**, before guest/host overhead, rollout surge and recovery headroom.
-Placement is uneven. The four service database formations account for 8.5 GiB.
-Four 4 GiB VMs fail the offline check; four hosts with at least 8 GB each have
-not been shown to fit. Disk capacity is separate: databases/WAL, broker messages,
-images, VM roots, quarantine and backups also need space.
-
-Consolidating the four service databases onto one replicated PostgreSQL group
-has been proposed, with a rough 18.9 GiB total request estimate. It is **not
-implemented or measured**. No CockroachDB migration has been made either. The
-current topology is retained; the user deferred that architecture assessment.
+The four service databases now share one replicated PostgreSQL formation (see
+[owned databases](Platform-Owned-Service-Databases.md)), and the single-group
+ingestion and shared formations are placed on A/B/D. The integrated examples
+request **19,328 MiB (18.9 GiB) RAM across all four VMs** (formerly 25,856 MiB),
+before guest/host overhead, rollout surge and recovery headroom. With the
+measured allocatable memory of the current two 8 GB and two 4 GB VMs and a
+512 MiB per-node reserve, the offline plan has no memory blocker; node C, a K3s
+server, is the tightest at 3,072 of 3,403 MiB pinned. This is a scheduling
+estimate, not measured runtime usage. Four 4 GiB VMs still fail the offline
+check. Disk capacity is separate: databases/WAL, broker messages, images, VM
+roots, quarantine and backups also need space. No CockroachDB migration has been
+made.
 
 | Focused check | Result |
 | --- | --- |

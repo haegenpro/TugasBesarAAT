@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 from platform_lib.cluster import Cluster
 from platform_lib.inventory import load
-from storage_lib import SERVICE_DATABASES,durability_config, manifests, plan, require, write_json
+from storage_lib import FORMATIONS, SERVICE_FORMATION, durability_config, manifests, plan, require, write_json
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -76,21 +76,30 @@ def make_secrets(storage, output):
                 "-set_serial", str(index), "-days", "90", "-sha256", "-extfile", name + ".ext", "-out", name + ".crt")
         secret(name + "-tls", {"ca.crt": (pki / "ca.crt").read_bytes(), "tls.crt": (pki / (name + ".crt")).read_bytes(),
                                "tls.key": (pki / (name + ".key")).read_bytes()})
+    shared = storage.get("formation_suffix") == SERVICE_FORMATION
+    application_keys = [d["password_key"] for d in storage["databases"]] if shared else ["APP_PASSWORD"]
     credentials = {key: secrets.token_hex(32) for key in
-                   ("POSTGRES_PASSWORD", "REPLICATION_PASSWORD", "PATRONI_PASSWORD", "APP_PASSWORD")}
+                   ("POSTGRES_PASSWORD", "REPLICATION_PASSWORD", "PATRONI_PASSWORD", *application_keys)}
     secret(formation + "-credentials", credentials)
     write_json(output / "secrets.json", {"apiVersion": "v1", "kind": "List", "items": items})
-    env = []
-    for group in storage["groups"]:
-        role=storage.get("runtime_role","aggregator_app");database=storage.get("database","hazards")
-        dsn = f"postgresql://{role}:{quote(credentials['APP_PASSWORD'], safe='')}@{formation}-g{group['id']}-primary.{namespace}.svc.cluster.local:5432/{database}?sslmode=disable"
-        env.append(f"{group['dsn_env']}={dsn}")
-        if group["id"] == 0:
-            env.append(("INGESTION_DATABASE_URL=" if storage.get("formation_suffix")=="ingestion" else "DATABASE_URL=") + dsn)
-    if storage.get("formation_suffix")not in SERVICE_DATABASES:
+    if shared:
+        # One file per owner: each runtime Secret receives only its own login.
+        for entry in storage["databases"]:
+            role, database, password = entry["runtime_role"], entry["database"], credentials[entry["password_key"]]
+            env = [f"DATABASE_URL=postgresql://{role}:{quote(password, safe='')}@{entry['service']}.{namespace}.svc.cluster.local:5432/{database}?sslmode=disable"]
+            if entry["service"] == "registry-db":
+                env += ["APICURIO_DATASOURCE_USERNAME=" + role, "APICURIO_DATASOURCE_PASSWORD=" + password]
+            (output / (entry["service"] + ".env")).write_text("\n".join(env) + "\n")
+    else:
+        env = []
+        for group in storage["groups"]:
+            role=storage.get("runtime_role","aggregator_app");database=storage.get("database","hazards")
+            dsn = f"postgresql://{role}:{quote(credentials['APP_PASSWORD'], safe='')}@{formation}-g{group['id']}-primary.{namespace}.svc.cluster.local:5432/{database}?sslmode=disable"
+            env.append(f"{group['dsn_env']}={dsn}")
+            if group["id"] == 0:
+                env.append(("INGESTION_DATABASE_URL=" if storage.get("formation_suffix")=="ingestion" else "DATABASE_URL=") + dsn)
         env.append(("INGESTION_DURABILITY_CONFIG=" if storage.get("formation_suffix")=="ingestion" else "CANONICAL_DURABILITY_CONFIG=")+"/etc/aat/durability.json")
-    if storage.get("formation_suffix")=="registry-db":env += ["APICURIO_DATASOURCE_USERNAME="+role,"APICURIO_DATASOURCE_PASSWORD="+credentials["APP_PASSWORD"]]
-    (output / "application.env").write_text("\n".join(env) + "\n")
+        (output / "application.env").write_text("\n".join(env) + "\n")
     for path in output.rglob("*"):
         path.chmod(0o700 if path.is_dir() else 0o600)
 
@@ -163,7 +172,7 @@ def main():
     parser.add_argument("--inventory", type=Path, default=ROOT / "deployment/platform/inventory.example.json")
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--mode", choices=["postgres", "citus"], default="postgres")
-    parser.add_argument("--formation-suffix", choices=["storage","ingestion",*SERVICE_DATABASES], default="storage")
+    parser.add_argument("--formation-suffix", choices=list(FORMATIONS), default="storage")
     parser.add_argument("--image", help="built Patroni image repository@sha256:...")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

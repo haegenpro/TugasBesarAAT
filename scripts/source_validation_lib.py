@@ -13,7 +13,7 @@ from urllib.request import HTTPRedirectHandler,ProxyHandler,Request,build_opener
 
 from maintenance_lib import verify_receipt
 from release_config_lib import read_token
-from storage_lib import require,write_json
+from storage_lib import SERVICE_DATABASES,SERVICE_FORMATION,require,write_json
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -109,14 +109,14 @@ class Observer:
     def __init__(self,cluster,owner,receipt):
         self.cluster=cluster;self.owner=owner;self.receipt=receipt;self.origin_wall=time.time();self.origin_mono=time.monotonic();self.preferred={}
 
-    def query(self,suffix,expression):
+    def query(self,suffix,expression,database="hazards"):
         formation=self.receipt["durability"][suffix];group=formation["groups"][0];ns=self.cluster.cfg["namespace"]
         members=sorted(group["members"],key=lambda m:m["name"]!=self.preferred.get(suffix))
         sql="BEGIN READ ONLY; SET LOCAL statement_timeout='3s'; SELECT jsonb_build_object('physical',public.platform_replication_status(),'clock_epoch',extract(epoch from clock_timestamp()),'data',("+expression+")); COMMIT;"
         for member in members:
             before=time.monotonic()
             try:
-                result=self.cluster.kubectl("exec","-i","-n",ns,member["name"],"-c","postgres","--","psql","-qAt","-U","postgres","-d","hazards"if suffix in("storage","ingestion")else suffix.removesuffix("-db"),"-v","ON_ERROR_STOP=1","-f","-",input=sql.encode(),timeout=5,check=False)
+                result=self.cluster.kubectl("exec","-i","-n",ns,member["name"],"-c","postgres","--","psql","-qAt","-U","postgres","-d",database,"-v","ON_ERROR_STOP=1","-f","-",input=sql.encode(),timeout=5,check=False)
             except (OSError,RuntimeError,subprocess.SubprocessError):continue
             after=time.monotonic()
             if result.returncode:continue
@@ -169,7 +169,7 @@ class Observer:
             selected=literal(json.dumps(ids[start:start+500]));selection="SELECT jsonb_array_elements_text("+selected+"::jsonb)"
             value=self.query("ingestion","SELECT coalesce(jsonb_agg(jsonb_build_object('notification_id',notification_id,'observation_id',observation_id,'first_received_at',first_received_at,'rejected',rejected_at IS NOT NULL)),'[]'::jsonb) FROM coastal_warning_expected WHERE namespace="+namespace+" AND notification_id IN ("+selection+")")
             out["coastal_expected"]+=value["data"];out["clock_samples"]["ingestion"].append(value["clock_offset_interval_seconds"])
-            value=self.query("notifier-db","SELECT jsonb_build_object('receipts',(SELECT coalesce(jsonb_agg(jsonb_build_object('notification_id',notification_id,'observation_id',observation_id,'first_received_at',first_received_at,'committed_at',committed_at)),'[]'::jsonb) FROM coastal_warning_receipts WHERE notification_id IN ("+selection+")),'conflicts',(SELECT count(*) FROM coastal_warning_conflicts WHERE notification_id IN ("+selection+")))")
+            value=self.query(SERVICE_FORMATION,"SELECT jsonb_build_object('receipts',(SELECT coalesce(jsonb_agg(jsonb_build_object('notification_id',notification_id,'observation_id',observation_id,'first_received_at',first_received_at,'committed_at',committed_at)),'[]'::jsonb) FROM coastal_warning_receipts WHERE notification_id IN ("+selection+")),'conflicts',(SELECT count(*) FROM coastal_warning_conflicts WHERE notification_id IN ("+selection+")))",database=SERVICE_DATABASES["notifier-db"][0])
             out["coastal_receipts"]+=value["data"]["receipts"];out["clock_samples"]["notifier-db"].append(value["clock_offset_interval_seconds"])
             out["coastal_conflicts"]=out.get("coastal_conflicts",0)+value["data"]["conflicts"]
         return out

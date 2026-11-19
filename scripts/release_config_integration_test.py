@@ -21,9 +21,14 @@ class ReleaseConfigurationChecks(unittest.TestCase):
     def fake_storage(layout,folder):
         folder.mkdir(parents=True,mode=0o700)
         write_json(folder/"secrets.json",{"items":[]})
+        if layout.get("formation_suffix")=="service-db":
+            for entry in layout["databases"]:
+                values={"DATABASE_URL":"postgresql://"+entry["runtime_role"]+"@"+entry["service"]+"/"+entry["database"]}
+                if entry["service"]=="registry-db":values.update(APICURIO_DATASOURCE_USERNAME="registry_app",APICURIO_DATASOURCE_PASSWORD="registry-private")
+                (folder/(entry["service"]+".env")).write_text("\n".join(k+"="+v for k,v in values.items()))
+            return
         values={g["dsn_env"]:"postgresql://"+layout["formation"]+"/"+str(g["id"])for g in layout["groups"]}
         values["INGESTION_DATABASE_URL"if layout.get("formation_suffix")=="ingestion"else "DATABASE_URL"]="postgresql://"+layout["formation"]
-        if layout.get("formation_suffix")=="registry-db":values.update(APICURIO_DATASOURCE_USERNAME="registry_app",APICURIO_DATASOURCE_PASSWORD="registry-private")
         (folder/"application.env").write_text("\n".join(k+"="+v for k,v in values.items()))
 
     def test_bundled_reference_and_pending_credentials(self):
@@ -51,6 +56,10 @@ class ReleaseConfigurationChecks(unittest.TestCase):
             self.assertNotIn("NATS_SYSTEM_URL",role)
             self.assertNotEqual(secrets["broker-runtime"]["NATS_URL"],secrets["broker-runtime"]["NATS_SYSTEM_URL"])
             self.assertEqual(secrets["registry-runtime"],{"APICURIO_DATASOURCE_USERNAME":"registry_app","APICURIO_DATASOURCE_PASSWORD":"registry-private"})
+            # Each owner Secret carries only its own database login.
+            for name,role,database in (("auth-runtime","auth_app","auth"),("dashboard-runtime","dashboard_app","dashboard"),("notifier-runtime","notifier_app","notifier")):
+                self.assertTrue(secrets[name]["DATABASE_URL"].startswith("postgresql://"+role+"@"))
+                self.assertTrue(secrets[name]["DATABASE_URL"].endswith("/"+database))
             self.assertNotIn("not-a-live-token",json.dumps(report))
             self.assertTrue(any("AUDIT_TOKEN"in item for item in report["pending"]))
             for path in output.rglob("*"):self.assertEqual(path.stat().st_mode&0o777,0o700 if path.is_dir()else 0o600)

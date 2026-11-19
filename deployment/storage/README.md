@@ -9,6 +9,15 @@ stopped. Development can continue before validation.
 | `postgres` | One group, three copies on A/B/C | Small replication/routing/adapter component integration; does not satisfy final sharding |
 | `citus` | Coordinator A/B/C; G1 B/C/D, G2 A/C/D, G3 A/B/D, G4 A/B/C | Full planned placement: fifteen PostgreSQL members; each VM misses one worker group |
 
+The integrated release adds two single-group `postgres` formations placed on
+A/B/D: `ingestion`, and `service-db`, which hosts the four owned service
+databases. For `service-db` the image receives `OWNED_DATABASES` (database, role,
+password key and connection limit per owner) and `MAX_CONNECTIONS`;
+`bootstrap.py` creates each database and restricted role, and `entrypoint.py`
+renders a `pg_hba.conf` with one rule per owner pair that ends in `host all all
+all reject`. Single-database formations keep their original bootstrap and
+`pg_hba.conf`. See [owned service databases](../../docs/Platform-Owned-Service-Databases.md).
+
 Each group uses Patroni 4.1.5 quorum synchronization with one synchronous peer,
 strict mode, timeline checks and rewind. Three separate etcd members use mutual
 TLS on A/B/C. Two HAProxy routers check Patroni `/primary` and close sessions

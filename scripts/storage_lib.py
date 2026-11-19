@@ -6,7 +6,36 @@ import re
 
 ETCD_IMAGE = "gcr.io/etcd-development/etcd@sha256:159cf260a40becd61d289ef582fe9339a53c7d1bd22d7cffebd213e095625183"
 PROXY_IMAGE = "haproxy@sha256:1c3568e520453cc8ba98c39501febcf450429c80e6cc27ecad779961d76e597c"
+# Logical service databases: owner Service name -> (database, runtime role).
+# They share one replicated PostgreSQL formation (SERVICE_FORMATION); each
+# database keeps its own role, credential, Service name and pg_hba pair.
 SERVICE_DATABASES={"auth-db":("auth","auth_app"),"registry-db":("registry","registry_app"),"dashboard-db":("dashboard","dashboard_app"),"notifier-db":("notifier","notifier_app")}
+SERVICE_OWNERS={"auth-db":"auth-service","registry-db":"schema-registry","dashboard-db":"consumer-dashboard","notifier-db":"consumer-notifier"}
+SERVICE_FORMATION="service-db"
+FORMATIONS=("storage","ingestion",SERVICE_FORMATION)
+# Per-role caps bound each owner to at most the connections it could open on
+# its former dedicated instance (replicas plus one rollout surge, times its
+# pool), so one owner cannot exhaust the shared server's slots.
+SERVICE_CONNECTION_LIMITS={"auth_app":64,"registry_app":24,"dashboard_app":64,"notifier_app":64}
+SERVICE_MAX_CONNECTIONS=224
+# A, B and D for the single-group ingestion and shared service formations:
+# keeps them off C, the smaller VM that also runs a K3s server. Canonical
+# shard placement is unchanged.
+AUXILIARY_NODE_INDEXES=(0,1,3)
+
+
+def service_databases():
+    """Ordered logical database entries hosted by the shared service formation."""
+    return [{"service":service,"database":database,"runtime_role":role,"owner":SERVICE_OWNERS[service],
+             "password_key":role.upper()+"_PASSWORD","connection_limit":SERVICE_CONNECTION_LIMITS[role]}
+            for service,(database,role) in SERVICE_DATABASES.items()]
+
+
+def service_database(storage,service):
+    require(storage.get("formation_suffix")==SERVICE_FORMATION,"shared service database plan required")
+    match=[d for d in storage["databases"] if d["service"]==service]
+    require(len(match)==1,"unknown service database: "+str(service))
+    return match[0]
 
 
 def require(value, message):
@@ -21,14 +50,14 @@ def plan(inventory, mode, image, formation_suffix="storage"):
 
 def formation_layout(inventory, mode, formation_suffix="storage"):
     """Placement for PKI generation before builds; contains no executable image."""
-    require(formation_suffix in ("storage", "ingestion",*SERVICE_DATABASES), "unknown owned storage formation")
+    require(formation_suffix in FORMATIONS, "unknown owned storage formation")
     require(formation_suffix == "storage" or mode == "postgres", "owned service databases require PostgreSQL mode")
     require(mode in ("postgres", "citus"), "mode must be postgres or citus")
     nodes = [n["name"] for n in inventory["nodes"]]
     placement = {0: [0, 1, 2]}
-    if formation_suffix in SERVICE_DATABASES:
-        excluded={"auth-db":0,"registry-db":1,"dashboard-db":2,"notifier-db":3}[formation_suffix]
-        placement={0:[i for i in range(4)if i!=excluded]}
+    if formation_suffix in ("ingestion", SERVICE_FORMATION):
+        require(len(nodes) > max(AUXILIARY_NODE_INDEXES), "ingestion and shared service databases need four nodes")
+        placement = {0: list(AUXILIARY_NODE_INDEXES)}
     if mode == "citus":
         placement.update({1: [1, 2, 3], 2: [0, 2, 3], 3: [0, 1, 3], 4: [0, 1, 2]})
     formation = inventory["cluster_id"] + "-" + formation_suffix
@@ -41,7 +70,7 @@ def formation_layout(inventory, mode, formation_suffix="storage"):
             name = workload + "-0"
             members.append({"name": name, "workload": workload, "node": nodes[i],
                             "host": f"{name}.{formation}-members.{namespace}.svc.cluster.local", "port": 5432})
-        prefix = "INGESTION_GROUP" if formation_suffix == "ingestion" else formation_suffix.upper().replace("-","_")+"_GROUP"if formation_suffix in SERVICE_DATABASES else "STORAGE_GROUP"
+        prefix = {"storage": "STORAGE_GROUP", "ingestion": "INGESTION_GROUP", SERVICE_FORMATION: "SERVICE_DB_GROUP"}[formation_suffix]
         groups.append({"id": group, "system_id": "RECORD_AFTER_BOOTSTRAP", "dsn_env": f"{prefix}_{group}_URL", "members": members})
     per_node = {node: 0 for node in nodes}
     for group in groups:
@@ -49,7 +78,12 @@ def formation_layout(inventory, mode, formation_suffix="storage"):
             per_node[member["node"]] += 512
     for node in nodes[:3]:
         per_node[node] += 128  # etcd
-    return {**({"formation_suffix": formation_suffix} if formation_suffix != "storage" else {}),**({"database":SERVICE_DATABASES[formation_suffix][0],"runtime_role":SERVICE_DATABASES[formation_suffix][1]}if formation_suffix in SERVICE_DATABASES else{}), "version": 1, "formation": formation, "namespace": namespace,
+    shared = {}
+    if formation_suffix == SERVICE_FORMATION:
+        # "postgres" is the administrator-only home database holding the
+        # physical identity; owners connect only to their own database.
+        shared = {"database": "postgres", "databases": service_databases(), "max_connections": SERVICE_MAX_CONNECTIONS}
+    return {**({"formation_suffix": formation_suffix} if formation_suffix != "storage" else {}), **shared, "version": 1, "formation": formation, "namespace": namespace,
             "mode": mode, "groups": groups,
             "nodes": nodes, "pod_cidr": inventory["pod_cidr"], "cluster_id": inventory["cluster_id"],
             "requests_mib_before_routers": per_node, "router_requests_mib": 256,
@@ -131,20 +165,31 @@ def manifests(storage):
                 "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": workload}},
                             {"name": "tls", "secret": {"secretName": workload + "-tls", "defaultMode": 0o440,"items":[{"key":key,"path":key}for key in("ca.crt","tls.crt","tls.key")]}}]}}})
 
+    shared = storage.get("formation_suffix") == SERVICE_FORMATION
     service(formation + "-members", {**owner, "component": "storage-postgres"}, [("postgres", 5432, 5432), ("patroni", 8008, 8008)], True)
     for group in storage["groups"]:
         for member in group["members"]:
             name, workload, node = member["name"], member["workload"], member["node"]
             persistent(workload, node, "1Gi")
             labels = {**owner, "role": "store", "component": "storage-postgres", "member": name, "storage-group": str(group["id"])}
-            if storage.get("formation_suffix")in SERVICE_DATABASES:labels["app.kubernetes.io/name"]=storage["formation_suffix"]
+            if shared:labels["app.kubernetes.io/name"]=SERVICE_FORMATION
+            # Single-database formations keep their exact original environment.
+            app_user = {} if shared else {"APP_USER": storage.get("runtime_role", "aggregator_app")}
             values = {"FORMATION": formation, "STORAGE_MODE": storage["mode"], "GROUP_ID": str(group["id"]),
-                      "MEMBER_SERVICE": formation + "-members", "POSTGRES_DB": storage.get("database","hazards"), "APP_USER":storage.get("runtime_role","aggregator_app"),"POD_CIDR": storage["pod_cidr"],
+                      "MEMBER_SERVICE": formation + "-members", "POSTGRES_DB": storage.get("database","hazards"), **app_user, "POD_CIDR": storage["pod_cidr"],
                       "ETCD_ENDPOINTS": ",".join(h + ":2379" for h in etcd_hosts)}
+            password_keys = ["POSTGRES_PASSWORD", "REPLICATION_PASSWORD", "PATRONI_PASSWORD"]
+            if shared:
+                values["OWNED_DATABASES"] = json.dumps([{k: d[k] for k in ("database", "runtime_role", "password_key", "connection_limit")}
+                                                        for d in storage["databases"]], separators=(",", ":"))
+                values["MAX_CONNECTIONS"] = str(storage["max_connections"])
+                password_keys += [d["password_key"] for d in storage["databases"]]
+            else:
+                password_keys.append("APP_PASSWORD")
             env = [{"name": k, "value": v} for k, v in values.items()]
             env += [{"name": k, "valueFrom": {"fieldRef": {"fieldPath": v}}} for k, v in
                     (("POD_NAME", "metadata.name"), ("POD_NAMESPACE", "metadata.namespace"))]
-            env += [{"name":key,"valueFrom":{"secretKeyRef":{"name":formation+"-credentials","key":key}}}for key in("POSTGRES_PASSWORD","REPLICATION_PASSWORD","PATRONI_PASSWORD","APP_PASSWORD")]
+            env += [{"name":key,"valueFrom":{"secretKeyRef":{"name":formation+"-credentials","key":key}}}for key in password_keys]
             obj("StatefulSet", workload, {"replicas": 1, "serviceName": formation + "-members",
                 "selector": {"matchLabels": {"member": name}}, "template": {"metadata": {"labels": labels}, "spec": {
                     "nodeSelector": {"kubernetes.io/hostname": node}, "automountServiceAccountToken": False,
@@ -169,7 +214,7 @@ def manifests(storage):
         service(f"{formation}-g{group['id']}-primary", {**owner, "component": "storage-router"}, [("postgres", 5432, port)])
     obj("ConfigMap", formation + "-router", data={"haproxy.cfg": "\n".join(proxy) + "\n"})
     router_labels = {**owner, "role": "other", "component": "storage-router"}
-    if storage.get("formation_suffix")in SERVICE_DATABASES:router_labels["app.kubernetes.io/name"]=storage["formation_suffix"]
+    if shared:router_labels["app.kubernetes.io/name"]=SERVICE_FORMATION
     obj("Deployment", formation + "-router", {"replicas": 2, "selector": {"matchLabels": {**owner, "component": "storage-router"}},
         "template": {"metadata": {"labels": router_labels}, "spec": {"automountServiceAccountToken": False,
             "affinity": {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [{

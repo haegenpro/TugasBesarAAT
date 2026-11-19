@@ -1,7 +1,8 @@
 # Private release configuration
 
 `platform-configure.py` generates a new, unused set of cross-service credentials,
-six independent storage PKIs/password sets, application database DSNs and an
+three independent storage PKIs/password sets (the shared service formation has a
+separate login per owner database), application database DSNs and an
 integrated practice configuration. It never contacts or changes a deployment.
 The output must be outside the repository or under ignored `evidence/`; directories
 are private and files use mode 0600. Existing output is refused to prevent silent

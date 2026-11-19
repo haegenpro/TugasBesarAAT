@@ -65,9 +65,9 @@ no benefit to deliberately starting smaller and resizing immediately afterward.
 | OS | Ubuntu Server 24.04 LTS, AMD64 | Same |
 
 The preparation allocation is **not capacity for the full M2 stack**. The
-current full profile requests approximately 25.25 GiB RAM cluster-wide before
-guest OS/K3s overhead. Four 4 GiB VMs cannot schedule it. Four 8 GiB VMs are a
-planning starting point, not a verified fit: placement, CPU, rollout surge and
+current full profile requests approximately 18.9 GiB RAM cluster-wide before
+guest OS/K3s overhead. Four 4 GiB VMs cannot schedule it. Two 8 GiB plus two
+4 GiB VMs pass the offline memory plan but are not a verified fit: placement, CPU, rollout surge and
 node-loss recovery also need checking. Increase RAM/vCPUs with the VM fully
 powered off; reinstalling Ubuntu is unnecessary.
 

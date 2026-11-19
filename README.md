@@ -41,8 +41,9 @@ The [integrated release](deployment/platform/RELEASE.md) includes owned service
 databases and [empty-disk recovery](docs/Platform-Integrated-Node-Replacement.md),
 including [consistent source checkpoints](docs/Platform-Source-Checkpoints.md)
 and a [verified broker disk-rebuild protocol](docs/Platform-Broker-Recovery.md).
-The current full profile requests about 25.25 GiB RAM across the four VMs before
-overhead; measured hardware capacity and physical acceptance remain pending.
+The current full profile requests about 18.9 GiB RAM across the four VMs before
+overhead (the four service databases share one replicated formation); measured
+hardware capacity and physical acceptance remain pending.
 
 A separate [four-node QEMU/KVM k3s bootstrap](deployment/platform/README.md) is available
 via `python3 scripts/platform-cluster.py up`. Its light laptop profile uses

@@ -13,9 +13,24 @@ from platform_lib.inventory import load
 ROOT=Path(__file__).resolve().parent.parent
 
 
+def isolated(storage):
+    """A correct live isolation answer for the shared service formation."""
+    owners=storage["databases"]
+    hba=[{"type":"local","database":["all"],"user":["postgres"],"method":"peer","error":None},
+         {"type":"host","database":["all"],"user":["postgres"],"method":"scram-sha-256","error":None}]
+    hba+=[{"type":"host","database":[d["database"]],"user":[d["runtime_role"]],"method":"scram-sha-256","error":None}for d in owners]
+    hba+=[{"type":"host","database":["replication"],"user":["replicator"],"method":"scram-sha-256","error":None},
+          {"type":"host","database":["all"],"user":["all"],"method":"reject","error":None}]
+    return {"connect":{a["runtime_role"]+"@"+b["database"]:a is b for a in owners for b in owners},
+            "admin_connect":{d["runtime_role"]+"@postgres":False for d in owners},"public_connect":[],
+            "roles":{d["runtime_role"]:{"login":True,"superuser":False,"createdb":False,"createrole":False,"replication":False,"bypassrls":False,"inherit":False,"connection_limit":d["connection_limit"]}for d in owners},
+            "memberships":0,"max_connections":storage["max_connections"],"hba":hba}
+
+
 class API:
     def __init__(self,inventory,formations,owner,fail=None):
         self.cfg=inventory;self.owner=owner;self.fail=fail;self.objects={};self.calls=[];self.members={}
+        self.shared=formations["service-db"];self.services={d["database"]:d["service"]for d in self.shared["databases"]}
         identity=100
         for storage in formations.values():
             for group in storage["groups"]:
@@ -34,8 +49,12 @@ class API:
             elif args[-1]=="-":value={}
             elif "canonical_schema_migrations"in args[-1]:value=expected_schemas()["canonical"]
             elif "ingestion_migrations"in args[-1]:value=expected_schemas()["ingestion"]
+            elif "WITH owners(db,role)"in args[-1]:
+                value=isolated(self.shared)
+                if self.fail=="isolation":value["connect"]["auth_app@notifier"]=True
+            elif "pg_extension"in args[-1]:value=[]
             elif "service_schema_migrations"in args[-1]:
-                formation=self.members[args[3]]["formation"];suffix=next(s for s in expected_schemas()["owners"]if formation.endswith("-"+s));value=expected_schemas()["owners"][suffix]
+                value=expected_schemas()["owners"][self.services[args[args.index("-d")+1]]]
             elif "input_cutovers"in args[-1]:value={"namespace":self.owner["bmkg_namespace"],"state":"ready"}
             else:raise AssertionError(args)
         elif args[0]=="create":
@@ -67,20 +86,26 @@ class MaintenanceChecks(unittest.TestCase):
             root=Path(folder);inventory,v=self.fixture(root);api=API(inventory,v[6],v[4])
             receipt=run(api,root/"release.json",root/"infra",root/"maintenance")
             self.assertTrue(receipt["passed"]);self.assertTrue((root/"maintenance/release-ready.json").is_file())
-            self.assertEqual([s["action"]for s in receipt["steps"]][-3:],["canonical","ingestion","cutover"])
-            self.assertEqual(len(receipt["durability"]),6)
+            self.assertEqual([s["action"]for s in receipt["steps"]],["initialize-auth-db","initialize-registry-db","initialize-dashboard-db","initialize-notifier-db","verify-service-db-isolation","canonical","ingestion","cutover"])
+            self.assertEqual(set(receipt["durability"]),{"storage","ingestion","service-db"})
+            self.assertEqual([m["member"]for m in receipt["service_isolation"]["members"]],[m["name"]for m in v[6]["service-db"]["groups"][0]["members"]])
+            # Each owner schema is initialized in its own database of the shared formation.
+            initialized=[call[call.index("-d")+1]for call in api.calls if call[0]=="exec"and "-f"in call]
+            self.assertEqual(initialized,["auth","registry","dashboard","notifier"])
             verify_receipt(receipt,inventory,v[3],v[4],v[2])
-            for mutation in("image","schema","namespace","identity"):
+            for mutation in("image","schema","namespace","identity","isolation","isolation-member"):
                 bad=copy.deepcopy(receipt);images=copy.deepcopy(v[2]);owner=copy.deepcopy(v[4])
                 if mutation=="image":images["role1"]="registry.invalid/other@sha256:"+"b"*64
                 if mutation=="schema":bad["schemas"]["ingestion"]["0001_ingestion.sql"]="changed"
                 if mutation=="namespace":owner["bmkg_namespace"]="different-history"
                 if mutation=="identity":bad["durability"]["ingestion"]["groups"][0]["system_id"]=bad["durability"]["storage"]["groups"][0]["system_id"]
+                if mutation=="isolation":bad["service_isolation"]["passed"]=False
+                if mutation=="isolation-member":bad["service_isolation"]["members"].pop()
                 with self.assertRaises(ValueError):verify_receipt(bad,inventory,v[3],owner,images)
             self.assertFalse(any(call[0]in("scale","set")for call in api.calls))
 
     def test_live_writers_or_failed_job_cannot_produce_activation_configuration(self):
-        for fault in("live-writer","ingestion-job"):
+        for fault in("live-writer","isolation","ingestion-job"):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory()as folder:
                 root=Path(folder);inventory,v=self.fixture(root);api=API(inventory,v[6],v[4],fault)
                 with self.assertRaises((ValueError,RuntimeError)):run(api,root/"release.json",root/"infra",root/"maintenance")

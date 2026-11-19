@@ -63,7 +63,7 @@ python3 scripts/platform-release.py --phase infrastructure \
 ```
 
 This phase needs only the actual storage image digest from the image map, plus
-supplied or already prepared storage Secrets. It renders all six formations,
+supplied or already prepared storage Secrets. It renders all three formations,
 namespace and network isolation, including ingestion replication/admin flows.
 It does not read the province table, require other application images,
 or start sources, consumers or application servers. It still enforces declared
@@ -75,8 +75,8 @@ false and application prerequisites remain in `activation_pending`.
 
 On the real nodes, explicitly prepare disks using `platform-storage.py
 prepare-disks --inventory ... --plan ...` for each of `canonical-plan.json`,
-`ingestion-plan.json`, `auth-db-plan.json`, `registry-db-plan.json`,
-`dashboard-db-plan.json` and `notifier-db-plan.json`. Then review/apply the
+`ingestion-plan.json` and `service-db-plan.json` (the shared formation hosting
+the auth, registry, dashboard and notifier databases). Then review/apply the
 infrastructure bundle with `platform-deploy.py`. It waits for all storage
 workloads. Use the existing administrator initialization and capture commands in
 [owned databases](../../docs/Platform-Owned-Service-Databases.md) and
@@ -99,12 +99,13 @@ discover whether its schema is ready. No bootstrap/apply step has been run yet.
 
 The optional `secrets` input supplies a private Secret-only List in a first stage,
 before storage. Missing or empty required keys block review even for supplied
-Secrets. The bundle handles all six database formations separately, records their
+Secrets. The bundle handles the three database formations separately, records their
 Secret references and avoids duplicate Aggregator/Namespace resources. Service
 databases are rendered automatically when `owner_databases` is null; an explicit
 artifact path remains available for reviewed alternatives. See
 [owned service databases](../../docs/Platform-Owned-Service-Databases.md) for
-credentials, administrator initialization and their 8.5 GiB memory cost.
+per-owner credentials and isolation, administrator initialization and their
+2.1 GiB memory cost (formerly 8.5 GiB as four formations).
 Missing captured PostgreSQL identities, service schema initialization, migration/
 cutover, or capacity remain visible blockers. Use verified maintenance receipts
 and completed external inputs rather than manually removing initialization gates.

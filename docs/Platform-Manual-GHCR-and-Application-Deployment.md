@@ -239,15 +239,16 @@ tries to provision provider-owned VMs.
 ## 8. Application deployment order after integration
 
 1. Capture actual node IPs, labels, allocatable resources and available guest
-   disk space. The current full bundle requests about 25.25 GiB before guest
+   disk space. The current full bundle requests about 18.9 GiB before guest
    overhead, rollout/failover headroom; four 4 GiB guests cannot schedule it.
 2. Generate one private release configuration with the actual image map and
    topology. Preserve its passwords, PKIs and stable source identities across
    subsequent stages. Complete required source/Audit credentials and bounded
    external egress inputs without committing them.
 3. Render the **infrastructure** release and review its plan. Prepare owned
-   local directories and apply Secrets/isolation plus the six HA database
-   formations: canonical Citus, ingestion, Auth, Registry, Dashboard and Notifier.
+   local directories and apply Secrets/isolation plus the three HA database
+   formations: canonical Citus, ingestion, and the shared service formation
+   holding the Auth, Registry, Dashboard and Notifier databases.
 4. With application writers stopped, initialize owner schemas/Registry, capture
    original database identities, and execute canonical/ingestion migrations and
    BMKG cutover. Preserve the verified maintenance receipt.

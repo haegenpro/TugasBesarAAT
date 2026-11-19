@@ -7,11 +7,13 @@ import re
 import uuid
 
 from bundle_lib import inspect
-from database_admin_lib import initialize,original_primary
+from database_admin_lib import initialize,original_primary,verify_isolation
 from database_lib import schema_sql
 from platform_lib.inventory import fingerprint
 from service_lib import DIGEST
-from storage_lib import SERVICE_DATABASES,durability_config,plan,require,write_json
+from storage_lib import FORMATIONS,SERVICE_DATABASES,SERVICE_FORMATION,durability_config,plan,require,service_database,write_json
+
+STEPS=(*("initialize-"+s for s in SERVICE_DATABASES),"verify-"+SERVICE_FORMATION+"-isolation","canonical","ingestion","cutover")
 
 ROOT=Path(__file__).resolve().parent.parent
 APPLICATIONS={"aggregator","ingestion","coastal-processor","wildfire-processor","auth-service","client-api","consumer-dashboard","consumer-notifier","schema-registry","bmkg-mock","pvmbg-mock","sensor-pantai","broker-init","canonical-migrate","ingestion-migrate","registry-db-init"}
@@ -31,16 +33,15 @@ def expected_schemas():
         if not path.is_file():path=ROOT/"store/migrations"/name
         ingestion[name]=hashlib.sha256(path.read_bytes()).hexdigest()
     owners={}
-    for suffix in SERVICE_DATABASES:
-        sql=schema_sql({"formation_suffix":suffix,"runtime_role":SERVICE_DATABASES[suffix][1]})
-        owners[suffix]=re.search(r"VALUES\('owner-v1','([0-9a-f]{64})'\)",sql)[1]
+    for service in SERVICE_DATABASES:
+        owners[service]=re.search(r"VALUES\('owner-v1','([0-9a-f]{64})'\)",schema_sql(service))[1]
     return {"canonical":canonical,"ingestion":ingestion,"owners":owners}
 
 
 def contract(inventory,aggregator,owner,images):
     for name in("storage","role1","schema-registry"):
         require(isinstance(images.get(name),str)and DIGEST.fullmatch(images[name]),"actual immutable maintenance image required: "+name)
-    files=["aggregator/internal/migrations/migrations.go","aggregator/internal/ingestion/migrate.go","aggregator/internal/store/input_cutover.go","aggregator/cmd/input-cutover/main.go","aggregator/cmd/platform-maintenance/main.go","scripts/database_admin_lib.py","scripts/maintenance_lib.py"]
+    files=["aggregator/internal/migrations/migrations.go","aggregator/internal/ingestion/migrate.go","aggregator/internal/store/input_cutover.go","aggregator/cmd/input-cutover/main.go","aggregator/cmd/platform-maintenance/main.go","scripts/database_admin_lib.py","scripts/database_lib.py","scripts/maintenance_lib.py"]
     return {"version":1,"inventory_sha256":fingerprint(inventory),"images":{k:images[k]for k in("storage","role1","schema-registry")},"source_identity":{k:owner[k]for k in("bmkg_namespace","bmkg_initial_offset","satellite_namespace","satellite_initial_offset")},"canonical_storage_mode":aggregator["storage_mode"],"storage_secret":aggregator["storage_secret"],"schemas":expected_schemas(),"tools":{name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest()for name in files}}
 
 
@@ -51,10 +52,13 @@ def verify_receipt(receipt,inventory,aggregator,owner,images):
     require(receipt.get("schemas")==expected["schemas"],"observed schema checksums do not match current migrations")
     require(receipt.get("cutover")=={"namespace":owner["bmkg_namespace"],"state":"ready"},"BMKG cutover was not verified ready")
     steps=receipt.get("steps",[])
-    require([s.get("action")for s in steps]==[*("initialize-"+s for s in SERVICE_DATABASES),"canonical","ingestion","cutover"]and all(s.get("completed")is True for s in steps),"initialization sequence is incomplete")
+    require([s.get("action")for s in steps]==list(STEPS)and all(s.get("completed")is True for s in steps),"initialization sequence is incomplete")
     require(all(isinstance(s.get("uid"),str)and s["uid"]and s.get("image")==images["role1"]for s in steps[-3:]),"missing original completed migration Job identities")
+    isolation=receipt.get("service_isolation",{})
+    members=[m["name"]for m in plan(inventory,"postgres",images["storage"],SERVICE_FORMATION)["groups"][0]["members"]]
+    require(isolation.get("passed")is True and [m.get("member")for m in isolation.get("members",[])]==members and all(m.get("passed")is True for m in isolation["members"]),"owner database isolation was not verified on every copy")
     captures=receipt.get("durability",{});systems=set()
-    for suffix in("storage","ingestion",*SERVICE_DATABASES):
+    for suffix in FORMATIONS:
         wanted=durability_config(plan(inventory,"citus"if suffix=="storage"else "postgres",images["storage"],suffix))
         actual=captures.get(suffix)
         require(isinstance(actual,dict)and len(actual.get("groups",[]))==len(wanted["groups"]),"missing original formation identity capture")
@@ -83,7 +87,7 @@ def inputs(inventory,config_path,infrastructure):
     report,snapshots=inspect(infrastructure/"bundle.json",inventory)
     require(report["phase"]=="infrastructure","maintenance requires the prepared storage-only bundle")
     formations={}
-    for suffix in("storage","ingestion",*SERVICE_DATABASES):
+    for suffix in FORMATIONS:
         path=infrastructure/("canonical-plan.json"if suffix=="storage"else suffix+"-plan.json")
         value=json.loads(path.read_text());require(value==plan(inventory,"citus"if suffix=="storage"else "postgres",images["storage"],suffix),"infrastructure formation plan differs")
         formations[suffix]=value
@@ -105,9 +109,9 @@ def maintenance_job(inventory,storage,aggregator,owner,image,action,run):
     return {"apiVersion":"batch/v1","kind":"Job","metadata":{"name":name,"namespace":ns,"labels":{"platform.aat/cluster":cluster,"platform.aat/maintenance":run}},"spec":{"backoffLimit":0,"activeDeadlineSeconds":900,"template":{"metadata":{"labels":{"app.kubernetes.io/name":app,"role":"other","platform.aat/cluster":cluster,"platform.aat/maintenance":run}},"spec":pod}}}
 
 
-def sql_json(cluster,storage,query):
+def sql_json(cluster,storage,query,database=None):
     leader,_=original_primary(cluster,storage)
-    result=cluster.kubectl("exec","-n",storage["namespace"],leader["name"],"-c","postgres","--","psql","-U","postgres","-d",storage.get("database","hazards"),"-v","ON_ERROR_STOP=1","-Atc",query)
+    result=cluster.kubectl("exec","-n",storage["namespace"],leader["name"],"-c","postgres","--","psql","-U","postgres","-d",database or storage.get("database","hazards"),"-v","ON_ERROR_STOP=1","-Atc",query)
     return json.loads(result.stdout)
 
 
@@ -125,9 +129,12 @@ def run(cluster,config_path,infrastructure,output):
             for group,result in zip(storage["groups"],captured["groups"]):
                 _,statuses=original_primary(cluster,storage,group);result["system_id"]=statuses[0]["system_id"]
             receipt["durability"][suffix]=captured;write_json(output/(suffix+"-durability.json"),captured);save()
-        for suffix in SERVICE_DATABASES:
-            stopped(cluster);initialize(cluster,formations[suffix],images["schema-registry"]if suffix=="registry-db"else None)
-            receipt["steps"].append({"action":"initialize-"+suffix,"completed":True});save()
+        shared=formations[SERVICE_FORMATION]
+        for service in SERVICE_DATABASES:
+            stopped(cluster);initialize(cluster,shared,service,images["schema-registry"]if service=="registry-db"else None)
+            receipt["steps"].append({"action":"initialize-"+service,"completed":True});save()
+        receipt["service_isolation"]=verify_isolation(cluster,shared)
+        receipt["steps"].append({"action":"verify-"+SERVICE_FORMATION+"-isolation","completed":True});save()
         cm={"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":cluster.cfg["cluster_id"]+"-maintenance-"+run[:8],"namespace":ns,"labels":{"platform.aat/maintenance":run}},"immutable":True,"data":{"durability.json":json.dumps(receipt["durability"]["storage"])}}
         cluster.kubectl("create","-f","-",input=json.dumps(cm).encode())
         for action in("canonical","ingestion","cutover"):
@@ -147,7 +154,7 @@ def run(cluster,config_path,infrastructure,output):
         schemas={}
         for suffix,table in(("storage","canonical_schema_migrations"),("ingestion","ingestion_migrations")):
             schemas["canonical"if suffix=="storage"else "ingestion"]=sql_json(cluster,formations[suffix],"SELECT jsonb_object_agg(version,checksum) FROM "+table)
-        schemas["owners"]={suffix:sql_json(cluster,formations[suffix],"SELECT to_jsonb(checksum) FROM service_schema_migrations WHERE version='owner-v1'")for suffix in SERVICE_DATABASES}
+        schemas["owners"]={service:sql_json(cluster,shared,"SELECT to_jsonb(checksum) FROM service_schema_migrations WHERE version='owner-v1'",service_database(shared,service)["database"])for service in SERVICE_DATABASES}
         # SQL values use literal quoting; namespaces cannot inject a statement.
         namespace=owner["bmkg_namespace"].replace("'","''")
         receipt["cutover"]=sql_json(cluster,formations["storage"],"SELECT jsonb_build_object('namespace',namespace,'state',state) FROM input_cutovers WHERE namespace='"+namespace+"'")

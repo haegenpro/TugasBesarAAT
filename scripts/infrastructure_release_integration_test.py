@@ -24,16 +24,16 @@ class InfrastructureReleaseChecks(unittest.TestCase):
             self.assertTrue(report["ready_for_apply"]);self.assertEqual(report["phase"],"infrastructure")
             self.assertFalse(report["ready_for_activation"])
             self.assertIn("Audit token pending",report["activation_pending"])
-            self.assertEqual(len(report["formations"]),6)
-            self.assertEqual(report["memory_requests_mib"],19200)
+            self.assertEqual(len(report["formations"]),3)
+            self.assertEqual(report["memory_requests_mib"],12672)
             resources=[o for stage in report["stages"]for o in json.loads(Path(stage["manifest"]).read_text())["items"]]
-            self.assertEqual(sum(o["kind"]=="StatefulSet"and o["spec"]["template"]["metadata"]["labels"].get("component")=="storage-postgres"for o in resources),30)
+            self.assertEqual(sum(o["kind"]=="StatefulSet"and o["spec"]["template"]["metadata"]["labels"].get("component")=="storage-postgres"for o in resources),21)
             self.assertFalse(any(o["kind"]=="Job"for o in resources))
             self.assertTrue(all(w["name"].endswith("-router")or w["kind"]=="StatefulSet"for w in report["workloads"]))
             self.assertEqual(sum(o["kind"]=="Namespace"for o in resources),1)
             policies=[o for o in resources if o["kind"]=="NetworkPolicy"]
             self.assertTrue(any(o["metadata"]["name"].endswith("bootstrap-ingestion-etcd")for o in policies))
-            self.assertTrue((root/"prepared/canonical-plan.json").is_file());self.assertTrue((root/"prepared/notifier-db-plan.json").is_file())
+            self.assertTrue((root/"prepared/canonical-plan.json").is_file());self.assertTrue((root/"prepared/service-db-plan.json").is_file())
             config["infrastructure_unresolved"]=["operator disk prerequisite pending"]
             (root/"release.json").write_text(json.dumps(config))
             self.assertFalse(assemble(inventory,root/"release.json",root/"blocked")["ready_for_apply"])

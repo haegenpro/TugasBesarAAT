@@ -12,7 +12,7 @@ except ImportError:
 
 from maintenance_lib import hash_json
 from replacement_lib import write_report
-from storage_lib import SERVICE_DATABASES,require,write_json
+from storage_lib import SERVICE_FORMATION,require,write_json
 
 ROOT=Path(__file__).resolve().parent.parent
 PHASES=("images","inputs","cluster","bootstrap","maintenance","activate","access","validate")
@@ -39,7 +39,7 @@ def plan(path,phase="all"):
         "access":[command("platform-access.py","render",*inv,"--output",root/"access"),command("platform-access.py","start",*inv,"--output",root/"access")],
         "validate":[command("platform-acceptance.py","run","--config",root/"acceptance-inputs.json","--output",root/"acceptance")]
     }
-    for suffix in("canonical","ingestion",*SERVICE_DATABASES):commands["bootstrap"].append(command("platform-storage.py","prepare-disks",*inv,"--plan",bootstrap/(suffix+"-plan.json")))
+    for suffix in("canonical","ingestion",SERVICE_FORMATION):commands["bootstrap"].append(command("platform-storage.py","prepare-disks",*inv,"--plan",bootstrap/(suffix+"-plan.json")))
     commands["bootstrap"].append(command("platform-deploy.py","apply",*inv,"--bundle",bootstrap/"bundle.json"))
     access=config.get("access",{})
     require(isinstance(access,dict)and set(access)<={"client_port","audit_port","client_node_port","audit_node_port"},"unknown validation access input")

@@ -1,8 +1,36 @@
 """Patroni configuration for the rendered platform formation (not a test)."""
+import json
 import os
 from pathlib import Path
+import re
 
 import yaml
+
+NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
+
+
+def access_rules(pod_cidr):
+    """pg_hba rules. A shared formation admits each owner to its own database only."""
+    owned = os.environ.get("OWNED_DATABASES")
+    if not owned:
+        return [
+            "local all postgres peer", "local all all scram-sha-256",
+            "host all all 127.0.0.1/32 scram-sha-256",
+            f"host all all {pod_cidr} scram-sha-256",
+            f"host replication replicator {pod_cidr} scram-sha-256",
+        ]
+    pairs = [(e["database"], e["runtime_role"]) for e in json.loads(owned)]
+    if not pairs or not all(NAME.fullmatch(v) for pair in pairs for v in pair):
+        raise RuntimeError("invalid owned database declaration")
+    rules = ["local all postgres peer", "host all postgres 127.0.0.1/32 scram-sha-256",
+             f"host all postgres {pod_cidr} scram-sha-256"]
+    for database, role in pairs:
+        rules += [f"local {database} {role} scram-sha-256",
+                  f"host {database} {role} 127.0.0.1/32 scram-sha-256",
+                  f"host {database} {role} {pod_cidr} scram-sha-256"]
+    # Anything else, including an owner naming another owner's database, is
+    # refused before password authentication.
+    return rules + [f"host replication replicator {pod_cidr} scram-sha-256", "local all all reject", "host all all all reject"]
 
 
 def main():
@@ -10,7 +38,7 @@ def main():
     name = os.environ["POD_NAME"]
     host = f"{name}.{os.environ['MEMBER_SERVICE']}.{os.environ['POD_NAMESPACE']}.svc.cluster.local"
     parameters = {
-        "shared_buffers": "32MB", "max_connections": 64,
+        "shared_buffers": "32MB", "max_connections": int(os.environ.get("MAX_CONNECTIONS", "64")),
         "work_mem": "1MB", "maintenance_work_mem": "16MB",
         "max_prepared_transactions": 128, "max_wal_senders": 8,
         "max_replication_slots": 8, "wal_level": "logical",
@@ -48,12 +76,7 @@ def main():
                 "replication": {"username": "replicator", "password": os.environ["REPLICATION_PASSWORD"]},
                 "rewind": {"username": "postgres", "password": os.environ["POSTGRES_PASSWORD"]},
             },
-            "pg_hba": [
-                "local all postgres peer", "local all all scram-sha-256",
-                "host all all 127.0.0.1/32 scram-sha-256",
-                f"host all all {os.environ['POD_CIDR']} scram-sha-256",
-                f"host replication replicator {os.environ['POD_CIDR']} scram-sha-256",
-            ],
+            "pg_hba": access_rules(os.environ["POD_CIDR"]),
         },
     }
     if os.environ["STORAGE_MODE"] == "citus":

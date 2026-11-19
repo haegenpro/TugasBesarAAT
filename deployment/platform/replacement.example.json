@@ -11,20 +11,8 @@
       "config": "ingestion-durability.json"
     },
     {
-      "plan": "auth-db-plan.json",
-      "config": "auth-db-durability.json"
-    },
-    {
-      "plan": "registry-db-plan.json",
-      "config": "registry-db-durability.json"
-    },
-    {
-      "plan": "dashboard-db-plan.json",
-      "config": "dashboard-db-durability.json"
-    },
-    {
-      "plan": "notifier-db-plan.json",
-      "config": "notifier-db-durability.json"
+      "plan": "service-db-plan.json",
+      "config": "service-db-durability.json"
     }
   ],
   "volume_requirements": [

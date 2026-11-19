@@ -1,6 +1,6 @@
 """Default-deny application isolation with explicit service data ownership."""
 import ipaddress
-from storage_lib import require
+from storage_lib import SERVICE_DATABASES,SERVICE_FORMATION,SERVICE_OWNERS,require
 
 
 def render(inventory,extra_flows=()):
@@ -31,7 +31,7 @@ def render(inventory,extra_flows=()):
         egress=[{"to":[peer(postgres)],"ports":ports([5432,8008])}])
     policy("canonical-etcd",etcd,
         ingress=[{"from":[peer(postgres),peer(etcd)],"ports":ports([2379])},
-                 incoming(["registry-db","auth-db","dashboard-db","notifier-db"],[2379]),
+                 incoming([SERVICE_FORMATION],[2379]),
                  {"from":[peer(etcd)],"ports":ports([2380])},incoming(["prometheus"],[2381])],
         egress=[{"to":[peer(etcd)],"ports":ports([2379,2380])}])
     canonical_clients=["client-api","wildfire-processor","ingestion","coastal-processor"]
@@ -46,17 +46,19 @@ def render(inventory,extra_flows=()):
     exporters=["nats-exporter","nats-exporter-a","nats-exporter-b","nats-exporter-c"]
     policy("broker",app("broker"),ingress=[incoming(broker_clients,[4222]),incoming(["broker"],[6222]),incoming(["prometheus","alloy"]+exporters,[8222])],egress=[outgoing(["broker"],[6222])])
     policy("broker-init",app("broker-init"),egress=[outgoing(["broker"],[4222]),outgoing(["tempo"],[4318])])
-    policy("registry",app("schema-registry"),ingress=[incoming(broker_clients+["bmkg-mock","pvmbg-mock"],[8080]),incoming(["prometheus","alloy"],[9000])],egress=[outgoing(["registry-db"],[5432]),outgoing(["tempo"],[4318])])
-    owners={"registry-db":"schema-registry","auth-db":"auth-service","dashboard-db":"consumer-dashboard","notifier-db":"consumer-notifier"}
-    for database,owner in owners.items():
-        policy(database,app(database),ingress=[incoming([owner,database+"-init"],[5432]),incoming([database],[5432,8008]),incoming(["prometheus"],[8008,9187])],
-            egress=[outgoing([database],[5432,8008]),{"to":[peer(etcd)],"ports":ports([2379])},outgoing([database+"-etcd"],[2379])])
-        policy(database+"-init",app(database+"-init"),egress=[outgoing([database],[5432])])
-        policy(database+"-etcd",app(database+"-etcd"),ingress=[incoming([database,database+"-etcd"],[2379,2380]),incoming(["prometheus"],[2381])],egress=[outgoing([database+"-etcd"],[2379,2380])])
-    policy("auth",app("auth-service"),ingress=[incoming(["client-api","prometheus","alloy"],[8083])],egress=[outgoing(["auth-db"],[5432]),outgoing(["tempo"],[4318])])
+    policy("registry",app("schema-registry"),ingress=[incoming(broker_clients+["bmkg-mock","pvmbg-mock"],[8080]),incoming(["prometheus","alloy"],[9000])],egress=[outgoing([SERVICE_FORMATION],[5432]),outgoing(["tempo"],[4318])])
+    # Only the four owners (and their stopped-writer initializers) reach the
+    # shared formation; pg_hba then admits each role to its own database only.
+    shared=SERVICE_FORMATION
+    policy(shared,app(shared),ingress=[incoming([*(SERVICE_OWNERS[s]for s in SERVICE_DATABASES),*(s+"-init"for s in SERVICE_DATABASES)],[5432]),incoming([shared],[5432,8008]),incoming(["prometheus"],[8008,9187])],
+        egress=[outgoing([shared],[5432,8008]),{"to":[peer(etcd)],"ports":ports([2379])},outgoing([shared+"-etcd"],[2379])])
+    for database in SERVICE_DATABASES:
+        policy(database+"-init",app(database+"-init"),egress=[outgoing([shared],[5432])])
+    policy(shared+"-etcd",app(shared+"-etcd"),ingress=[incoming([shared,shared+"-etcd"],[2379,2380]),incoming(["prometheus"],[2381])],egress=[outgoing([shared+"-etcd"],[2379,2380])])
+    policy("auth",app("auth-service"),ingress=[incoming(["client-api","prometheus","alloy"],[8083])],egress=[outgoing([shared],[5432]),outgoing(["tempo"],[4318])])
     policy("client-api",app("client-api"),ingress=[incoming(["client-tui","load-generator","ingress","prometheus","alloy"],[8080])],egress=[outgoing(["auth-service"],[8083]),outgoing(["aggregator"],[8080]),outgoing(["tempo"],[4318])])
-    for consumer,database,port in (("consumer-dashboard","dashboard-db",8091),("consumer-notifier","notifier-db",8092)):
-        policy(consumer,app(consumer),ingress=[incoming(["prometheus","alloy","load-generator"],[port])],egress=[outgoing([database],[5432]),outgoing(["broker"],[4222]),outgoing(["schema-registry"],[8080]),outgoing(["tempo"],[4318])])
+    for consumer,port in (("consumer-dashboard",8091),("consumer-notifier",8092)):
+        policy(consumer,app(consumer),ingress=[incoming(["prometheus","alloy","load-generator"],[port])],egress=[outgoing([shared],[5432]),outgoing(["broker"],[4222]),outgoing(["schema-registry"],[8080]),outgoing(["tempo"],[4318])])
     policy("sensor",app("sensor-pantai"),ingress=[incoming(["coastal-processor","ingestion","prometheus","alloy"],[8080])])
     for name in("wildfire-processor","ingestion","coastal-processor"):
         policy(name,app(name),ingress=[incoming(["prometheus","alloy"],[8080])],egress=[outgoing(["aggregator","schema-registry","sensor-pantai"],[8080]),outgoing(["broker"],[4222]),outgoing(["tempo"],[4318])])

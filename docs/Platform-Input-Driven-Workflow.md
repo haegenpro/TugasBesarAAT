@@ -67,13 +67,14 @@ python3 scripts/platform-workflow.py run --config /private/workflow.json --phase
 `run --phase all` performs that sequence when all inputs are ready. Use individual
 phases for the first real deployment. `cluster` provisions/starts the owned VMs,
 bootstraps K3s and installs the unchanged Tester Agent. `bootstrap` prepares all
-six owned database formations, local paths, Secrets and isolation without starting
+three owned database formations, local paths, Secrets and isolation without starting
 application writers. `activate` prepares application/monitoring volumes and
 applies the reviewed full bundle after maintenance evidence is verified.
 
 `maintenance` refuses active application controllers/pods. It captures original
-identities for all six formations, bootstraps the pinned Registry, initializes
-restricted owner schemas, runs canonical and ingestion migrations and performs
+identities for all three formations, bootstraps the pinned Registry, initializes
+restricted owner schemas, verifies owner database isolation on every copy, runs
+canonical and ingestion migrations and performs
 the restartable BMKG cutover. It then reads actual migration journals and cutover
 state, rechecks original identities and emits `release-ready.json`. The full
 renderer resolves initialization blockers only from a successful receipt matching

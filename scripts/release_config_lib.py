@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 from monitoring_lib import IMAGES
 from service_lib import DIGEST
-from storage_lib import SERVICE_DATABASES,formation_layout,require,write_json
+from storage_lib import FORMATIONS,SERVICE_DATABASES,SERVICE_FORMATION,formation_layout,require,write_json
 
 ROOT=Path(__file__).resolve().parent.parent
 DEFAULT_PROVINCE_REFERENCE=ROOT/"deployment/role1/provinces.json"
@@ -75,12 +75,16 @@ def prepare(inventory,output,*,satellite_token_file=None,audit_token_file=None,p
 def _write(inventory,output,catalog,image_names,images,flows,tokens,provinces):
     cluster,ns=inventory["cluster_id"],inventory["namespace"]
     pending=[];items=[];database_env={}
-    for suffix in ("storage","ingestion",*SERVICE_DATABASES):
+    def env_file(path):return dict(line.split("=",1)for line in path.read_text().splitlines()if line)
+    for suffix in FORMATIONS:
         layout=formation_layout(inventory,"citus"if suffix=="storage"else "postgres",suffix)
         folder=output/"storage"/suffix
         storage_credentials(layout,folder)
         items.extend(json.loads((folder/"secrets.json").read_text())["items"])
-        database_env[suffix]=dict(line.split("=",1)for line in(folder/"application.env").read_text().splitlines())
+        if suffix==SERVICE_FORMATION:
+            # Separate per-owner logins in one formation; never merge them.
+            for service in SERVICE_DATABASES:database_env[service]=env_file(folder/(service+".env"))
+        else:database_env[suffix]=env_file(folder/"application.env")
     keys="AGGREGATOR_ADMIN_TOKEN BMKG_API_KEY PVMBG_TOKEN PVMBG_ADMIN_TOKEN CANONICAL_SERVICE_TOKEN PROCESSOR_SERVICE_TOKEN HISTORY_SERVICE_TOKEN INGESTION_SERVICE_TOKEN FIELD_REPORT_SERVICE_TOKEN COASTAL_SLO_TOKEN ANALYTICS_SERVICE_TOKEN AUDIT_CURSOR_KEY INGESTION_CURSOR_KEY AUTH_INTERNAL_KEY AUTH_PRIORITY_KEY FIELD_READ_TOKEN PANTAI_AUTH_TOKEN NATS_APP_PASSWORD NATS_SYSTEM_PASSWORD".split()
     values={key:secrets.token_hex(32)for key in keys};values.update(tokens)
     values.update(NATS_APP_USER="aat_app",NATS_SYSTEM_USER="aat_recovery")

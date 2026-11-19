@@ -15,6 +15,17 @@ class IsolationChecks(unittest.TestCase):
         self.assertIn("aggregator",allowed);self.assertNotIn("consumer-dashboard",allowed);self.assertNotIn("client-api",allowed)
         self.assertTrue(all(p["metadata"]["namespace"]==self.inventory["namespace"] for p in items))
         self.assertNotIn("tester-agent",json.dumps(items))
+    def test_only_the_four_owners_reach_the_shared_service_databases(self):
+        items=render(self.inventory)["items"]
+        shared=next(p for p in items if p["metadata"]["name"]==self.inventory["cluster_id"]+"-service-db")["spec"]
+        sources={peer["podSelector"]["matchLabels"]["app.kubernetes.io/name"]for rule in shared["ingress"]if 5432 in[p["port"]for p in rule["ports"]]for peer in rule["from"]}
+        owners={"auth-service","schema-registry","consumer-dashboard","consumer-notifier"}
+        self.assertEqual(sources,owners|{"auth-db-init","registry-db-init","dashboard-db-init","notifier-db-init","service-db"})
+        for name in("aggregator","client-api","ingestion","wildfire-processor","coastal-processor"):
+            self.assertNotIn(name,sources)
+        reaching={p["metadata"]["name"].removeprefix(self.inventory["cluster_id"]+"-")for p in items for rule in p["spec"].get("egress",[])for peer in rule.get("to",[])
+                  if peer.get("podSelector",{}).get("matchLabels",{}).get("app.kubernetes.io/name")=="service-db"and 5432 in[x["port"]for x in rule["ports"]]}
+        self.assertEqual(reaching,{"auth","registry","consumer-dashboard","consumer-notifier","service-db","auth-db-init","registry-db-init","dashboard-db-init","notifier-db-init"})
     def test_unbounded_external_egress_rejected(self):
         with self.assertRaises(ValueError):render(self.inventory,[{"app":"ingestion","cidr":"0.0.0.0/0","ports":[443]}])
 if __name__=="__main__":unittest.main()
