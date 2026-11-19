@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: aat-manual-netcheck
+  namespace: sistem-informasi-kebencanaan-bnpb
+  labels: &labels
+    app: aat-manual-netcheck
+    role: other
+    platform.aat/cluster: aat-fourhost
+spec:
+  selector:
+    matchLabels:
+      app: aat-manual-netcheck
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        platform.aat/cluster: aat-fourhost
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: probe
+          image: docker.io/library/busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+          command: [sh, -ec]
+          args:
+            - |
+              printf '%s\n' "$NODE_NAME" > /www/index.html
+              exec httpd -f -p 8080 -h /www
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          readinessProbe:
+            httpGet: {path: /, port: 8080}
+            periodSeconds: 2
+          volumeMounts:
+            - {name: www, mountPath: /www}
+      volumes:
+        - name: www
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aat-manual-netcheck
+  namespace: sistem-informasi-kebencanaan-bnpb
+  labels:
+    app: aat-manual-netcheck
+    platform.aat/cluster: aat-fourhost
+spec:
+  selector:
+    app: aat-manual-netcheck
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}

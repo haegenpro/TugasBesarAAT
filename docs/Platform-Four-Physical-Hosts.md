@@ -1,9 +1,29 @@
 # Four physical hosts, one VM each
 
-The deployment target is four separate physical machines. Each runs exactly one
-Linux VM. A/B/C are k3s servers and workers; D is a k3s agent/worker. The existing
-three-copy canonical placement remains unchanged. Windows hosts use VirtualBox;
-Linux hosts use QEMU/KVM through libvirt. The controller runs on a Linux host.
+The deployment target is four separate physical machines on the same Wi-Fi
+network. Each runs exactly one Ubuntu Server VM. A/B/C are K3s servers and
+workers; D is a K3s agent/worker. The existing three-copy canonical placement
+remains unchanged. The VPS is outside the initial cluster.
+
+## Current manual setup
+
+Use the [VirtualBox/Wi-Fi setup guide](Platform-VirtualBox-WiFi-Setup.md) on both
+Linux Mint and Windows. It covers resource planning, VirtualBox 7.2, Ubuntu ISO
+installation, one virtual disk per VM, stable guest addresses and peer connectivity.
+SSH is convenient for manual administration, not a K3s requirement. Wi-Fi
+bridging must be verified on the actual adapters/access point.
+
+These manually created guests are not managed by the current provider. Its
+inventory, ownership markers, cloud-init, SSH and lifecycle/recovery assumptions
+must be adapted before the automated release commands can be used with them.
+No real four-host Wi-Fi deployment or application acceptance is claimed yet.
+
+## Existing automated provider: wired Ethernet
+
+The implementation described below is a separate supported path: Windows hosts
+use VirtualBox 7.0.x; Linux hosts use QEMU/KVM through libvirt. The controller
+runs on a Linux/libvirt host. Both providers require wired Ethernet. These are
+provider restrictions, not requirements imposed by K3s.
 
 `deployment/platform/inventory.fourhost.example.json` is a review template with
 two Windows and two Linux hosts. The actual mix is configurable; it is not a

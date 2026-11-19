@@ -1,5 +1,12 @@
 # Integrated release preparation
 
+Current host onboarding follows the
+[manual VirtualBox/Wi-Fi guide](../../docs/Platform-VirtualBox-WiFi-Setup.md),
+with one Ubuntu VM on each of four physical machines and no VPS cluster node.
+The release tools below retain their wired provider/SSH/ownership assumptions;
+manual guest preparation does not make them ready for live apply. Provider or
+manual deployment integration remains necessary before executing these steps.
+
 The target is four physical hosts, each with one VM. Actual addresses, provider,
 RAM and disk capacity remain operator inputs. Do not use the former single-host
 7 GiB bootstrap allocation as a full release capacity claim.

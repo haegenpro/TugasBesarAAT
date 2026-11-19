@@ -1,5 +1,12 @@
 # Four-node platform bootstrap
 
+For the current four-machine **Wi-Fi** setup, start with the
+[manual VirtualBox/Ubuntu guide](../../docs/Platform-VirtualBox-WiFi-Setup.md).
+It uses VirtualBox on Mint and Windows, with the VPS outside the cluster.
+The commands below describe the existing automated providers, not that manual
+setup: v1 is local libvirt/NAT; v2 requires wired Ethernet, Linux/libvirt and
+Windows/VirtualBox 7.0.x. They do not adopt manually installed VirtualBox guests.
+
 This workflow provisions four independent QEMU/KVM guests and a k3s cluster:
 three control-plane/server nodes that also run workloads, plus one agent node.
 It installs the assignment's unchanged pinned Tester Agent. It does not yet

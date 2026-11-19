@@ -1,5 +1,14 @@
 # Input-driven deployment and validation
 
+For the current four physical machines on Wi-Fi, first use the
+[manual VirtualBox/Ubuntu setup guide](Platform-VirtualBox-WiFi-Setup.md).
+The automated workflow below uses the existing **wired Ethernet** host providers
+(Linux/libvirt and Windows/VirtualBox 7.0.x). Do not run its `cluster` or `all`
+phase against the manual VirtualBox 7.2 guests. Later phases also use inventory,
+provider, ownership and SSH checks, so they require integration work rather than
+simply skipping VM creation. This workflow remains the reference for release
+ordering; it is not yet an executable Wi-Fi/VirtualBox runbook.
+
 The remaining image, maintenance and source/game-day automation is now written.
 The four-machine allocation remains an assumption: no hardware questionnaire is
 needed to prepare or review this workflow. Inventory values describe requested

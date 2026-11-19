@@ -25,7 +25,18 @@ acceptance is tracked separately.
 Start the next integration phase with the
 [platform integration handoff](docs/Platform-Integration-Handoff.md). It links
 each subsection, owner inputs, capacity limits and the prepared deployment
-workflow. The target is now [four physical hosts with one VM each](docs/Platform-Four-Physical-Hosts.md).
+workflow. The target is [four physical hosts with one VM each](docs/Platform-Four-Physical-Hosts.md).
+The current setup uses the same Wi-Fi LAN and manually created Ubuntu Server
+VMs in VirtualBox on Linux Mint and Windows; the VPS is outside the initial
+cluster. Start with the [VirtualBox and Ubuntu setup guide](docs/Platform-VirtualBox-WiFi-Setup.md)
+for downloads, VM sizing, installer choices, a single disk per VM and network checks.
+Then follow the [manual K3s bootstrap](docs/Platform-Manual-K3s-Setup.md) to join
+the four guests into one cluster.
+For the application phase, use the [GHCR preparation and deployment sequence](docs/Platform-Manual-GHCR-and-Application-Deployment.md).
+It separates executable image/pull setup from the remaining manual-provider
+integration required before database/application apply.
+This manual path still needs provider/deployment integration before the existing
+automated release workflow can manage it.
 The [integrated release](deployment/platform/RELEASE.md) includes owned service
 databases and [empty-disk recovery](docs/Platform-Integrated-Node-Replacement.md),
 including [consistent source checkpoints](docs/Platform-Source-Checkpoints.md)
@@ -33,11 +44,14 @@ and a [verified broker disk-rebuild protocol](docs/Platform-Broker-Recovery.md).
 The current full profile requests about 25.25 GiB RAM across the four VMs before
 overhead; measured hardware capacity and physical acceptance remain pending.
 
-A [four-node QEMU/KVM k3s bootstrap](deployment/platform/README.md) is available
+A separate [four-node QEMU/KVM k3s bootstrap](deployment/platform/README.md) is available
 via `python3 scripts/platform-cluster.py up`. Its light laptop profile uses
 three 2 GiB servers and one 1 GiB agent, with a memory/headroom preflight. This
 provisions Kubernetes and the supplied Tester Agent; it does not deploy the full
-Citus/application stack. See the [bootstrap validation](docs/Platform-Bootstrap-Validation.md).
+Citus/application stack. Its multi-host provider requires wired Ethernet and
+Linux/libvirt plus Windows/VirtualBox 7.0.x; it does not adopt the manual
+VirtualBox/Wi-Fi VMs. See the [bootstrap validation](docs/Platform-Bootstrap-Validation.md)
+for the earlier, separate laptop experiment.
 
 ## Services
 

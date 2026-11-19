@@ -13,13 +13,19 @@ private input files and select its stages later. Declared machine allocation
 remains an assumption; runtime capacity checks still apply. Real-node execution
 can reveal integration issues and is not replaced by these local checks.
 
+Current onboarding uses [manual VirtualBox guests on Wi-Fi](Platform-VirtualBox-WiFi-Setup.md)
+on four physical Mint/Windows machines; the VPS stays outside the cluster.
+The existing wired Linux/libvirt and Windows/VirtualBox 7.0.x providers do not
+manage this manual setup. Provider/deployment integration is a remaining task,
+in addition to the real-node validation listed below.
+
 ## Implemented integration
 
 | Area | Result | Remaining input or execution |
 | --- | --- | --- |
 | Release assembly | [Release preparation](../deployment/platform/RELEASE.md): image publishing/digest capture, bootstrap/activation bundles and verified maintenance receipts | Supply registry/input files; execute bootstrap and maintenance on real nodes |
 | Private configuration | [Configuration generator](Platform-Private-Configuration.md): consistent service keys, six storage PKIs/passwords, restricted DSNs, integrated feature settings, client credentials and bundled 38-province reference | Instructor Audit token remains pending; confirm namespaces/offsets and bounded satellite egress |
-| Four physical hosts | [Four-host setup](Platform-Four-Physical-Hosts.md): one VM per physical host, Linux/libvirt or Windows/VirtualBox | Actual OS mapping, measured resources, identities, LAN addresses and SSH prerequisites |
+| Four physical hosts | [Four-host setup](Platform-Four-Physical-Hosts.md): manual VirtualBox/Wi-Fi onboarding; existing wired Linux/libvirt and Windows/VirtualBox provider retained separately | Actual addresses/capacity, peer connectivity, provider/deployment integration, then measured physical validation |
 | Wildfire batches | [Multi-entity integration](Platform-Multi-Entity-Integration.md): live Citus capability checks retain fencing, transaction recovery and WAL confirmation | Replicated replay and failure validation |
 | Service databases | [Owned databases](Platform-Owned-Service-Databases.md): four HA formations, restricted roles and explicit schema/Registry initialization | Live bootstrap, identity capture and failover checks |
 | Empty-disk recovery | [Integrated replacement](Platform-Integrated-Node-Replacement.md): all PG formations, retained broker membership, UID-guarded holds, atomic source restore and durable phase resume | Actual source checkpoints, physical disk-loss/interrupted-phase runs and accepted-data reconciliation |
