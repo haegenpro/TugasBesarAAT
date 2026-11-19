@@ -29,6 +29,11 @@ def main():
     try:
         cfg = load(args.inventory)
         cluster = Cluster(cfg)
+        if cfg.get("version") == 3:
+            if args.command not in ("doctor", "status", "verify"):
+                raise ValueError("existing-cluster inventory supports doctor/status/verify only; manage VM lifecycle manually")
+            print(json.dumps(cluster.verify(), indent=2))
+            return 0
         if args.command == "render":
             if not args.output or not args.public_key_file:
                 parser.error("render requires --output and --public-key-file")

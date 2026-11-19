@@ -42,4 +42,15 @@ class ObservabilityIntegrationChecks(unittest.TestCase):
             names.add(template["metadata"]["labels"]["app.kubernetes.io/name"])
         self.assertEqual(names,{"aggregator","ingestion","coastal-processor"})
 
+    def test_trace_buffers_fit_the_existing_small_container_budget(self):
+        resources,_=render(self.inventory,plan(self.inventory,"citus",self.image),{name:self.image for name in IMAGES})
+        obj=next(o for o in resources['items']if o['kind']=='StatefulSet'and o['metadata']['name']=='tempo-a')
+        container=obj['spec']['template']['spec']['containers'][0]
+        self.assertEqual(container['resources']['limits']['memory'],'256Mi')
+        self.assertIn({'name':'GOMEMLIMIT','value':'128MiB'},container['env'])
+        config=next(o for o in resources['items']if o['kind']=='ConfigMap'and o['metadata']['name']=='tempo-config')
+        trace=json.loads(config['data']['config.json'])
+        self.assertEqual(trace['ingester']['concurrent_flushes'],1)
+        self.assertLessEqual(trace['storage']['trace']['block']['parquet_row_group_size_bytes'],4*2**20)
+
 if __name__=="__main__":unittest.main()

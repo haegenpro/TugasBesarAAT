@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import time
 import uuid
 
 from bundle_lib import inspect
@@ -17,6 +18,26 @@ STEPS=(*("initialize-"+s for s in SERVICE_DATABASES),"verify-"+SERVICE_FORMATION
 
 ROOT=Path(__file__).resolve().parent.parent
 APPLICATIONS={"aggregator","ingestion","coastal-processor","wildfire-processor","auth-service","client-api","consumer-dashboard","consumer-notifier","schema-registry","bmkg-mock","pvmbg-mock","sensor-pantai","broker-init","canonical-migrate","ingestion-migrate","registry-db-init"}
+
+DATABASE_READY=r'''import os,time
+import psycopg2
+deadline=time.monotonic()+90
+while True:
+    connection=None
+    try:
+        connection=psycopg2.connect(host=os.environ['PGHOST'],dbname=os.environ['PGDATABASE'],user='postgres',password=os.environ['PGPASSWORD'],sslmode='disable',connect_timeout=3,application_name='platform-maintenance-readiness')
+        with connection.cursor()as cursor:
+            cursor.execute('SELECT NOT pg_is_in_recovery()')
+            if cursor.fetchone()!=(True,):raise psycopg2.OperationalError('primary required')
+        print('PostgreSQL primary connection verified',flush=True)
+        break
+    except psycopg2.Error:
+        if time.monotonic()>=deadline:raise SystemExit('PostgreSQL primary did not become reachable within 90 seconds')from None
+        print('Waiting for PostgreSQL primary connectivity',flush=True)
+        time.sleep(2)
+    finally:
+        if connection is not None:connection.close()
+'''
 
 
 def hash_json(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
@@ -100,6 +121,10 @@ def maintenance_job(inventory,storage,aggregator,owner,image,action,run):
     env=[{"name":"PGHOST","value":storage["formation"]+"-g0-primary."+ns+".svc.cluster.local"},{"name":"PGDATABASE","value":storage.get("database","hazards")},{"name":"PGPASSWORD","valueFrom":{"secretKeyRef":{"name":storage["formation"]+"-credentials","key":"POSTGRES_PASSWORD"}}},{"name":"DB_MAX_OPEN_CONNS","value":"4"}]
     container={"name":"maintenance","image":image,"command":["/usr/local/bin/platform-maintenance","--action",action],"env":env,"resources":{"requests":{"memory":"128Mi","cpu":"100m"},"limits":{"memory":"256Mi","cpu":"1"}}}
     pod={"restartPolicy":"Never","automountServiceAccountToken":False,"containers":[container],"securityContext":{"runAsNonRoot":True,"runAsUser":10001,"runAsGroup":10001},"volumes":[]}
+    # K3s can initially reject traffic while the pod's NetworkPolicy rules are
+    # installed. Verify an authenticated primary connection before one-shot DDL;
+    # retry only this read-only check, never replay the migration blindly.
+    pod["initContainers"]=[{"name":"database-ready","image":storage["image"],"command":["/opt/patroni/bin/python","-c",DATABASE_READY],"env":[dict(v)for v in env],"resources":{"requests":{"memory":"128Mi","cpu":"100m"},"limits":{"memory":"256Mi","cpu":"1"}}}]
     if action=="cutover":
         container["command"] += ["--namespace",owner["bmkg_namespace"]]
         env.append({"name":"CANONICAL_DURABILITY_CONFIG","value":"/etc/aat/durability.json"})
@@ -113,6 +138,19 @@ def sql_json(cluster,storage,query,database=None):
     leader,_=original_primary(cluster,storage)
     result=cluster.kubectl("exec","-n",storage["namespace"],leader["name"],"-c","postgres","--","psql","-U","postgres","-d",database or storage.get("database","hazards"),"-v","ON_ERROR_STOP=1","-Atc",query)
     return json.loads(result.stdout)
+
+
+def wait_job(cluster,namespace,name,uid,timeout=910):
+    deadline=time.monotonic()+timeout
+    while True:
+        job=json.loads(cluster.kubectl("get","job",name,"-n",namespace,"-o","json",timeout=20).stdout)
+        require(job["metadata"]["uid"]==uid,"maintenance Job identity changed")
+        conditions=job.get("status",{}).get("conditions",[])
+        failed=next((c for c in conditions if c["type"]=="Failed"and c["status"]=="True"),None)
+        require(failed is None,"maintenance Job failed: "+name+" "+str((failed or {}).get("reason","")))
+        if any(c["type"]=="Complete"and c["status"]=="True"for c in conditions):return
+        require(time.monotonic()<deadline,"maintenance Job completion timed out: "+name)
+        time.sleep(3)
 
 
 def run(cluster,config_path,infrastructure,output):
@@ -131,7 +169,7 @@ def run(cluster,config_path,infrastructure,output):
             receipt["durability"][suffix]=captured;write_json(output/(suffix+"-durability.json"),captured);save()
         shared=formations[SERVICE_FORMATION]
         for service in SERVICE_DATABASES:
-            stopped(cluster);initialize(cluster,shared,service,images["schema-registry"]if service=="registry-db"else None)
+            stopped(cluster);initialize(cluster,shared,service,images["schema-registry"]if service=="registry-db"else None,diagnostics=output/"registry-bootstrap"if service=="registry-db"else None)
             receipt["steps"].append({"action":"initialize-"+service,"completed":True});save()
         receipt["service_isolation"]=verify_isolation(cluster,shared)
         receipt["steps"].append({"action":"verify-"+SERVICE_FORMATION+"-isolation","completed":True});save()
@@ -143,7 +181,8 @@ def run(cluster,config_path,infrastructure,output):
             write_json(output/(action+"-job.json"),job)
             created=json.loads(cluster.kubectl("create","-f","-","-o","json",input=json.dumps(job).encode()).stdout)
             try:
-                cluster.kubectl("wait","--for=condition=Complete","job/"+name,"-n",ns,"--timeout=910s",timeout=940)
+                print("Waiting for maintenance Job: "+name,flush=True)
+                wait_job(cluster,ns,name,created["metadata"]["uid"])
             finally:
                 log=cluster.kubectl("logs","job/"+name,"-n",ns,"--all-containers=true","--tail=2000",check=False)
                 (output/(action+".log")).write_bytes(log.stdout);(output/(action+".log")).chmod(0o600)

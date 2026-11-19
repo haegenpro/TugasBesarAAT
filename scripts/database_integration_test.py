@@ -148,6 +148,52 @@ class DatabaseIntegrationChecks(unittest.TestCase):
         with patch.dict(os.environ,{"OWNED_DATABASES":json.dumps([{**entries[0],"database":"auth all"}])}),self.assertRaises(RuntimeError):
             self.entrypoint.access_rules("10.42.0.0/16")
 
+    def test_patroni_local_physical_replication_is_allowed_in_both_layouts(self):
+        # PostgreSQL's "all" database selector excludes physical replication.
+        # Patroni must issue IDENTIFY_SYSTEM locally while bootstrap completes.
+        _,_,storage=self.shared()
+        declared=next(e["value"]for e in self.pod_env(storage)if e["name"]=="OWNED_DATABASES")
+        for owned in ("",declared):
+            with self.subTest(shared=bool(owned)),patch.dict(os.environ,{"OWNED_DATABASES":owned}):
+                rules=self.entrypoint.access_rules("10.42.0.0/16")
+                local="host replication replicator 127.0.0.1/32 scram-sha-256"
+                self.assertIn(local,rules)
+                if owned:
+                    self.assertLess(rules.index(local),rules.index("host all all all reject"))
+                    self.assertNotIn("host all all 127.0.0.1/32 scram-sha-256",rules)
+
+    def test_data_directory_remount_permissions_are_repaired_without_data_changes(self):
+        with tempfile.TemporaryDirectory()as folder:
+            path=Path(folder)/"pgdata";path.mkdir();path.chmod(0o770)
+            sentinel=path/"retained";sentinel.write_bytes(b"original data")
+            key=path/"server.key";key.write_bytes(b"retained private key");key.chmod(0o660)
+            self.entrypoint.prepare_data_directory(path)
+            self.assertEqual(path.stat().st_mode&0o777,0o700)
+            self.assertEqual(sentinel.read_bytes(),b"original data")
+            self.assertEqual(key.stat().st_mode&0o777,0o600)
+            self.assertEqual(key.read_bytes(),b"retained private key")
+            with patch("os.geteuid",return_value=path.stat().st_uid+1),self.assertRaisesRegex(RuntimeError,"ownership"):
+                self.entrypoint.prepare_data_directory(path)
+            linked=Path(folder)/"linked";linked.symlink_to(path)
+            with self.assertRaisesRegex(RuntimeError,"symlink"):
+                self.entrypoint.prepare_data_directory(linked)
+            key.unlink();key.symlink_to(sentinel)
+            with self.assertRaisesRegex(RuntimeError,"TLS key.*symlink"):
+                self.entrypoint.prepare_data_directory(path)
+            self.assertEqual(sentinel.read_bytes(),b"original data")
+
+    def test_member_identity_is_local_private_and_not_a_symlink(self):
+        with tempfile.TemporaryDirectory()as folder:
+            path=Path(folder)/"member"
+            self.entrypoint.write_member_identity("aat-fourhost-storage-g0-a-0",path)
+            self.assertEqual(path.read_text(),"aat-fourhost-storage-g0-a-0\n")
+            self.assertEqual(path.stat().st_mode&0o777,0o600)
+            with self.assertRaisesRegex(RuntimeError,"invalid"):
+                self.entrypoint.write_member_identity("invalid\nmember",path)
+            linked=Path(folder)/"linked";linked.symlink_to(path)
+            with self.assertRaisesRegex(RuntimeError,"ownership"):
+                self.entrypoint.write_member_identity("another-member",linked)
+
     def release(self,root,inventory):
         catalog=json.loads((ROOT/"deployment/services/catalog.json").read_text())
         owner=json.loads((ROOT/"deployment/role1/config.example.json").read_text())

@@ -16,6 +16,7 @@ ROOT=Path(__file__).resolve().parent.parent
 
 
 def prepare_volumes(cluster,requirements):
+    require(cluster.cfg.get("version") != 3, "existing VMs: use platform-existing.py volumes with the prepared bundle")
     spec=importlib.util.spec_from_file_location("platform_storage",ROOT/"scripts/platform-storage.py")
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     formation=cluster.cfg["cluster_id"]+"-services"
@@ -62,6 +63,7 @@ def apply(cluster,report,snapshots):
         cluster.kubectl("apply","-f","-",input=snapshots[stage["id"]],timeout=60)
         for wait in stage["wait"]:
             resource=wait["kind"].lower()+"/"+wait["name"]
+            print("Waiting for readiness: "+resource,flush=True)
             if wait["kind"]=="Job":cluster.kubectl("wait","--for=condition=Complete",resource,"-n",ns,"--timeout=300s",timeout=330)
             else:cluster.kubectl("rollout","status",resource,"-n",ns,"--timeout=300s",timeout=330)
         print("Applied stage: "+stage["id"],flush=True)
@@ -69,6 +71,7 @@ def apply(cluster,report,snapshots):
     # waits for Aggregator). Check every workload after all objects are present.
     for workload in report["workloads"]:
         resource=workload["kind"].lower()+"/"+workload["name"]
+        print("Waiting for readiness: "+resource,flush=True)
         if workload["kind"]=="Job":cluster.kubectl("wait","--for=condition=Complete",resource,"-n",ns,"--timeout=300s",timeout=330)
         else:cluster.kubectl("rollout","status",resource,"-n",ns,"--timeout=300s",timeout=330)
     print("Prepared bundle applied and workload readiness observed; HA/load acceptance remains separate.")

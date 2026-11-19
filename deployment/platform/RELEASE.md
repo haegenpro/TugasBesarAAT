@@ -3,9 +3,13 @@
 Current host onboarding follows the
 [manual VirtualBox/Wi-Fi guide](../../docs/Platform-VirtualBox-WiFi-Setup.md),
 with one Ubuntu VM on each of four physical machines and no VPS cluster node.
-The release tools below retain their wired provider/SSH/ownership assumptions;
-manual guest preparation does not make them ready for live apply. Provider or
-manual deployment integration remains necessary before executing these steps.
+For these manually installed guests, use [existing-cluster inventory v3](../../docs/Platform-Existing-Cluster-Deployment.md).
+It uses an existing admin kubeconfig and operator-run scripts for root-filesystem
+volumes. Initial release/apply and maintenance have been exercised on the four-VM
+cluster; full source/load/failure acceptance and automated VM replacement remain
+pending. See the [startup repair record](../../docs/Platform-Application-Startup-Repair.md)
+for observed readiness and unresolved data-read failures. V1/v2 retain their
+separate wired provider/SSH/ownership workflows.
 
 The target is four physical hosts, each with one VM. Actual addresses, provider,
 RAM and disk capacity remain operator inputs. Do not use the former single-host

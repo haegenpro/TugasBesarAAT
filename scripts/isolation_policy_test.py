@@ -13,6 +13,9 @@ class IsolationChecks(unittest.TestCase):
         pg=next(p for p in items if p["metadata"]["name"].endswith("canonical-postgres"))
         allowed=json.dumps(pg["spec"]["ingress"])
         self.assertIn("aggregator",allowed);self.assertNotIn("consumer-dashboard",allowed);self.assertNotIn("client-api",allowed)
+        patroni={p['podSelector']['matchLabels'].get('app.kubernetes.io/name')for rule in pg['spec']['ingress']if any(port['port']==8008 for port in rule['ports'])for p in rule.get('from',[])if 'podSelector'in p}
+        self.assertIn('aggregator',patroni)
+        self.assertNotIn('client-api',patroni);self.assertNotIn('consumer-dashboard',patroni)
         self.assertTrue(all(p["metadata"]["namespace"]==self.inventory["namespace"] for p in items))
         self.assertNotIn("tester-agent",json.dumps(items))
     def test_only_the_four_owners_reach_the_shared_service_databases(self):

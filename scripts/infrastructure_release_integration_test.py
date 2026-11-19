@@ -31,6 +31,26 @@ class InfrastructureReleaseChecks(unittest.TestCase):
             self.assertFalse(any(o["kind"]=="Job"for o in resources))
             self.assertTrue(all(w["name"].endswith("-router")or w["kind"]=="StatefulSet"for w in report["workloads"]))
             self.assertEqual(sum(o["kind"]=="Namespace"for o in resources),1)
+            # DCS must be ready before any PG bootstrap, and each PG group
+            # waits for all three copies before another group is started.
+            completed=set();pg_groups=0;coordination=0
+            for stage in report["stages"]:
+                self.assertTrue(set(stage["requires"])<=completed)
+                values=json.loads(Path(stage["manifest"]).read_text())["items"]
+                stores=[o for o in values if o["kind"]=="StatefulSet"]
+                if stores:
+                    self.assertEqual(len(stores),3)
+                    self.assertEqual({w["name"]for w in stage["wait"]},{o["metadata"]["name"]for o in stores})
+                    components={o["spec"]["template"]["metadata"]["labels"]["component"]for o in stores}
+                    if components=={"storage-etcd"}:
+                        coordination+=1
+                        if stores[0]["metadata"]["labels"]["platform.aat/formation"].endswith("-service-db"):
+                            self.assertTrue(any(o["kind"]=="NetworkPolicy"and o["spec"]["podSelector"]["matchLabels"].get("component")=="storage-etcd"for o in values),"owner DCS traffic must be permitted before waiting for quorum")
+                    else:
+                        self.assertEqual(components,{"storage-postgres"});pg_groups+=1
+                        self.assertGreater(coordination,0)
+                completed.add(stage["id"])
+            self.assertEqual((coordination,pg_groups),(3,7))
             policies=[o for o in resources if o["kind"]=="NetworkPolicy"]
             self.assertTrue(any(o["metadata"]["name"].endswith("bootstrap-ingestion-etcd")for o in policies))
             self.assertTrue((root/"prepared/canonical-plan.json").is_file());self.assertTrue((root/"prepared/service-db-plan.json").is_file())

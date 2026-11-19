@@ -48,17 +48,37 @@ def assemble(inventory,config_path,output):
         credentials=read("secrets")
         require(credentials.get("kind")=="List"and all(o.get("kind")=="Secret"for o in credentials["items"]),"secrets input must contain only Secret objects")
         first+=credentials["items"]
-    def add(name,items,dependencies=()):
+    def add(name,items,dependencies=(),wait=()):
         artifacts[name]={"apiVersion":"v1","kind":"List","items":[o for o in items if o["kind"]!="Namespace"or name=="prerequisites"]}
-        stages.append({"id":name,"manifest":"artifacts/"+name+".json","requires":list(dependencies)})
+        stages.append({"id":name,"manifest":"artifacts/"+name+".json","requires":list(dependencies),"wait":list(wait)})
+    def storage_stages(name,resources,dependencies):
+        # A cold start must establish DCS quorum before PostgreSQL starts.
+        # Initialize one replicated PG group at a time, avoiding a burst of
+        # initdb/basebackup work that can starve DCS on the smaller VMs.
+        items=[o for o in resources if o["kind"]!="Namespace"]
+        etcd=[o for o in items if o["kind"]=="StatefulSet"and o["spec"]["template"]["metadata"]["labels"].get("component")=="storage-etcd"]
+        names={o["metadata"]["name"]for o in etcd}
+        formation=etcd[0]["metadata"]["labels"]["platform.aat/formation"]
+        coordination=[o for o in items if o["kind"]=="NetworkPolicy"or o["metadata"]["name"]in names|{formation+"-etcd-members"}]
+        postgres=[o for o in items if o["kind"]=="StatefulSet"and o["spec"]["template"]["metadata"]["labels"].get("component")=="storage-postgres"]
+        add(name+"-coordination",coordination,dependencies,[{"kind":"StatefulSet","name":o["metadata"]["name"]}for o in etcd])
+        add(name,[o for o in items if o not in coordination and o not in postgres],[name+"-coordination"])
+        previous=name
+        groups=sorted({o["spec"]["template"]["metadata"]["labels"]["storage-group"]for o in postgres},key=int)
+        for group in groups:
+            selected=[o for o in postgres if o["spec"]["template"]["metadata"]["labels"]["storage-group"]==group]
+            stage=name+"-g"+group
+            add(stage,selected,[previous],[{"kind":"StatefulSet","name":o["metadata"]["name"]}for o in selected])
+            previous=stage
+        return previous
     add("prerequisites",first)
     # Satellite/Audit/reference inputs are activation prerequisites. No source
     # or application is started here, so their absence must not prevent PKI/DB
     # bootstrap. Default deny and the precise storage flows still apply now.
     add("isolation",[*render_isolation(inventory)["items"],*ingestion_policies(inventory)],["prerequisites"])
-    add("canonical-storage",manifests(canonical)["items"],["isolation"])
-    add("ingestion-storage",manifests(ingestion)["items"],["isolation"])
-    add("owner-databases",owners["items"],["isolation"])
+    previous=storage_stages("canonical-storage",manifests(canonical)["items"],["isolation"])
+    previous=storage_stages("ingestion-storage",manifests(ingestion)["items"],[previous])
+    storage_stages("owner-databases",owners["items"],[previous])
     formations=[canonical,ingestion,*requirements["formations"]]
     output.mkdir(parents=True,mode=0o700);(output/"artifacts").mkdir(mode=0o700)
     for name,value in artifacts.items():write_json(output/"artifacts"/(name+".json"),value)

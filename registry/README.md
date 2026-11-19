@@ -6,6 +6,19 @@ neither API nor management port is published to the host. Compose generates
 `SCHEMA_REGISTRY_URL` for each caller from root `SCHEMA_REGISTRY_PORT`.
 `SCHEMA_REGISTRY_MANAGEMENT_PORT` controls the readiness listener.
 
+The image copies the pinned Apicurio 3.3.3 application onto a pinned UBI 9
+Java 21 runtime. The upstream image's UBI 10 base failed on the physical
+VirtualBox cluster with `CPU does not support x86-64-v3`; B/C/D did not expose
+AVX2, while all four guests exposed the features needed by UBI 9. This packaging
+change keeps the same Registry application and PostgreSQL backend.
+
+The JVM uses a 64 MiB maximum heap, Serial GC and bounded native-memory settings
+to leave room inside M2's 256 MiB container limit. A SQL-backed container test
+passed initialization, 21 registrations and 20 schema reads at approximately
+212 MiB. This short test is not load acceptance. See
+[the physical-cluster repair record](../docs/Platform-Registry-Bootstrap-Repair.md)
+for deployment paths and maintenance evidence.
+
 The Registry trusts services attached to the backend network. Downstream clients
 use Client API on the separate client network. Docker/host administrators can
 inspect the Registry from its container:

@@ -47,7 +47,7 @@ def configs(inventory, storage, additional_storages=()):
         "ingester":{"wal":{"dir":"/loki/wal"}},"schema_config":{"configs":[{"from":"2024-01-01","store":"tsdb","object_store":"filesystem","schema":"v13","index":{"prefix":"index_","period":"24h"}}]},
         "storage_config":{"tsdb_shipper":{"active_index_directory":"/loki/index","cache_location":"/loki/index-cache"}},"compactor":{"working_directory":"/loki/compactor","retention_enabled":True,"delete_request_store":"filesystem"},
         "limits_config":{"retention_period":"24h","allow_structured_metadata":True},"analytics":{"reporting_enabled":False}}
-    tempo = {"server":{"http_listen_port":3200},"distributor":{"receivers":{"otlp":{"protocols":{"http":{"endpoint":"0.0.0.0:4318"},"grpc":{"endpoint":"0.0.0.0:4317"}}}}},"ingester":{"max_block_duration":"5m"},"compactor":{"compaction":{"block_retention":"24h"}},"storage":{"trace":{"backend":"local","wal":{"path":"/var/tempo/wal"},"local":{"path":"/var/tempo/blocks"}}}}
+    tempo = {"server":{"http_listen_port":3200},"distributor":{"receivers":{"otlp":{"protocols":{"http":{"endpoint":"0.0.0.0:4318"},"grpc":{"endpoint":"0.0.0.0:4317"}}}}},"ingester":{"max_block_duration":"1m","max_block_bytes":4*2**20,"concurrent_flushes":1},"compactor":{"compaction":{"block_retention":"24h","max_block_bytes":16*2**20}},"storage":{"trace":{"backend":"local","wal":{"path":"/var/tempo/wal"},"local":{"path":"/var/tempo/blocks"},"block":{"parquet_row_group_size_bytes":4*2**20},"blocklist_poll_concurrency":2,"search":{"read_buffer_count":2,"read_buffer_size_bytes":2**20}}}}
     alloy = '''discovery.kubernetes "pods" {
   role = "pod"
   namespaces { names = ["NAMESPACE"] }
@@ -111,7 +111,7 @@ def render(inventory, storage, images, additional_storages=()):
         ("loki",3100,"/usr/bin/loki",["-config.file=/etc/loki/config.json"],"/loki","/etc/loki","/ready","/ready"),
         ("tempo",3200,"/tempo",["-config.file=/etc/tempo/config.json"],"/var/tempo","/etc/tempo","/ready","/ready"),
         ("grafana",3000,"/run.sh",[],"/var/lib/grafana",None,"/api/health","/api/health"),
-        ("alloy",12345,"/bin/alloy",["run","/etc/alloy/config.alloy","--storage.path=/var/lib/alloy/data","--server.http.listen-addr=0.0.0.0:12345"],None,"/etc/alloy","/-/ready","/-/healthy"),
+        ("alloy",12345,"/bin/alloy",["run","/etc/alloy/config.alloy","--storage.path=/tmp/alloy-data","--server.http.listen-addr=0.0.0.0:12345"],None,"/etc/alloy","/-/ready","/-/healthy"),
         ("platform-metrics",9101,"/usr/local/bin/platform-metrics",[],None,None,"/ready","/health"),
     ]
     for letter in "abc":
@@ -129,6 +129,7 @@ def render(inventory, storage, images, additional_storages=()):
             s["environment"]={"GF_PATHS_PROVISIONING":"/etc/grafana/provisioning","GF_USERS_ALLOW_SIGN_UP":"false","GF_AUTH_ANONYMOUS_ENABLED":"false"}
             s["config_mounts"] += [{"name":"grafana-datasources","path":"/etc/grafana/provisioning/datasources"},{"name":"grafana-providers","path":"/etc/grafana/provisioning/dashboards"},{"name":"platform-dashboards","path":"/etc/platform-dashboards"}]
         if name=="tempo":s["ports"].update({"otlp-http":4318,"otlp-grpc":4317})
+        if name=="tempo":s["environment"].update({"GOMEMLIMIT":"128MiB","GOMAXPROCS":"1"})
         services.append(s)
     resources, report=render_services(inventory,{"version":1,"services":services},images)
     ns=inventory["namespace"];items=resources["items"]
@@ -146,7 +147,7 @@ def render(inventory, storage, images, additional_storages=()):
         if name=="platform-metrics":container["env"].append({"name":"POD_NAMESPACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.namespace"}}})
         if name=="alloy":
             pod["volumes"].append({"name":"alloy-data","emptyDir":{"sizeLimit":"128Mi"}})
-            container["volumeMounts"].append({"name":"alloy-data","mountPath":"/var/lib/alloy/data"})
+            container["volumeMounts"].append({"name":"alloy-data","mountPath":"/tmp/alloy-data"})
     selector={"app.kubernetes.io/name":"node-exporter","platform.aat/cluster":inventory["cluster_id"]}
     node_pod={"automountServiceAccountToken":False,"hostNetwork":True,"hostPID":True,"dnsPolicy":"ClusterFirstWithHostNet","nodeSelector":{"platform.aat/cluster":inventory["cluster_id"]},"securityContext":{"runAsNonRoot":True,"runAsUser":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"node-exporter","image":images["node-exporter"],"args":["--path.procfs=/host/proc","--path.sysfs=/host/sys","--path.rootfs=/host/root","--web.listen-address=:9100"],"ports":[{"name":"metrics","containerPort":9100}],"resources":{"requests":{"memory":"128Mi","cpu":"50m"},"limits":{"memory":"256Mi","cpu":"500m"}},"securityContext":{"allowPrivilegeEscalation":False,"readOnlyRootFilesystem":True,"capabilities":{"drop":["ALL"]}},"volumeMounts":[{"name":n,"mountPath":"/host/"+p,"readOnly":True} for n,p in (("proc","proc"),("sys","sys"),("root","root"))]}],"volumes":[{"name":n,"hostPath":{"path":p,"type":"Directory"}}for n,p in (("proc","/proc"),("sys","/sys"),("root","/"))]}
     add("apps/v1","DaemonSet","node-exporter",spec={"selector":{"matchLabels":selector},"template":{"metadata":{"labels":{**selector,"role":"other"}},"spec":node_pod}})

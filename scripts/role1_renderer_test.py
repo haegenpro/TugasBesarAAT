@@ -46,8 +46,10 @@ class Role1RendererTests(unittest.TestCase):
         deployments={v['metadata']['name']:v for v in result['items'] if v['kind']=='Deployment'}
         self.assertEqual(len(deployments),3)
         coastal=next(v for k,v in deployments.items() if k.endswith('-coastal-processor'))
+        self.assertEqual(coastal['spec']['strategy']['rollingUpdate'],{'maxUnavailable':1,'maxSurge':0})
         self.assertEqual(coastal['spec']['template']['metadata']['labels']['role'],'consumer')
         container=coastal['spec']['template']['spec']['containers'][0]
+        self.assertEqual(container['readinessProbe']['timeoutSeconds'],5)
         env={v['name']:v for v in container['env']}
         self.assertEqual(env['INGESTION_COMPONENTS']['value'],'coastal')
         self.assertIn('valueFrom',env['PANTAI_AUTH_TOKEN'])
@@ -55,11 +57,14 @@ class Role1RendererTests(unittest.TestCase):
         self.assertNotIn('BMKG_API_KEY',env)
         self.assertEqual(container['resources']['limits']['memory'],'256Mi')
         ingestion=next(v for k,v in deployments.items() if k.endswith('-ingestion'))['spec']['template']['spec']['containers'][0]
+        self.assertEqual(next(v for k,v in deployments.items() if k.endswith('-ingestion'))['spec']['strategy']['rollingUpdate'],{'maxUnavailable':1,'maxSurge':0})
+        self.assertEqual(ingestion['readinessProbe']['timeoutSeconds'],5)
         env={v['name']:v for v in ingestion['env']}
         self.assertEqual(env['INGESTION_COMPONENTS']['value'],'bmkg,field-reports,satellite')
         self.assertEqual(env['SATELLITE_NAMESPACE']['value'],config['satellite_namespace'])
         self.assertIn('valueFrom',env['SATELLITE_FEED_TOKEN'])
         aggregator=next(v for k,v in deployments.items() if not k.endswith(('-ingestion','-coastal-processor')))['spec']['template']['spec']['containers'][0]
+        self.assertEqual(aggregator['readinessProbe']['timeoutSeconds'],2)
         env={v['name']:v for v in aggregator['env']}
         self.assertEqual(env['PVMBG_ADAPTER_VERSION']['value'],'2')
         self.assertEqual(env['PVMBG_READER_SCHEMA']['value'],'/schemas/volcanic-adapter-v2.avsc')

@@ -24,7 +24,7 @@ def render(inventory,extra_flows=()):
     etcd={"platform.aat/formation":formation,"component":"storage-etcd"}
     monitor_names=["prometheus","alloy","loki","tempo","grafana"]
     policy("canonical-postgres",postgres,
-        ingress=[incoming(["aggregator","canonical-migrate"],[5432]),{"from":[peer(postgres),peer(router)],"ports":ports([5432,8008])},incoming(["prometheus"],[8008,9187])],
+        ingress=[incoming(["aggregator","canonical-migrate"],[5432]),incoming(["aggregator"],[8008]),{"from":[peer(postgres),peer(router)],"ports":ports([5432,8008])},incoming(["prometheus"],[8008,9187])],
         egress=[{"to":[peer(postgres)],"ports":ports([5432,8008])},{"to":[peer(etcd)],"ports":ports([2379])}])
     policy("canonical-router",router,
         ingress=[incoming(["aggregator","canonical-migrate"],list(range(5432,5437)))],

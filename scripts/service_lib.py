@@ -106,6 +106,12 @@ def render(inventory,catalog,images):
         for target,field in (("ready","readinessProbe"),("live","livenessProbe")):
             if s.get(target):container[field]={"httpGet":s[target],"periodSeconds":5,"timeoutSeconds":2,"failureThreshold":3}
         if s.get("live"):container["startupProbe"]={"httpGet":s["live"],"periodSeconds":3,"failureThreshold":40}
+        if name in ("broker","schema-registry"):
+            # NATS catch-up and Java/database warm-up need a recovery window.
+            # Readiness still gates traffic while liveness tolerates short stalls.
+            container["startupProbe"].update(periodSeconds=10,timeoutSeconds=5,failureThreshold=90)
+            container["readinessProbe"].update(periodSeconds=10,timeoutSeconds=5)
+            container["livenessProbe"].update(periodSeconds=30,timeoutSeconds=5)
         pod={"automountServiceAccountToken":False,"terminationGracePeriodSeconds":45,
              "securityContext":{"runAsNonRoot":True,"runAsUser":uid,"runAsGroup":uid,"fsGroup":uid,"seccompProfile":{"type":"RuntimeDefault"}},
              "containers":[container],"volumes":[{"name":"tmp","emptyDir":{"sizeLimit":"64Mi"}}]}

@@ -25,6 +25,23 @@ class ServiceContractChecks(unittest.TestCase):
         with self.assertRaises(ValueError):render(self.inventory,self.catalog,bad)
         bad=copy.deepcopy(self.catalog);bad["services"][0]["environment"]["PASSWORD"]="secret"
         with self.assertRaises(ValueError):validate(bad)
+    def test_broker_recovery_is_not_treated_as_a_dead_server(self):
+        resources,_=render(self.inventory,self.catalog,self.images)
+        brokers=[o for o in resources['items']if o['kind']=='StatefulSet'and o['metadata']['name'].startswith('broker-')]
+        self.assertEqual(len(brokers),3)
+        for obj in brokers:
+            container=obj['spec']['template']['spec']['containers'][0]
+            self.assertEqual(container['readinessProbe']['httpGet']['path'],'/healthz?js-server-only=true')
+            self.assertEqual(container['livenessProbe']['httpGet']['path'],'/healthz?js-enabled-only=true')
+            self.assertGreaterEqual(container['startupProbe']['periodSeconds']*container['startupProbe']['failureThreshold'],900)
+            self.assertEqual(container['resources']['limits']['memory'],'1024Mi')
+    def test_registry_warmup_has_time_to_finish_within_its_memory_limit(self):
+        resources,_=render(self.inventory,self.catalog,self.images)
+        obj=next(o for o in resources['items']if o['kind']=='Deployment'and o['metadata']['name']=='schema-registry')
+        container=obj['spec']['template']['spec']['containers'][0]
+        self.assertEqual(container['startupProbe']['httpGet']['path'],'/health/live')
+        self.assertGreaterEqual(container['startupProbe']['periodSeconds']*container['startupProbe']['failureThreshold'],900)
+        self.assertEqual(container['resources']['limits']['memory'],'256Mi')
         bad=copy.deepcopy(self.catalog);bad["services"][0]["dependencies"]=["broker-init"]
         with self.assertRaises(ValueError):validate(bad)
 

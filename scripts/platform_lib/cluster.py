@@ -24,6 +24,9 @@ LABEL = "aat.platform.cluster"
 
 
 def Cluster(cfg):
+    if cfg.get("version") == 3:
+        from .existing import ExistingCluster
+        return ExistingCluster(cfg)
     if cfg.get("version") == 2:
         from .multihost import MultiHostCluster
         return MultiHostCluster(cfg)

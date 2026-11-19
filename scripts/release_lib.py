@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from bundle_lib import inspect
+from citus_auth_lib import render as render_citus_auth
 from database_lib import render as render_databases
 from isolation_lib import render as render_isolation
 from monitoring_lib import render as render_monitoring
@@ -82,7 +83,12 @@ def assemble(inventory,config_path,output):
         if not initialized:blockers.append("Initialize owned service database schemas with owning applications stopped, including the pinned registry bootstrap")
     monitored_owners=owner_database_report["formations"]if owner_database_report else []
     monitoring,monitor_requirements=render_monitoring(inventory,canonical,images,[ingestion,*monitored_owners])
-    add("services",service_resources,["owner-databases"],[{"kind":"Job","name":"broker-init"}])
+    services_dependency="owner-databases"
+    if initialized:
+        auth,auth_name=render_citus_auth(canonical,initialization['durability']['storage'])
+        add("canonical-authentication",auth,["owner-databases"],[{"kind":"Job","name":auth_name}])
+        services_dependency="canonical-authentication"
+    add("services",service_resources,[services_dependency],[{"kind":"Job","name":"broker-init"}])
     add("processing",application,["services"],[{"kind":"Deployment","name":inventory["cluster_id"]+"-aggregator"}])
     add("monitoring",monitoring,["processing"])
     captured=[]

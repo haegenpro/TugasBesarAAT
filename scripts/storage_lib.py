@@ -160,7 +160,7 @@ def manifests(storage):
                              "--auto-compaction-retention=1", "--listen-metrics-urls=http://0.0.0.0:2381"],
                     "ports": [{"containerPort": 2379}, {"containerPort": 2380}], "resources": resources("other"),
                     "readinessProbe": {"exec": {"command": ["/usr/local/bin/etcdctl", "--endpoints=https://127.0.0.1:2379",
-                        "--cacert=/tls/ca.crt", "--cert=/tls/tls.crt", "--key=/tls/tls.key", "endpoint", "health"]}, "periodSeconds": 5},
+                        "--cacert=/tls/ca.crt", "--cert=/tls/tls.crt", "--key=/tls/tls.key", "endpoint", "health"]}, "periodSeconds": 5, "timeoutSeconds": 5},
                     "volumeMounts": [{"name": "data", "mountPath": "/data"}, {"name": "tls", "mountPath": "/tls", "readOnly": True}]}],
                 "volumes": [{"name": "data", "persistentVolumeClaim": {"claimName": workload}},
                             {"name": "tls", "secret": {"secretName": workload + "-tls", "defaultMode": 0o440,"items":[{"key":key,"path":key}for key in("ca.crt","tls.crt","tls.key")]}}]}}})
@@ -193,7 +193,7 @@ def manifests(storage):
             obj("StatefulSet", workload, {"replicas": 1, "serviceName": formation + "-members",
                 "selector": {"matchLabels": {"member": name}}, "template": {"metadata": {"labels": labels}, "spec": {
                     "nodeSelector": {"kubernetes.io/hostname": node}, "automountServiceAccountToken": False,
-                    "terminationGracePeriodSeconds": 45, "securityContext": {"runAsUser": 999, "runAsGroup": 999, "fsGroup": 999},
+                    "terminationGracePeriodSeconds": 45, "securityContext": {"runAsUser": 999, "runAsGroup": 999, "fsGroup": 999, "fsGroupChangePolicy": "OnRootMismatch"},
                     "containers": [{"name": "postgres", "image": storage["image"], "env": env,
                         "envFrom": [{"secretRef": {"name": formation + "-credentials"}}], "resources": resources("store"),
                         "ports": [{"containerPort": 5432}, {"containerPort": 8008}],

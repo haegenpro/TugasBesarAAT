@@ -137,6 +137,7 @@ for item in data['paths']:
 
 
 def prepare_disks(cluster, storage):
+    require(cluster.cfg.get("version") != 3, "existing VMs: use platform-existing.py volumes with the prepared bundle")
     for node in cluster.cfg["nodes"]:
         paths = []
         for group in storage["groups"]:

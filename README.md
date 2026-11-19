@@ -33,10 +33,12 @@ for downloads, VM sizing, installer choices, a single disk per VM and network ch
 Then follow the [manual K3s bootstrap](docs/Platform-Manual-K3s-Setup.md) to join
 the four guests into one cluster.
 For the application phase, use the [GHCR preparation and deployment sequence](docs/Platform-Manual-GHCR-and-Application-Deployment.md).
-It separates executable image/pull setup from the remaining manual-provider
-integration required before database/application apply.
-This manual path still needs provider/deployment integration before the existing
-automated release workflow can manage it.
+After images are published, follow the [existing-cluster deployment guide](docs/Platform-Existing-Cluster-Deployment.md).
+Inventory v3 uses the existing K3s API and operator-run volume preparation on
+the root disks. Initial deployment and maintenance have been exercised on the
+four-VM cluster; source/load/failure acceptance and VM replacement integration
+remain pending. See the [startup repair record](docs/Platform-Application-Startup-Repair.md)
+for readiness results and the remaining data-read availability problem.
 The [integrated release](deployment/platform/RELEASE.md) includes owned service
 databases and [empty-disk recovery](docs/Platform-Integrated-Node-Replacement.md),
 including [consistent source checkpoints](docs/Platform-Source-Checkpoints.md)

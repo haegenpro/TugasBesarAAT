@@ -7,7 +7,10 @@ import tempfile
 import unittest
 
 from infrastructure_release_lib import assemble
-from maintenance_lib import inputs,run,verify_receipt,expected_schemas
+from maintenance_lib import inputs,run,verify_receipt,expected_schemas,wait_job,DATABASE_READY,maintenance_job
+from types import SimpleNamespace
+from unittest.mock import Mock,MagicMock,patch
+import os,sys
 from platform_lib.inventory import load
 
 ROOT=Path(__file__).resolve().parent.parent
@@ -39,6 +42,7 @@ class API:
                     self.members[member["name"]]={"formation":storage["formation"],"group_id":group["id"],"member":member["name"],"system_id":str(identity),"primary":i==0}
 
     def kubectl(self,*args,**kw):
+        if args[0]=="-n":args=args[2:]
         self.calls.append(args);value={};code=0
         if args[0]=="get"and args[1]in("deployments,statefulsets","pods"):
             value={"items":[]}
@@ -59,11 +63,13 @@ class API:
             else:raise AssertionError(args)
         elif args[0]=="create":
             value=json.loads(kw["input"]);value["metadata"]["uid"]="uid-"+value["metadata"]["name"];self.objects[value["metadata"]["name"]]=value
-        elif args[0]=="wait":
-            if self.fail=="ingestion-job"and "maintenance-ingestion-"in args[2]:raise RuntimeError("injected Job failure")
         elif args[0]=="get"and args[1]in("job","pod"):
             value=copy.deepcopy(self.objects[args[2]])
-            if args[1]=="job":value["status"]={"conditions":[{"type":"Complete","status":"True"}]}
+            if args[1]=="job":
+                failure=self.fail=="ingestion-job"and "maintenance-ingestion-"in args[2]
+                value["status"]={"conditions":[{"type":"Failed"if failure else "Complete","status":"True","reason":"InjectedFailure"if failure else "Completed"}]}
+            else:value["status"]={"phase":"Running","conditions":[{"type":"Ready","status":"True"}]}
+        elif args[0]=="get"and args[1]=="events":value={"items":[]}
         elif args[0]=="logs":return subprocess.CompletedProcess(args,0,b"bounded tool result\n",b"")
         elif args[0]=="delete":pass
         else:raise AssertionError(args)
@@ -71,6 +77,41 @@ class API:
 
 
 class MaintenanceChecks(unittest.TestCase):
+    def test_database_gate_retries_connectivity_and_requires_a_primary(self):
+        class DatabaseError(Exception):pass
+        replica=MagicMock();replica.cursor.return_value.__enter__.return_value.fetchone.return_value=(False,)
+        primary=MagicMock();primary.cursor.return_value.__enter__.return_value.fetchone.return_value=(True,)
+        driver=SimpleNamespace(Error=DatabaseError,OperationalError=DatabaseError,connect=Mock(side_effect=[DatabaseError("policy not ready"),replica,primary]))
+        with patch.dict(sys.modules,{"psycopg2":driver}),patch.dict(os.environ,{"PGHOST":"database","PGDATABASE":"hazards","PGPASSWORD":"test-only"}),patch("time.sleep")as sleep:
+            exec(DATABASE_READY,{})
+        self.assertEqual(driver.connect.call_count,3);self.assertEqual(sleep.call_count,2)
+        replica.close.assert_called_once();primary.close.assert_called_once()
+
+    def test_database_gate_has_a_bounded_deadline(self):
+        class DatabaseError(Exception):pass
+        driver=SimpleNamespace(Error=DatabaseError,connect=Mock(side_effect=DatabaseError("unreachable")))
+        with patch.dict(sys.modules,{"psycopg2":driver}),patch.dict(os.environ,{"PGHOST":"database","PGDATABASE":"hazards","PGPASSWORD":"test-only"}),patch("time.monotonic",side_effect=[0,91]):
+            with self.assertRaisesRegex(SystemExit,"90 seconds"):exec(DATABASE_READY,{})
+
+    def test_every_migration_action_has_a_connection_gate_with_the_same_budget(self):
+        with tempfile.TemporaryDirectory()as folder:
+            inventory,values=self.fixture(Path(folder));_,_,images,aggregator,owner,_,formations,_=values
+            for action in("canonical","ingestion","cutover"):
+                storage=formations["ingestion"if action=="ingestion"else "storage"]
+                pod=maintenance_job(inventory,storage,aggregator,owner,images["role1"],action,"a"*32)["spec"]["template"]["spec"]
+                gate=pod["initContainers"][0];main=pod["containers"][0]
+                self.assertEqual(gate["resources"],main["resources"])
+                self.assertEqual(gate["image"],images["storage"])
+                self.assertEqual(gate["env"],main["env"][:4])
+
+    def test_failed_job_stops_immediately_and_replacement_identity_is_refused(self):
+        for uid,condition,message in (("original",{"type":"Failed","status":"True","reason":"BackoffLimitExceeded"},"Job failed"),("replacement",{"type":"Complete","status":"True"},"identity changed")):
+            with self.subTest(uid=uid):
+                cluster=SimpleNamespace(kubectl=Mock(return_value=subprocess.CompletedProcess([],0,json.dumps({"metadata":{"uid":uid},"status":{"conditions":[condition]}}).encode(),b"")))
+                with patch("maintenance_lib.time.sleep")as sleep,self.assertRaisesRegex(ValueError,message):
+                    wait_job(cluster,"ns","migration","original")
+                sleep.assert_not_called()
+
     def fixture(self,root):
         inventory=load(ROOT/"deployment/platform/inventory.fourhost.example.json")
         images={k:"registry.invalid/"+k+"@sha256:"+"a"*64 for k in("storage","role1","schema-registry")}
@@ -137,6 +178,10 @@ class MaintenanceChecks(unittest.TestCase):
             run(api,root/"release.json",root/"infra-complete",root/"maintenance")
             report=full_release(inventory,root/"maintenance/release-ready.json",root/"full")
             self.assertTrue(report["ready_for_apply"],report["blocked"])
+            stages={s['id']:s for s in report['stages']}
+            self.assertEqual(stages['canonical-authentication']['requires'],['owner-databases'])
+            self.assertEqual(stages['services']['requires'],['canonical-authentication'])
+            self.assertEqual(stages['canonical-authentication']['wait'][0]['kind'],'Job')
             changed=json.loads((root/"maintenance/storage-durability.json").read_text());changed["groups"][0]["system_id"]="999999"
             (root/"maintenance/storage-durability.json").write_text(json.dumps(changed))
             with self.assertRaisesRegex(ValueError,"original maintenance capture"):

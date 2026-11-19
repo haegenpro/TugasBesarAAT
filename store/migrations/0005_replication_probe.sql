@@ -24,7 +24,11 @@ BEGIN
         'formation', (SELECT formation FROM public.platform_storage_identity WHERE singleton),
         'group_id', (SELECT group_id FROM public.platform_storage_identity WHERE singleton),
         'system_id', (SELECT system_identifier::text FROM pg_control_system()),
-        'member', current_setting('cluster_name'),
+        -- Patroni forces cluster_name to the formation scope. The startup
+        -- script writes the actual pod name outside replicated PGDATA, so a
+        -- replica reads its own identity. Plain PostgreSQL experiment fixtures
+        -- without that file retain their explicit cluster_name identity.
+        'member', coalesce(nullif(btrim(pg_read_file('/tmp/aat-postgres-member',0,128,true),E' \t\r\n'),''),current_setting('cluster_name')),
         'primary', NOT recovering,
         'started', extract(epoch FROM pg_postmaster_start_time())::text,
         'timeline', CASE WHEN NOT recovering THEN left(pg_walfile_name(inserted),8) END,

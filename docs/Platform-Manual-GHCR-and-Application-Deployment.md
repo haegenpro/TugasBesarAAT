@@ -2,15 +2,16 @@
 
 Current target: four existing Ubuntu Server VMs in VirtualBox over Wi-Fi, one
 disk per VM, K3s servers A/B/C and agent D. Kubernetes bootstrap is complete by
-operator report; the BNPB application is not deployed. Use private GHCR packages
+operator report. Use private GHCR packages
 for this walkthrough. Publishing images does not deploy them.
 
-**Execution boundary:** steps 1–6 below can use the existing repository tools.
-Application release/apply is not yet integrated with the manual provider. Step 7
-identifies the code work required, and step 8 records the deployment order once
-that integration exists. Do not run the legacy workflow's `cluster` or `all`
-phase against these VMs, or substitute fictional libvirt/Windows host data to
-make inventory validation pass.
+Steps 1–6 prepare and verify images. After those pass, use the
+[existing-cluster deployment guide](Platform-Existing-Cluster-Deployment.md).
+Inventory v3 supports initial release/apply and maintenance through a private
+kubeconfig and operator-run root-filesystem volume scripts. The
+[startup repair record](Platform-Application-Startup-Repair.md) records subsequent
+physical-cluster execution and remaining acceptance work. Do not run the legacy workflow's `cluster` or
+`all` phase against these VMs or substitute fictional provider inventory.
 
 ## 1. Build on the physical Mint computer
 
@@ -212,31 +213,21 @@ Require success on all four. This verifies private-image access; it does not
 start a database or prove the application is healthy. Keep the successful
 `images.json` path for release preparation.
 
-## 7. Required implementation before live application apply
+## 7. Continue using the existing-cluster deployment path
 
-This work remains; the current scripts do not provide an end-to-end command for
-these manually created guests:
+Follow [the executable continuation guide](Platform-Existing-Cluster-Deployment.md)
+to copy an administrative kubeconfig from B, capture actual node identities and
+allocatable memory into inventory v3, generate private inputs, prepare guest
+directories, apply infrastructure and execute stopped-writer maintenance.
+The volume scripts preserve ownership checks and allow the root filesystem;
+they require interactive sudo only when run inside their corresponding VMs.
+No passwordless sudo or provider-generated ownership marker is required.
 
-- **Existing-cluster inventory/client:** accept the actual node addresses,
-  physical-host labels and allocations, and use an existing admin kubeconfig or
-  authenticated guest access. Existing v1/v2 validation and `Cluster(...)`
-  select libvirt/multi-host ownership workflows, not this manual topology.
-- **Guest management:** prepare authenticated, noninteractive administration
-  without exposing/reusing personal secrets. Current helpers call `sudo -n`;
-  a normal password-based SSH login alone does not satisfy that contract.
-- **Single-disk storage:** update `platform-storage.py prepare-disks` and
-  `platform-deploy.py prepare-volumes` to validate owned directories on the root
-  filesystem instead of requiring `/var/lib/aat` to be a separate mount. Keep
-  ownership and existing-data checks; do not bypass them with fake markers.
-- **Capacity/apply/maintenance:** use actual Kubernetes capacity and this
-  existing-cluster client without invoking the wired physical-host doctor or
-  provisioning/replacing the VMs. Retain bundle, migration and durability gates.
+The existing v1/v2 `platform-workflow.py run --phase all` still provisions
+provider-owned VMs and must not be used against the manual setup. Automated
+manual-VM replacement and physical fault execution remain separate work.
 
-Image preparation above is independent of these blockers. The legacy
-`platform-workflow.py run --phase all` is not a workaround; its cluster phase
-tries to provision provider-owned VMs.
-
-## 8. Application deployment order after integration
+## 8. Application deployment order
 
 1. Capture actual node IPs, labels, allocatable resources and available guest
    disk space. The current full bundle requests about 18.9 GiB before guest
@@ -261,6 +252,6 @@ tries to provision provider-owned VMs.
    then run source correctness, failure/recovery and load acceptance.
 
 These stages follow [integrated release preparation](../deployment/platform/RELEASE.md)
-and [the input-driven workflow](Platform-Input-Driven-Workflow.md), whose provider
-restrictions still apply until step 7 is implemented. No database/apply command
-in this document is claimed to work around that missing integration.
+and [the input-driven workflow](Platform-Input-Driven-Workflow.md). Use the
+inventory-v3 continuation guide for the manual VMs; retain v1/v2 provider
+restrictions for VM lifecycle and fault-injection commands.

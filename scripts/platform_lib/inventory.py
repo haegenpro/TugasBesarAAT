@@ -25,6 +25,9 @@ def https_url(value):
 
 
 def validate(cfg):
+    if cfg.get("version") == 3:
+        from .existing import validate as validate_existing
+        return validate_existing(cfg)
     if cfg.get("version") == 2:
         from .multihost_inventory import validate as validate_multi
         return validate_multi(cfg)

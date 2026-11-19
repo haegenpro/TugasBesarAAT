@@ -40,11 +40,11 @@
         "uid": 10001
       },
       "ready": {
-        "path": "/healthz?js-enabled-only=true",
+        "path": "/healthz?js-server-only=true",
         "port": 8222
       },
       "live": {
-        "path": "/healthz",
+        "path": "/healthz?js-enabled-only=true",
         "port": 8222
       },
       "dependencies": [],
@@ -312,7 +312,7 @@
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",
         "CONSUMER_ROLE": "dashboard",
         "CONSUMER_PORT": "8091",
-        "CONSUMER_ADMIN_SOCKET": "/tmp/dashboard-admin.sock",
+        "CONSUMER_ADMIN_SOCKET": "/tmp/dashboard-admin/consumer.sock",
         "NATS_STREAM": "HAZARDS",
         "NATS_SUBJECT": "hazard.events",
         "NATS_DURABLE": "dashboard-main-v1",
@@ -362,7 +362,7 @@
         "WARNING_SLO_METRICS_ENABLED": "true",
         "CONSUMER_ROLE": "notifier",
         "CONSUMER_PORT": "8092",
-        "CONSUMER_ADMIN_SOCKET": "/tmp/notifier-admin.sock",
+        "CONSUMER_ADMIN_SOCKET": "/tmp/notifier-admin/consumer.sock",
         "NATS_STREAM": "HAZARDS",
         "NATS_SUBJECT": "hazard.events",
         "NATS_DURABLE": "notifier-main-v1",

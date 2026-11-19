@@ -3,6 +3,8 @@
 For the current four-machine **Wi-Fi** setup, start with the
 [manual VirtualBox/Ubuntu guide](../../docs/Platform-VirtualBox-WiFi-Setup.md).
 It uses VirtualBox on Mint and Windows, with the VPS outside the cluster.
+After publishing images, use [existing-cluster inventory v3](../../docs/Platform-Existing-Cluster-Deployment.md)
+for initial database/application deployment and maintenance on these guests.
 The commands below describe the existing automated providers, not that manual
 setup: v1 is local libvirt/NAT; v2 requires wired Ethernet, Linux/libvirt and
 Windows/VirtualBox 7.0.x. They do not adopt manually installed VirtualBox guests.

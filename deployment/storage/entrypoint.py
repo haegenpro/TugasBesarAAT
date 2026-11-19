@@ -9,6 +9,35 @@ import yaml
 NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
 
 
+def prepare_data_directory(path):
+    """Restore PostgreSQL's required mode after Kubernetes fsGroup processing."""
+    path = Path(path)
+    if path.is_symlink():
+        raise RuntimeError("PostgreSQL data directory must not be a symlink")
+    if path.exists():
+        if not path.is_dir() or path.stat().st_uid != os.geteuid():
+            raise RuntimeError("PostgreSQL data directory has unexpected ownership/type")
+        path.chmod(0o700)
+        key = path / "server.key"
+        if key.is_symlink():
+            raise RuntimeError("PostgreSQL TLS key must not be a symlink")
+        if key.exists():
+            if not key.is_file() or key.stat().st_uid != os.geteuid():
+                raise RuntimeError("PostgreSQL TLS key has unexpected ownership/type")
+            key.chmod(0o600)
+
+
+def write_member_identity(name, path="/tmp/aat-postgres-member"):
+    """Keep the pod identity outside replicated PGDATA; Patroni owns cluster_name."""
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", name):
+        raise RuntimeError("invalid PostgreSQL member identity")
+    path = Path(path)
+    if path.is_symlink() or path.exists() and (not path.is_file() or path.stat().st_uid != os.geteuid()):
+        raise RuntimeError("member identity file has unexpected ownership/type")
+    path.write_text(name + "\n")
+    path.chmod(0o600)
+
+
 def access_rules(pod_cidr):
     """pg_hba rules. A shared formation admits each owner to its own database only."""
     owned = os.environ.get("OWNED_DATABASES")
@@ -17,6 +46,7 @@ def access_rules(pod_cidr):
             "local all postgres peer", "local all all scram-sha-256",
             "host all all 127.0.0.1/32 scram-sha-256",
             f"host all all {pod_cidr} scram-sha-256",
+            "host replication replicator 127.0.0.1/32 scram-sha-256",
             f"host replication replicator {pod_cidr} scram-sha-256",
         ]
     pairs = [(e["database"], e["runtime_role"]) for e in json.loads(owned)]
@@ -30,12 +60,16 @@ def access_rules(pod_cidr):
                   f"host {database} {role} {pod_cidr} scram-sha-256"]
     # Anything else, including an owner naming another owner's database, is
     # refused before password authentication.
-    return rules + [f"host replication replicator {pod_cidr} scram-sha-256", "local all all reject", "host all all all reject"]
+    return rules + ["host replication replicator 127.0.0.1/32 scram-sha-256",
+                    f"host replication replicator {pod_cidr} scram-sha-256", "local all all reject", "host all all all reject"]
 
 
 def main():
     os.umask(0o077)
+    data_dir = "/var/lib/postgresql/data/pgdata"
+    prepare_data_directory(data_dir)
     name = os.environ["POD_NAME"]
+    write_member_identity(name)
     host = f"{name}.{os.environ['MEMBER_SERVICE']}.{os.environ['POD_NAMESPACE']}.svc.cluster.local"
     parameters = {
         "shared_buffers": "32MB", "max_connections": int(os.environ.get("MAX_CONNECTIONS", "64")),
@@ -68,7 +102,7 @@ def main():
         },
         "postgresql": {
             "listen": "0.0.0.0:5432", "connect_address": host + ":5432",
-            "data_dir": "/var/lib/postgresql/data/pgdata", "bin_dir": "/usr/lib/postgresql/16/bin",
+            "data_dir": data_dir, "bin_dir": "/usr/lib/postgresql/16/bin",
             "pgpass": "/tmp/platform-pgpass", "basebackup": [{"checkpoint": "fast"}],
             "parameters": {"cluster_name": name},
             "authentication": {

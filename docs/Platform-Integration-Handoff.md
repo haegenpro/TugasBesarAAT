@@ -16,8 +16,13 @@ can reveal integration issues and is not replaced by these local checks.
 Current onboarding uses [manual VirtualBox guests on Wi-Fi](Platform-VirtualBox-WiFi-Setup.md)
 on four physical Mint/Windows machines; the VPS stays outside the cluster.
 The existing wired Linux/libvirt and Windows/VirtualBox 7.0.x providers do not
-manage this manual setup. Provider/deployment integration is a remaining task,
-in addition to the real-node validation listed below.
+manage this manual setup. [Existing-cluster inventory v3](Platform-Existing-Cluster-Deployment.md)
+now supports initial release/apply and maintenance through a kubeconfig, plus
+exported root-filesystem volume preparation. Initial deployment and maintenance
+have been exercised on the four-VM cluster; full source/load/failure acceptance
+and manual-VM replacement/fault-provider integration remain pending. The
+[startup repair record](Platform-Application-Startup-Repair.md) records observed
+readiness and the unresolved data-read availability failures.
 
 ## Implemented integration
 
