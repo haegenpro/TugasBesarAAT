@@ -29,6 +29,7 @@ type session struct {
 type app struct {
 	input          *bufio.Reader
 	client         *http.Client
+	chatClient     *http.Client
 	log            *slog.Logger
 	baseURL        string
 	session        session
@@ -42,7 +43,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	a := &app{log: slog.New(slog.NewJSONHandler(os.Stderr, nil)), input: bufio.NewReader(os.Stdin), client: &http.Client{Timeout: 8 * time.Second}, baseURL: strings.TrimRight(baseURL, "/")}
+	a := &app{log: newLogger(os.Stderr), input: bufio.NewReader(os.Stdin), client: &http.Client{Timeout: 8 * time.Second}, chatClient: &http.Client{Timeout: 90 * time.Second}, baseURL: strings.TrimRight(baseURL, "/")}
 	a.run()
 }
 
@@ -66,7 +67,7 @@ func (a *app) run() {
 			continue
 		}
 		fmt.Printf("Login: %s (%s)\n", a.session.ClientID, a.session.Role)
-		fmt.Println("\n1. Daftar hazard\n2. Daftar dengan filter\n3. Detail hazard\n4. Minta data raw\n5. Uji token lama\n6. Logout\n7. Laporan awal\n8. Detail laporan awal\n9. Riwayat laporan awal\n0. Keluar")
+		fmt.Println("\n1. Daftar hazard\n2. Daftar dengan filter\n3. Detail hazard\n4. Minta data raw\n5. Uji token lama\n6. Logout\n7. Laporan awal\n8. Detail laporan awal\n9. Riwayat laporan awal\n10. Ringkasan situasi (AI)\n11. Tanya AI (chat)\n0. Keluar")
 		switch a.prompt("Pilih") {
 		case "1":
 			a.list("")
@@ -86,6 +87,10 @@ func (a *app) run() {
 			a.noticeDetail()
 		case "9":
 			a.notices(true)
+		case "10":
+			a.situation()
+		case "11":
+			a.chat()
 		case "0":
 			return
 		}
@@ -123,7 +128,11 @@ func (a *app) request(method, path string, payload any, access string) (int, []b
 	return a.requestWithCorrelation(method, path, payload, access, rand.Text())
 }
 
-func (a *app) requestWithCorrelation(method, path string, payload any, access, cid string) (status int, data []byte, requestErr error) {
+func (a *app) requestWithCorrelation(method, path string, payload any, access, cid string) (int, []byte, error) {
+	return a.send(a.client, method, path, payload, access, cid)
+}
+
+func (a *app) send(client *http.Client, method, path string, payload any, access, cid string) (status int, data []byte, requestErr error) {
 	started := time.Now()
 	defer func() {
 		logger := a.log
@@ -156,7 +165,7 @@ func (a *app) requestWithCorrelation(method, path string, payload any, access, c
 		req.Header.Set("Authorization", "Bearer "+access)
 	}
 	req.Header.Set("X-Correlation-ID", cid)
-	resp, err := a.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -166,8 +175,12 @@ func (a *app) requestWithCorrelation(method, path string, payload any, access, c
 }
 
 func (a *app) protected(method, path string) (int, []byte, error) {
+	return a.protectedCall(a.client, method, path, nil)
+}
+
+func (a *app) protectedCall(client *http.Client, method, path string, payload any) (int, []byte, error) {
 	cid := rand.Text()
-	status, data, err := a.requestWithCorrelation(method, path, nil, a.session.AccessToken, cid)
+	status, data, err := a.send(client, method, path, payload, a.session.AccessToken, cid)
 	if err != nil || status != http.StatusUnauthorized || a.session.RefreshToken == "" {
 		return status, data, err
 	}
@@ -190,7 +203,7 @@ func (a *app) protected(method, path string) (int, []byte, error) {
 	a.session = next
 	a.previousAccess = oldAccess
 	fmt.Println("Access token kedaluwarsa; token baru diterbitkan tanpa login ulang.")
-	return a.requestWithCorrelation(method, path, nil, a.session.AccessToken, cid)
+	return a.send(client, method, path, payload, a.session.AccessToken, cid)
 }
 
 func (a *app) login(prefix string) {

@@ -30,15 +30,51 @@ func (a *api) router() *gin.Engine {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "client-api"})
 	})
 	r.GET("/ready", a.ready)
+	if a.cfg.AnalyticsEnabled {
+		r.GET("/analytics", a.analyticsAsset)
+		r.GET("/analytics/assets/:file", a.analyticsAsset)
+	}
 	limited := r.Group("/", limitInFlight(a.cfg.MaxInFlight, a.log))
+	if a.cfg.PriorityEnabled {
+		limited = r.Group("/", limitInFlight(a.cfg.AuthMaxInFlight, a.log))
+		a.authSlots = make(chan struct{}, a.cfg.AuthMaxInFlight)
+		if a.cfg.AuthPriorityKey != "" {
+			a.authSlots = make(chan struct{}, a.cfg.AuthMaxInFlight-a.cfg.AuthFieldReserved)
+			a.fieldAuthSlots = make(chan struct{}, a.cfg.AuthFieldReserved)
+			transport := http.DefaultTransport.(*http.Transport).Clone()
+			transport.MaxConnsPerHost = a.cfg.AuthFieldReserved
+			transport.MaxIdleConnsPerHost = a.cfg.AuthFieldReserved
+			a.fieldClient = &http.Client{Transport: transport, Timeout: 5 * time.Second}
+		}
+	}
 	limited.POST("/auth/login", a.login)
-	limited.POST("/auth/refresh", a.refresh)
-	limited.POST("/auth/logout", a.logout)
+	if a.fieldAuthSlots != nil {
+		r.POST("/auth/refresh", a.refresh)
+		r.POST("/auth/logout", a.logout)
+	} else {
+		limited.POST("/auth/refresh", a.refresh)
+		limited.POST("/auth/logout", a.logout)
+	}
 	protected := limited.Group("/", a.authenticate(), limitInFlightPerClient(a.cfg.MaxInFlightPerClient, a.log))
+	if a.cfg.PriorityEnabled {
+		protected = r.Group("/", a.authenticate(), limitInFlightPerClient(a.cfg.MaxInFlightPerClient, a.log), reserveFieldCapacity(a.cfg.MaxInFlight, a.cfg.FieldReserved, a.log))
+	}
 	protected.GET("/hazards", a.listHazards)
 	protected.GET("/hazards/:id", a.getHazard)
 	protected.GET("/notices", a.listNotices)
 	protected.GET("/notices/:id", a.getNotice)
+	if a.cfg.AnalyticsEnabled {
+		protected.GET("/analytics/summary", a.analyticsSummary)
+	}
+	if a.cfg.SituationURL != "" {
+		ai := protected.Group("/situation", limitInFlight(2, a.log))
+		ai.GET("", a.situation)
+		ai.POST("/chat", a.situationChat)
+	}
+	if a.cfg.IngestionURL != "" {
+		protected.POST("/field-reports", a.submitFieldReport)
+		protected.GET("/field-reports/:receipt_id", a.fieldReportStatus)
+	}
 	return r
 }
 
@@ -121,6 +157,20 @@ func (a *api) logout(c *gin.Context) {
 }
 
 func (a *api) proxyAuth(c *gin.Context, path string, payload any) {
+	if request, ok := payload.(refreshRequest); ok && a.fieldAuthSlots != nil {
+		slots := a.authSlots
+		if platform.FieldPriorityToken(request.RefreshToken, "refresh", a.cfg.AuthPriorityKey, time.Now()) {
+			slots = a.fieldAuthSlots
+			c.Set("field_auth_lane", true)
+		}
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+		default:
+			rejectPriority(c, a.log, "authentication_capacity")
+			return
+		}
+	}
 	var response map[string]any
 	status, err := a.call(c, "auth-service", http.MethodPost, joinURL(a.cfg.AuthURL, path), payload, true, &response)
 	if err != nil || status >= 500 || status == 0 {
@@ -147,7 +197,29 @@ func (a *api) authenticate() gin.HandlerFunc {
 			return
 		}
 		var principal principal
-		status, err := a.call(c, "auth-service", http.MethodPost, joinURL(a.cfg.AuthURL, "/internal/introspect"), gin.H{"access_token": parts[1]}, true, &principal)
+		slots := a.authSlots
+		if a.fieldAuthSlots != nil && platform.FieldPriorityToken(parts[1], "access", a.cfg.AuthPriorityKey, time.Now()) {
+			slots = a.fieldAuthSlots
+			c.Set("field_auth_lane", true)
+		}
+		if slots != nil {
+			select {
+			case slots <- struct{}{}:
+			default:
+				rejectPriority(c, a.log, "authentication_capacity")
+				return
+			}
+		}
+		status, err := func() (int, error) {
+			if slots != nil {
+				defer func() { <-slots }()
+			}
+			return a.call(c, "auth-service", http.MethodPost, joinURL(a.cfg.AuthURL, "/internal/introspect"), gin.H{"access_token": parts[1]}, true, &principal)
+		}()
+		if status == http.StatusTooManyRequests {
+			rejectPriority(c, a.log, "authentication_upstream_capacity")
+			return
+		}
 		if err != nil || status >= 500 || status == 0 {
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "auth service unavailable")})
 			return
@@ -157,6 +229,7 @@ func (a *api) authenticate() gin.HandlerFunc {
 			return
 		}
 		c.Set("principal", principal)
+		c.Set("field_auth_lane", principal.Role == "field")
 		c.Next()
 	}
 }

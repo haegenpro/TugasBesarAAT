@@ -3,6 +3,7 @@ package main
 import (
 	"clientapi/internal/platform"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,12 +13,23 @@ import (
 )
 
 type config struct {
+	AnalyticsEnabled     bool
+	AnalyticsToken       string
 	Port                 string
 	AuthURL              string
 	AggregatorURL        string
 	AuthInternalKey      string
 	MaxInFlight          int
 	MaxInFlightPerClient int
+	PriorityEnabled      bool
+	FieldReserved        int
+	AuthMaxInFlight      int
+	AuthFieldReserved    int
+	AuthPriorityKey      string
+	FieldReadToken       string
+	IngestionURL         string
+	FieldReportToken     string
+	SituationURL         string
 }
 
 func loadConfig() (config, error) {
@@ -41,7 +53,79 @@ func loadConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
-	return config{Port: v["CLIENT_API_PORT"], AuthURL: v["AUTH_BASE_URL"], AggregatorURL: v["AGGREGATOR_BASE_URL"], AuthInternalKey: v["AUTH_INTERNAL_KEY"], MaxInFlight: maxInFlight, MaxInFlightPerClient: perClient}, nil
+	cfg := config{Port: v["CLIENT_API_PORT"], AuthURL: v["AUTH_BASE_URL"], AggregatorURL: v["AGGREGATOR_BASE_URL"], AuthInternalKey: v["AUTH_INTERNAL_KEY"], MaxInFlight: maxInFlight, MaxInFlightPerClient: perClient}
+	if key := os.Getenv("FIELD_READ_TOKEN"); key != "" {
+		if len(key) < 32 || key == cfg.AuthInternalKey {
+			return config{}, fmt.Errorf("distinct FIELD_READ_TOKEN of at least 32 bytes required")
+		}
+		cfg.FieldReadToken = key
+	}
+	if raw := os.Getenv("ANALYTICS_ENABLED"); raw != "" && raw != "true" && raw != "false" {
+		return config{}, fmt.Errorf("invalid ANALYTICS_ENABLED")
+	}
+	cfg.AnalyticsEnabled = os.Getenv("ANALYTICS_ENABLED") == "true"
+	cfg.AnalyticsToken = os.Getenv("ANALYTICS_SERVICE_TOKEN")
+	if cfg.AnalyticsEnabled && (cfg.AnalyticsToken == "" || cfg.AnalyticsToken == cfg.AuthInternalKey) {
+		return config{}, fmt.Errorf("dedicated ANALYTICS_SERVICE_TOKEN required")
+	}
+	if raw := os.Getenv("INGESTION_BASE_URL"); raw != "" {
+		settings, err := requiredEnv("INGESTION_BASE_URL", "FIELD_REPORT_SERVICE_TOKEN")
+		if err != nil {
+			return config{}, err
+		}
+		if err = envURL(settings, "INGESTION_BASE_URL", "http", "https"); err != nil {
+			return config{}, err
+		}
+		cfg.IngestionURL, cfg.FieldReportToken = settings["INGESTION_BASE_URL"], settings["FIELD_REPORT_SERVICE_TOKEN"]
+		if cfg.FieldReportToken == cfg.AuthInternalKey || cfg.FieldReportToken == cfg.AnalyticsToken {
+			return config{}, fmt.Errorf("dedicated FIELD_REPORT_SERVICE_TOKEN required")
+		}
+	}
+	if raw := os.Getenv("SITUATION_BASE_URL"); raw != "" {
+		if err = envURL(map[string]string{"SITUATION_BASE_URL": raw}, "SITUATION_BASE_URL", "http", "https"); err != nil {
+			return config{}, err
+		}
+		cfg.SituationURL = raw
+	}
+	if raw := os.Getenv("CLIENT_API_PRIORITY_ENABLED"); raw != "" && raw != "false" && raw != "true" {
+		return config{}, fmt.Errorf("CLIENT_API_PRIORITY_ENABLED must be true or false")
+	}
+	cfg.PriorityEnabled = os.Getenv("CLIENT_API_PRIORITY_ENABLED") == "true"
+	if cfg.PriorityEnabled {
+		settings, err := requiredEnv("CLIENT_API_FIELD_RESERVED", "CLIENT_API_AUTH_MAX_INFLIGHT")
+		if err != nil {
+			return config{}, err
+		}
+		if maxInFlight < 2 {
+			return config{}, fmt.Errorf("CLIENT_API_MAX_INFLIGHT must be >=2 with priority enabled")
+		}
+		cfg.FieldReserved, err = envInt(settings, "CLIENT_API_FIELD_RESERVED", 1, maxInFlight-1)
+		if err != nil {
+			return config{}, err
+		}
+		cfg.AuthMaxInFlight, err = envInt(settings, "CLIENT_API_AUTH_MAX_INFLIGHT", 1, 65536)
+		if err != nil {
+			return config{}, err
+		}
+		if key := os.Getenv("AUTH_PRIORITY_KEY"); key != "" {
+			if len(key) < 32 || key == cfg.AuthInternalKey {
+				return config{}, fmt.Errorf("distinct AUTH_PRIORITY_KEY of at least 32 bytes required")
+			}
+			cfg.AuthPriorityKey = key
+			cfg.AuthFieldReserved, err = envInt(map[string]string{"CLIENT_API_AUTH_FIELD_RESERVED": os.Getenv("CLIENT_API_AUTH_FIELD_RESERVED")}, "CLIENT_API_AUTH_FIELD_RESERVED", 1, cfg.AuthMaxInFlight-1)
+			if err != nil || cfg.AuthMaxInFlight < 2 {
+				return config{}, fmt.Errorf("valid CLIENT_API_AUTH_FIELD_RESERVED below authentication capacity required")
+			}
+		}
+	}
+	if cfg.FieldReadToken != "" {
+		for _, secret := range []string{cfg.AuthPriorityKey, cfg.AnalyticsToken, cfg.FieldReportToken} {
+			if secret != "" && secret == cfg.FieldReadToken {
+				return config{}, fmt.Errorf("FIELD_READ_TOKEN must be distinct from other service credentials")
+			}
+		}
+	}
+	return cfg, nil
 }
 
 func main() {
@@ -59,7 +143,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	a := &api{cfg: cfg, log: log, client: platform.Client(5 * time.Second)}
+	a := &api{cfg: cfg, log: log, client: platform.Client(5 * time.Second), chatClient: platform.Client(situationChatTimeout)}
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           platform.Handler("client-api", a.router()),
