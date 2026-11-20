@@ -9,7 +9,6 @@ import (
 	"os"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -43,47 +42,67 @@ func TestM4ConcurrentCorrectionsValidateCoordinatorAndUnits(t *testing.T) {
 			for i := range correction.Mutations {
 				correction.Mutations[i].Event.Attributes = map[string]any{"version": 2}
 			}
-			oldRead, writerDone := make(chan struct{}), make(chan struct{})
+			// Stage both worker writes first. The injected overlap tests commit
+			// exclusion, independent of how long the test host takes to stage SQL.
+			tx, err := s.beginMutation(ctx)
+			require.NoError(t, err)
+			defer tx.Rollback(ctx)
+			require.NoError(t, s.Canonical.Fence.Protect(ctx, tx, correction.Ownership, correction.Mutations))
+			for _, mutation := range correction.Mutations {
+				_, err := s.applyMutation(ctx, tx, correction.BatchID, mutation)
+				require.NoError(t, err)
+			}
+			oldRead := make(chan struct{})
 			writerError := make(chan error, 1)
 			var once sync.Once
-			var inventoryCalls atomic.Int64
+			waitForWriter := func(call context.Context) error {
+				once.Do(func() { close(oldRead) })
+				for {
+					var waiting bool
+					err := c.QueryRow(call, `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=0 AND objid=$1::bigint::oid AND NOT granted)`, visibilityKey).Scan(&waiting)
+					if waiting || err != nil {
+						return err
+					}
+					select {
+					case <-call.Done():
+						return call.Err()
+					case <-time.After(5 * time.Millisecond):
+					}
+				}
+			}
 			inventory := s.Reads.Inventory
 			s.Reads.testUnitReads = units
 			if units {
 				s.Reads.testUnitReadFault = func(call context.Context, phase string, group int) error {
 					if phase == "after_rows" && group == 1 {
-						once.Do(func() { close(oldRead) })
-					}
-					if phase == "before" && group == 2 {
-						select {
-						case <-writerDone:
-							return nil
-						case <-call.Done():
-							return call.Err()
-						}
+						return waitForWriter(call)
 					}
 					return nil
 				}
 			}
 			s.Reads.Inventory = func(call context.Context) (audit.Inventory, error) {
-				inventoryCalls.Add(1)
 				if !units {
-					once.Do(func() { close(oldRead) })
-					select {
-					case <-writerDone:
-					case <-call.Done():
-						return audit.Inventory{}, call.Err()
+					if err := waitForWriter(call); err != nil {
+						return audit.Inventory{}, err
 					}
 				}
 				return inventory(call)
 			}
-			go func() { <-oldRead; _, err := m2Retry(s, correction); writerError <- err; close(writerDone) }()
+			go func() { <-oldRead; writerError <- tx.Commit(ctx) }()
 			started := time.Now()
 			page, err := s.AuditEvents(ctx, audit.Query{Source: "BMKG", Limit: 100, Scope: "audit"})
-			require.NoError(t, <-writerError)
-			if err != nil {
-				page, err = s.AuditEvents(ctx, audit.Query{Source: "BMKG", Limit: 100, Scope: "audit"})
+			once.Do(func() { close(oldRead) })
+			commitErr := <-writerError
+			require.NoError(t, err)
+			require.False(t, page.Partial)
+			require.Len(t, page.Items, 2)
+			for _, event := range page.Items {
+				require.NotContains(t, event.Attributes, "version")
 			}
+			require.NoError(t, commitErr)
+			s.Reads.testUnitReadFault = nil
+			s.Reads.Inventory = inventory
+			page, err = s.AuditEvents(ctx, audit.Query{Source: "BMKG", Limit: 100, Scope: "audit"})
 			require.NoError(t, err)
 			require.False(t, page.Partial)
 			require.Len(t, page.Items, 2)
@@ -91,8 +110,7 @@ func TestM4ConcurrentCorrectionsValidateCoordinatorAndUnits(t *testing.T) {
 				value, _ := json.Marshal(event.Attributes)
 				require.JSONEq(t, `{"version":2}`, string(value))
 			}
-			require.GreaterOrEqual(t, inventoryCalls.Load(), int64(2))
-			t.Logf("unit_reads=%v inventory_attempts=%d elapsed_ms=%d", units, inventoryCalls.Load(), time.Since(started).Milliseconds())
+			t.Logf("unit_reads=%v elapsed_ms=%d", units, time.Since(started).Milliseconds())
 		})
 	}
 }

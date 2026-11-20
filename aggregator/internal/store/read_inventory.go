@@ -4,6 +4,7 @@ import (
 	"aggregator/internal/audit"
 	"aggregator/internal/canonical"
 	"aggregator/internal/pagecursor"
+	"aggregator/internal/platform"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -105,41 +106,42 @@ func (k *KubernetesInventory) request(ctx context.Context, client *http.Client, 
 		return fmt.Errorf("runtime metadata unavailable")
 	}
 	if out == nil {
-		return nil
+		// Patroni sends a small status body. Finish it so repeated authority
+		// checks can reuse the idle connection instead of redialing each time.
+		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, 16<<10))
+		return err
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 512<<10)).Decode(out)
 }
-func (k *KubernetesInventory) Authoritative(ctx context.Context) error {
-	status, err := readReplication(ctx, k.Store.Pool)
+func (k *KubernetesInventory) Authoritative(ctx context.Context, q readQuerier) (replicationStatus, error) {
+	ctx, span := platform.Start(ctx, "canonical read authority")
+	defer span.End()
+	status, err := readReplication(ctx, q)
 	if err != nil {
-		return canonical.Unavailable()
+		return status, canonical.Unavailable()
 	}
 	g := k.replication.cfg.Groups[0]
 	if !status.Primary || status.SystemID != g.SystemID || status.Formation != k.replication.cfg.Formation || status.GroupID != 0 {
-		return canonical.Unavailable()
+		return status, canonical.Unavailable()
 	}
 	for _, member := range g.Members {
 		if member.Name == status.Member {
-			return k.request(ctx, k.Patroni, "http://"+member.Host+":8008/primary", "", nil)
+			return status, k.request(ctx, k.Patroni, "http://"+member.Host+":8008/primary", "", nil)
 		}
 	}
-	return canonical.Unavailable()
+	return status, canonical.Unavailable()
 }
-func (k *KubernetesInventory) Discover(ctx context.Context) (audit.Inventory, error) {
-	out := audit.Inventory{Units: []audit.Unit{}}
-	topology, _, err := k.Store.primaryTopology(ctx)
-	if err != nil || k.replication.validateTopology(topology) != nil {
-		return out, canonical.Unavailable()
-	}
-	out.Topology = topology
+func (k *KubernetesInventory) podNodes(ctx context.Context) (map[string]string, error) {
+	ctx, span := platform.Start(ctx, "canonical pod placement")
+	defer span.End()
 	token, err := os.ReadFile(k.TokenFile)
 	if err != nil {
-		return out, canonical.Unavailable()
+		return nil, canonical.Unavailable()
 	}
 	var pods podList
 	endpoint := k.API + "/api/v1/namespaces/" + url.PathEscape(k.Namespace) + "/pods?limit=100&labelSelector=" + url.QueryEscape("platform.aat/formation="+k.replication.cfg.Formation+",component=storage-postgres")
 	if err = k.request(ctx, k.Kube, endpoint, strings.TrimSpace(string(token)), &pods); err != nil || pods.Metadata.Continue != "" {
-		return out, canonical.Unavailable()
+		return nil, canonical.Unavailable()
 	}
 	nodes := map[string]string{}
 	for _, p := range pods.Items {
@@ -147,56 +149,71 @@ func (k *KubernetesInventory) Discover(ctx context.Context) (audit.Inventory, er
 			nodes[p.Metadata.Name] = p.Spec.Node
 		}
 	}
-	var mu sync.Mutex
+	return nodes, nil
+}
+
+func (k *KubernetesInventory) Discover(ctx context.Context) (audit.Inventory, error) {
+	ctx, span := platform.Start(ctx, "canonical read inventory")
+	defer span.End()
+	out := audit.Inventory{Units: []audit.Unit{}}
 	var wg sync.WaitGroup
-	for _, group := range k.replication.cfg.Groups {
+	var nodes map[string]string
+	var nodesErr, topologyErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		nodes, nodesErr = k.podNodes(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		out.Topology, _, topologyErr = k.Store.primaryTopology(ctx)
+	}()
+	units := make([][]audit.Unit, len(k.replication.cfg.Groups))
+	statuses := make([]replicationStatus, len(units))
+	statusErrors := make([]error, len(units))
+	for i, group := range k.replication.cfg.Groups {
 		if group.ID == 0 && k.replication.cfg.Mode == "citus" {
 			continue
 		}
-		for _, member := range group.Members {
-			wg.Add(1)
-			go func(g ReplicationGroup, m ReplicationMember) {
-				defer wg.Done()
-				unit := audit.Unit{Name: m.Name, Node: nodes[m.Name], Host: m.Host, Group: g.ID}
-				var p struct {
-					Role  string `json:"role"`
-					State string `json:"state"`
-				}
-				err := k.request(ctx, k.Patroni, "http://"+m.Host+":8008/patroni", "", &p)
-				if err == nil && p.State == "running" && unit.Node != "" {
-					unit.Available = true
-					switch p.Role {
-					case "master", "primary":
-						unit.Primary = true
-						unit.RoleKnown = k.request(ctx, k.Patroni, "http://"+m.Host+":8008/primary", "", nil) == nil
-					case "replica", "sync_standby", "quorum_standby":
-						unit.RoleKnown = true
-					}
-					if !unit.RoleKnown {
-						unit.Available = false
-					}
-				}
-				mu.Lock()
-				out.Units = append(out.Units, unit)
-				mu.Unlock()
-			}(group, member)
-		}
-	}
-	wg.Wait()
-	// Match any claimed primary to the actual routed PostgreSQL backend and its
-	// immutable system identity. Multiple leaders or mismatched routing fail shut.
-	statuses := make([]replicationStatus, len(k.replication.cfg.Groups))
-	statusErrors := make([]error, len(statuses))
-	for i := range statuses {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
 			call, stop := context.WithTimeout(ctx, 450*time.Millisecond)
 			defer stop()
 			statuses[i], statusErrors[i] = readReplication(call, k.replication.pools[i])
-		}(i)
+		}()
+		units[i] = make([]audit.Unit, len(group.Members))
+		for j, member := range group.Members {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				unit := &units[i][j]
+				*unit = audit.Unit{Name: member.Name, Host: member.Host, Group: group.ID}
+				call, stop := context.WithTimeout(ctx, 400*time.Millisecond)
+				defer stop()
+				var p struct {
+					Role  string `json:"role"`
+					State string `json:"state"`
+				}
+				err := k.request(call, k.Patroni, "http://"+member.Host+":8008/patroni", "", &p)
+				if err == nil && p.State == "running" {
+					switch p.Role {
+					case "master", "primary":
+						unit.Primary = true
+						unit.RoleKnown = k.request(call, k.Patroni, "http://"+member.Host+":8008/primary", "", nil) == nil
+					case "replica", "sync_standby", "quorum_standby":
+						unit.RoleKnown = true
+					}
+				}
+			}()
+		}
 	}
 	wg.Wait()
+	if nodesErr != nil || topologyErr != nil || k.replication.validateTopology(out.Topology) != nil {
+		return out, canonical.Unavailable()
+	}
+	// Match any claimed primary to the actual routed PostgreSQL backend and its
+	// immutable system identity. Multiple leaders or mismatched routing fail shut.
 	for i, g := range k.replication.cfg.Groups {
 		if g.ID == 0 && k.replication.cfg.Mode == "citus" {
 			continue
@@ -207,17 +224,18 @@ func (k *KubernetesInventory) Discover(ctx context.Context) (audit.Inventory, er
 			primary = status.Member
 		}
 		count := 0
-		for _, u := range out.Units {
-			if u.Group == g.ID && u.Primary && u.RoleKnown && u.Available {
+		for _, u := range units[i] {
+			if u.Primary && u.RoleKnown {
 				count++
 			}
 		}
-		for j := range out.Units {
-			u := &out.Units[j]
-			if u.Group == g.ID && u.Primary && (u.Name != primary || count != 1) {
+		for _, u := range units[i] {
+			u.Node = nodes[u.Name]
+			if u.Primary && (u.Name != primary || count != 1) {
 				u.RoleKnown = false
-				u.Available = false
 			}
+			u.Available = u.RoleKnown && u.Node != ""
+			out.Units = append(out.Units, u)
 		}
 	}
 	return out, nil

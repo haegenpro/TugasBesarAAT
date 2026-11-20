@@ -15,11 +15,17 @@ ROOT=Path(__file__).resolve().parent.parent
 CITUS="citusdata/citus@sha256:d107b77c5d07ed435b72da9c57f6e96494912a52dc84c6a4113de8eb920e7261"
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument("--citus",action="store_true");a=parser.parse_args()
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--citus",action="store_true")
+    parser.add_argument("--native",action="store_true",help="run Go on the controller via the published loopback ports")
+    a=parser.parse_args()
     os.umask(0o077);run=uuid.uuid4().hex[:12];prefix="aat-platform-check-"+run
     output=ROOT/"evidence/platform-integration"/run;output.mkdir(parents=True)
     report={"run_id":run,"started_at":datetime.now(timezone.utc).isoformat(),"passed":False,"scope":"isolated single-copy protocol regression, not four-node replication/failover acceptance"}
-    password=secrets.token_hex(18);env={**os.environ,"POSTGRES_PASSWORD":password};created=[];network=False
+    password=secrets.token_hex(18)
+    env={name:value for name,value in os.environ.items()
+         if not name.startswith(("M2_","M3_","M4_","TEST_DATABASE_")) and name!="DATABASE_URL"}
+    env["POSTGRES_PASSWORD"]=password;created=[];network=False
     def docker(*args,check=True):return subprocess.run(["docker",*map(str,args)],env=env,capture_output=True,text=True,check=check,timeout=180)
     def owned(name):return docker("inspect","--format",'{{ index .Config.Labels "aat.platform.check" }}',name,check=False).stdout.strip()==run
     try:
@@ -33,16 +39,21 @@ def main():
                 if time.monotonic()>deadline:raise RuntimeError("temporary database startup deadline")
                 time.sleep(.2)
             port=docker("port",name,"5432/tcp").stdout.strip();urls[alias]="postgres://postgres:"+password+"@"+port+"/postgres?sslmode=disable"
-        runner=prefix+"-go"
-        docker("run","-d","--name",runner,"--label","aat.platform.check="+run,"--network","host","--memory","2g","--cpus","3","--mount","type=bind,src="+str(ROOT)+",dst=/src,readonly","-v","r3-go-mod:/go/pkg/mod","-v","r3-go-build:/root/.cache/go-build","golang:1.27.1-alpine3.24","tail","-f","/dev/null");created.append(runner)
-        args=["docker","exec","-e","M2_DATABASE_URL="+urls["coord"]]
+        test_env={"M2_DATABASE_URL":urls["coord"]}
         for index in (1,2):
-            if "worker"+str(index)in urls:args += ["-e","M2_WORKER"+str(index)+"_URL="+urls["worker"+str(index)]]
-        pattern="TestMultiEntity|TestObservedPractice|TestReplication|TestM6Normalized"
-        if a.citus:pattern += "|TestM2LostCommitReply"
-        args += ["-w","/src/aggregator",runner,"go","test","-mod=readonly","-count=1","-timeout=180s","-json","./internal/store","./internal/satellite","./internal/wildfireprocessor","-run",pattern]
+            if "worker"+str(index)in urls:test_env["M2_WORKER"+str(index)+"_URL"]=urls["worker"+str(index)]
+        args=[]
+        if not a.native:
+            runner=prefix+"-go"
+            docker("run","-d","--name",runner,"--label","aat.platform.check="+run,"--network","host","--memory","2g","--cpus","3","--mount","type=bind,src="+str(ROOT)+",dst=/src,readonly","-v","r3-go-mod:/go/pkg/mod","-v","r3-go-build:/root/.cache/go-build","golang:1.27.1-alpine3.24","tail","-f","/dev/null");created.append(runner)
+            args=["docker","exec"]
+            for name in test_env:args += ["-e",name]
+            args += ["-w","/src/aggregator",runner]
+        pattern="TestMultiEntity|TestObservedPractice|TestReplication|TestM6Normalized|TestM2RecoveryAndPublicationFence|TestM2OwnerAndAdmission"
+        if a.citus:pattern += "|TestM2LostCommitReply|TestM2Visibility|TestM4"
+        args += ["go","test","-mod=readonly","-count=1","-timeout=180s","-json","./internal/store","./internal/satellite","./internal/wildfireprocessor","-run",pattern]
         with(output/"tests.log").open("w")as log:
-            process=subprocess.run(args,env=env,capture_output=True,text=True,timeout=600)
+            process=subprocess.run(args,env={**env,**test_env},cwd=ROOT/"aggregator",capture_output=True,text=True,timeout=600)
             log.write((process.stdout+process.stderr).replace(password,"[redacted]"))
         counts={"pass":0,"fail":0,"skip":0}
         for line in process.stdout.splitlines():

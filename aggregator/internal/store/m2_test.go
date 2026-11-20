@@ -446,6 +446,8 @@ func TestM2Visibility(t *testing.T) {
 	attempts := 0
 	var pair []string
 	start := time.Now()
+	correction := makeCorrection(4, 3, domain.SeveritySiaga)
+	writerDone := make(chan error, 1)
 	e = s.validatedRead(ctx, func(ctx context.Context) error {
 		attempts++
 		x, err := readOne(ctx, a.Mutations[0].SourceRefID)
@@ -453,17 +455,41 @@ func TestM2Visibility(t *testing.T) {
 			return err
 		}
 		if attempts == 1 {
-			m2Apply(t, s, makeCorrection(4, 3, domain.SeveritySiaga))
+			go func() { _, err := m2Retry(s, correction); writerDone <- err }()
+			m2Eventually(t, time.Second, func() bool {
+				var waiting bool
+				return c.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND classid=0 AND objid=$1::bigint::oid AND NOT granted)`, visibilityKey).Scan(&waiting) == nil && waiting
+			})
 		}
 		y, err := readOne(ctx, b.Mutations[0].SourceRefID)
 		pair = []string{x, y}
 		return err
 	})
 	require.NoError(t, e)
-	require.GreaterOrEqual(t, attempts, 2)
-	require.Equal(t, []string{"SIAGA", "SIAGA"}, pair)
-	// A live pending attempt blocks reads; it cannot be aged out or published.
+	require.Equal(t, 1, attempts)
+	require.Equal(t, []string{"WASPADA", "WASPADA"}, pair)
+	require.NoError(t, <-writerDone)
+	legacyReads := 0
+	require.NoError(t, s.validatedRead(ctx, func(call context.Context) error {
+		legacyReads++
+		if legacyReads == 1 {
+			// Old replicas use the generation barrier without the new lock.
+			_, err := c.Exec(call, "UPDATE canonical_visibility SET generation=generation+1 WHERE singleton")
+			return err
+		}
+		return nil
+	}))
+	require.Equal(t, 2, legacyReads)
+	// Staged writes may coexist with reads. Once registered, an uncertain
+	// attempt blocks reads even after the session-level gate is lost.
 	tx, e := s.beginMutation(ctx)
+	require.NoError(t, e)
+	defer tx.Rollback(ctx)
+	_, _, e = s.GetByIDWithMetadata(ctx, ra.Items[0].HazardID)
+	require.NoError(t, e)
+	tracked := tx.(*mutationTx)
+	require.NoError(t, tracked.prepareCommit(ctx))
+	_, e = c.Exec(ctx, "SELECT pg_terminate_backend($1::integer)", int32(tracked.admission.Conn().PgConn().PID()))
 	require.NoError(t, e)
 	startBlocked := time.Now()
 	_, _, e = s.GetByIDWithMetadata(ctx, ra.Items[0].HazardID)
@@ -548,6 +574,7 @@ func TestM2Visibility(t *testing.T) {
 	for err := range failures {
 		require.NoError(t, err)
 	}
+	require.Greater(t, reads, unavailable, "readers must make progress while writers remain active")
 	evidence := map[string]any{"unprotected_pair": []string{before, after}, "validated_pair": pair, "validated_attempts": attempts, "elapsed_ms": time.Since(start).Milliseconds(), "owners": []string{owner(a.Mutations[0].SourceRefID), owner(b.Mutations[0].SourceRefID)}, "read_deadline_ms": 2000, "production_gate": "not automatically enabled", "concurrent_reads": reads, "concurrent_retries": retries, "unavailable_reads": unavailable, "max_read_latency_ms": maxLatency.Milliseconds()}
 	if dir := os.Getenv("M2_EVIDENCE_DIR"); dir != "" {
 		raw, _ := json.MarshalIndent(evidence, "", "  ")

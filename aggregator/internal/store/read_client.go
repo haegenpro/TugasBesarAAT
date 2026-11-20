@@ -9,7 +9,7 @@ import (
 
 func (s *Store) CheckReadControl(ctx context.Context) error {
 	if s.Reads.Authority != nil {
-		if err := s.Reads.Authority(ctx); err != nil {
+		if _, err := s.Reads.Authority(ctx, s.Pool); err != nil {
 			return err
 		}
 	}

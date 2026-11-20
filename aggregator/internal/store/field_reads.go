@@ -46,6 +46,12 @@ func (s *Store) NewFieldReadView(ctx context.Context) (*Store, func(), error) {
 			observer.pools = append(observer.pools, p)
 		}
 		view.Canonical.Durability = observer
+		if observer.cfg.Mode == "citus" {
+			// Live Field reads fan out only to worker observers. Use the
+			// reserved coordinator observer for the visibility lock so Field
+			// requests do not wait behind the general read/admission pool.
+			view.readGuard = observer.pools[0]
+		}
 		if s.Reads.Inventory != nil {
 			if err := view.ConfigureLiveReads(s.Reads.Signer.Key); err != nil {
 				closeView()

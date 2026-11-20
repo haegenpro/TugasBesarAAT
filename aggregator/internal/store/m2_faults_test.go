@@ -139,6 +139,7 @@ func TestM2InterruptedDistributedCommit(t *testing.T) {
 	fp, _ := canonical.Fingerprint(b.Mutations)
 	_, e = tx.Exec(ctx, "INSERT INTO canonical_batches VALUES($1,$2,$3)", b.BatchID, fp, raw)
 	require.NoError(t, e)
+	require.NoError(t, tx.(*mutationTx).prepareCommit(ctx))
 	paused := owner(other.Mutations[0].SourceRefID)
 	m2Fault(t, "pause", paused)
 	stillPaused := true
@@ -189,6 +190,7 @@ func TestM2RecoveryAndPublicationFence(t *testing.T) {
 	tx, e := s.beginMutation(ctx)
 	require.NoError(t, e)
 	tracked := tx.(*mutationTx)
+	require.NoError(t, tracked.prepareCommit(ctx))
 	id := tracked.id
 	// Losing the admission session does not allow recovery to overtake the data
 	// transaction's protected attempt row lock.
@@ -216,6 +218,7 @@ func TestM2RecoveryAndPublicationFence(t *testing.T) {
 	batch := m2Batch("publish-pending", 1, 0)
 	_, e = s.applyMutation(ctx, tx, batch.BatchID, batch.Mutations[0])
 	require.NoError(t, e)
+	require.NoError(t, tracked.prepareCommit(ctx))
 	_, e = tracked.Tx.Exec(ctx, "INSERT INTO canonical_attempt_commits VALUES($1)", tracked.id)
 	require.NoError(t, e)
 	require.NoError(t, tracked.Tx.Commit(ctx))

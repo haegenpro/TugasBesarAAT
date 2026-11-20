@@ -5,6 +5,7 @@ import (
 	"aggregator/internal/canonical"
 	"aggregator/internal/domain"
 	"aggregator/internal/pagecursor"
+	"aggregator/internal/platform"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -29,7 +30,7 @@ type ReadOptions struct {
 	// Only storage-owned primary pools. Tests may inject lab primary pools;
 	// deployment derives these from the captured formation, never HTTP input.
 	Groups    map[int]*pgxpool.Pool
-	Authority func(context.Context) error
+	Authority func(context.Context, readQuerier) (replicationStatus, error)
 }
 type readShard struct {
 	ID    int64
@@ -130,9 +131,17 @@ func (q readSpec) order() string {
 	}
 	return " ORDER BY occurred_at DESC,hazard_id DESC"
 }
-func fetchRows(ctx context.Context, pool *pgxpool.Pool, table string, q readSpec) ([]domain.HazardEvent, map[string]domain.RecordMetadata, error) {
+func fetchRows(ctx context.Context, pool *pgxpool.Pool, tables []string, q readSpec) ([]domain.HazardEvent, map[string]domain.RecordMetadata, error) {
 	where, args := q.where()
-	sql := `SELECT ` + selectColumnsWithMetadata + ` FROM ` + table + where + q.order()
+	parts := make([]string, 0, len(tables))
+	for _, table := range tables {
+		parts = append(parts, `SELECT `+selectColumnsWithMetadata+` FROM `+table+where)
+	}
+	sql := parts[0]
+	if len(parts) > 1 {
+		sql = `SELECT * FROM (` + strings.Join(parts, " UNION ALL ") + `) logical_rows`
+	}
+	sql += q.order()
 	if q.Limit > 0 {
 		args = append(args, q.Limit)
 		sql += " LIMIT $" + strconv.Itoa(len(args))
@@ -178,29 +187,34 @@ func (s *Store) readInventory(ctx context.Context) (audit.Inventory, error) {
 	return s.Reads.Inventory(ctx)
 }
 func (s *Store) readDistributed(ctx context.Context, q readSpec) (readResult, error) {
+	ctx, span := platform.Start(ctx, "canonical distributed rows")
+	defer span.End()
 	out := readResult{Events: []domain.HazardEvent{}, Metadata: map[string]domain.RecordMetadata{}, Unavailable: []string{}}
 	shards, topology, err := s.readCatalog(ctx)
 	if err != nil {
 		return out, canonical.Unavailable()
 	}
 	out.Shards = shards
+	var wg sync.WaitGroup
+	var events []domain.HazardEvent
+	var metadata map[string]domain.RecordMetadata
+	var normalErr error = canonical.Unavailable()
+	if !s.Reads.testUnitReads {
+		wg.Go(func() {
+			routed, span := platform.Start(ctx, "canonical routed read")
+			defer span.End()
+			normal, stop := context.WithTimeout(routed, 350*time.Millisecond)
+			defer stop()
+			events, metadata, normalErr = fetchRows(normal, s.Pool, []string{"hazard_events"}, q)
+		})
+	}
 	inventory, err := s.readInventory(ctx)
+	wg.Wait()
 	if err != nil {
 		return out, canonical.Unavailable()
 	}
 	out.Inventory = inventory
 	out.Unavailable = inventory.Unavailable()
-	// Leave time for physical fallback and both authoritative control reads.
-	normal, stop := context.WithTimeout(ctx, 350*time.Millisecond)
-	var events []domain.HazardEvent
-	var metadata map[string]domain.RecordMetadata
-	normalErr := error(nil)
-	if s.Reads.testUnitReads {
-		normalErr = canonical.Unavailable()
-	} else {
-		events, metadata, normalErr = fetchRows(normal, s.Pool, "hazard_events", q)
-	}
-	stop()
 	if normalErr == nil {
 		for _, shard := range shards {
 			if _, ok := inventory.Primary(shard.Group); !ok {
@@ -212,27 +226,25 @@ func (s *Store) readDistributed(ctx context.Context, q readSpec) (readResult, er
 	if normalErr == nil {
 		out.Events, out.Metadata = events, metadata
 	} else {
+		fallback, span := platform.Start(ctx, "canonical physical fallback")
 		var mu sync.Mutex
-		var wg sync.WaitGroup
-		for _, shard := range shards {
-			wg.Add(1)
-			go func(shard readShard) {
-				defer wg.Done()
-				unit, ok := inventory.Primary(shard.Group)
-				pool := s.Reads.Groups[shard.Group]
+		for group, tables := range physicalGroups(shards) {
+			wg.Go(func() {
+				unit, ok := inventory.Primary(group)
+				pool := s.Reads.Groups[group]
 				var events []domain.HazardEvent
 				var metadata map[string]domain.RecordMetadata
 				var err error
 				if !ok || pool == nil {
 					err = canonical.Unavailable()
 				} else {
-					call, stop := context.WithTimeout(ctx, 500*time.Millisecond)
+					call, stop := context.WithTimeout(fallback, 500*time.Millisecond)
 					defer stop()
 					if hook := s.Reads.testUnitReadFault; hook != nil {
-						err = hook(call, "before", shard.Group)
+						err = hook(call, "before", group)
 					}
 					if err == nil {
-						events, metadata, err = fetchRows(call, pool, physicalTable(shard.Table), q)
+						events, metadata, err = fetchRows(call, pool, tables, q)
 					}
 					if err == nil {
 						if hook := s.Reads.testUnitReadFault; hook != nil {
@@ -240,7 +252,7 @@ func (s *Store) readDistributed(ctx context.Context, q readSpec) (readResult, er
 							if len(events) > 0 {
 								phase = "after_rows"
 							}
-							err = hook(call, phase, shard.Group)
+							err = hook(call, phase, group)
 						}
 					}
 				}
@@ -257,9 +269,10 @@ func (s *Store) readDistributed(ctx context.Context, q readSpec) (readResult, er
 				for k, v := range metadata {
 					out.Metadata[k] = v
 				}
-			}(shard)
+			})
 		}
 		wg.Wait()
+		span.End()
 		// No trustworthy missing-unit bound is maintained in M4. Emitting a later
 		// available row would skip unseen earlier rows. The safe prefix is empty.
 		if out.Missing && q.ID == "" {
@@ -298,6 +311,14 @@ func (s *Store) readDistributed(ctx context.Context, q readSpec) (readResult, er
 		return readResult{}, canonical.Unavailable()
 	}
 	return out, nil
+}
+
+func physicalGroups(shards []readShard) map[int][]string {
+	groups := map[int][]string{}
+	for _, shard := range shards {
+		groups[shard.Group] = append(groups[shard.Group], physicalTable(shard.Table))
+	}
+	return groups
 }
 
 func (s *Store) AuditEvents(ctx context.Context, q audit.Query) (audit.Page, error) {
@@ -374,18 +395,17 @@ func (s *Store) AuditChecksum(ctx context.Context, source string) (audit.Checksu
 		out.Source = &source
 	}
 	err := s.validatedRead(ctx, func(ctx context.Context) error {
+		ctx, span := platform.Start(ctx, "canonical live checksum")
+		defer span.End()
 		shards, topology, err := s.readCatalog(ctx)
 		if err != nil {
 			return err
 		}
 		inventory, err := s.readInventory(ctx)
-		if err != nil {
-			return err
+		if err != nil || (inventory.Topology != "" && inventory.Topology != topology) {
+			return canonical.Unavailable()
 		}
-		groups := map[int][]string{}
-		for _, shard := range shards {
-			groups[shard.Group] = append(groups[shard.Group], physicalTable(shard.Table))
-		}
+		groups := physicalGroups(shards)
 		out.Count = 0
 		out.Partial = false
 		out.Unavailable = inventory.Unavailable()
@@ -395,6 +415,12 @@ func (s *Store) AuditChecksum(ctx context.Context, source string) (audit.Checksu
 				r.rows.Close()
 			}
 		}()
+		type checksumStream struct {
+			rows *referenceRows
+			unit string
+		}
+		streams := make(chan checksumStream, len(groups))
+		started := 0
 		for group, tables := range groups {
 			unit, available := inventory.Primary(group)
 			pool := s.Reads.Groups[group]
@@ -402,30 +428,42 @@ func (s *Store) AuditChecksum(ctx context.Context, source string) (audit.Checksu
 				out.Partial = true
 				continue
 			}
-			parts := []string{}
-			for _, table := range tables {
-				parts = append(parts, `SELECT source_ref_id,source,hazard_id FROM `+table+` WHERE active AND ($1='' OR source=$1)`)
-			}
-			query := `SELECT source_ref_id,source,hazard_id FROM (` + strings.Join(parts, " UNION ALL ") + `) logical_rows ORDER BY source_ref_id COLLATE "C",source COLLATE "C",hazard_id`
-			probe, stop := context.WithTimeout(ctx, 450*time.Millisecond)
-			probeErr := pool.Ping(probe)
-			stop()
-			if probeErr != nil {
-				out.Unavailable = append(out.Unavailable, unit.Name)
+			started++
+			go func() {
+				probe, stop := context.WithTimeout(ctx, 450*time.Millisecond)
+				probeErr := pool.Ping(probe)
+				stop()
+				if probeErr != nil {
+					streams <- checksumStream{unit: unit.Name}
+					return
+				}
+				parts := make([]string, 0, len(tables))
+				for _, table := range tables {
+					parts = append(parts, `SELECT source_ref_id,source,hazard_id FROM `+table+` WHERE active AND ($1='' OR source=$1)`)
+				}
+				query := `SELECT source_ref_id,source,hazard_id FROM (` + strings.Join(parts, " UNION ALL ") + `) logical_rows ORDER BY source_ref_id COLLATE "C",source COLLATE "C",hazard_id`
+				rows, err := pool.Query(ctx, query, source)
+				if err != nil {
+					streams <- checksumStream{unit: unit.Name}
+					return
+				}
+				r := &referenceRows{rows: rows, group: group}
+				if err = r.next(); err != nil {
+					rows.Close()
+					streams <- checksumStream{unit: unit.Name}
+					return
+				}
+				streams <- checksumStream{rows: r}
+			}()
+		}
+		for range started {
+			stream := <-streams
+			if stream.rows == nil {
+				out.Unavailable = append(out.Unavailable, stream.unit)
 				out.Partial = true
 				continue
 			}
-			rows, err := pool.Query(ctx, query, source)
-			if err != nil {
-				out.Unavailable = append(out.Unavailable, unit.Name)
-				out.Partial = true
-				continue
-			}
-			r := &referenceRows{rows: rows, group: group}
-			cursors = append(cursors, r)
-			if err = r.next(); err != nil {
-				return canonical.Unavailable()
-			}
+			cursors = append(cursors, stream.rows)
 		}
 		hash := sha256.New()
 		for {

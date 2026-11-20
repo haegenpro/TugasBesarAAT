@@ -27,6 +27,7 @@ type Store struct {
 	Pool                   *pgxpool.Pool
 	logger                 *slog.Logger
 	control                *pgxpool.Pool
+	readGuard              *pgxpool.Pool // Optional dedicated coordinator pool for the Field lane.
 	Canonical              CanonicalOptions
 	Inputs                 InputOptions
 	Reads                  ReadOptions

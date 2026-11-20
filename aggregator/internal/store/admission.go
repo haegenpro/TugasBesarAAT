@@ -2,6 +2,8 @@ package store
 
 import (
 	"aggregator/internal/canonical"
+	"aggregator/internal/middleware"
+	"aggregator/internal/platform"
 	"context"
 	"fmt"
 	"github.com/google/uuid"
@@ -13,14 +15,20 @@ import (
 // Experimental shared admission key, matching the M1 snapshot adapter. This is
 // not the Role 2 production lease/expiry contract.
 const AdmissionKey int64 = 4810301
+
+// Live readers share this lock. Publishers hold it from registration through
+// the durable decision so worker commits cannot fracture a read.
+const visibilityKey int64 = 4810302
 const attemptLockSalt int64 = 726103
 
 type mutationTx struct {
 	pgx.Tx
-	s         *Store
-	admission *pgxpool.Conn
-	id        string
-	closed    bool
+	s          *Store
+	admission  *pgxpool.Conn
+	id         string
+	topology   string
+	registered bool
+	closed     bool
 }
 
 func attemptID(tx pgx.Tx) any {
@@ -40,46 +48,24 @@ func (s *Store) beginMutation(ctx context.Context) (pgx.Tx, error) {
 		release()
 		return nil, err
 	}
-	topology, _, err := s.primaryTopology(ctx)
+	var auditClosed bool
+	if err = admission.QueryRow(ctx, "SELECT coalesce(expires_at>clock_timestamp(),false) FROM platform_audit_gate WHERE singleton").Scan(&auditClosed); err != nil || auditClosed {
+		release()
+		return nil, canonical.Unavailable()
+	}
+	topology, _, err := readPrimaryTopology(ctx, admission)
 	if err != nil {
 		release()
 		return nil, err
 	}
-	reg, err := admission.Begin(ctx)
+	// Registration commits on the control connection after this transaction
+	// stages its work. The later row fence must see that committed registration.
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		release()
 		return nil, err
 	}
-	if err = checkAuditAdmission(ctx, reg); err != nil {
-		_ = reg.Rollback(context.Background())
-		release()
-		return nil, err
-	}
-	if s.Canonical.Durability != nil {
-		if err = s.Canonical.Durability.Prepare(ctx, reg); err != nil {
-			_ = reg.Rollback(context.Background())
-			release()
-			return nil, err
-		}
-	}
-	if _, err = reg.Exec(ctx, "INSERT INTO canonical_attempts(attempt_id,state,topology) VALUES($1,'pending',$2)", id, topology); err == nil {
-		_, err = reg.Exec(ctx, "UPDATE canonical_visibility SET generation=generation+1 WHERE singleton")
-	}
-	if err != nil {
-		reg.Rollback(context.Background())
-		release()
-		return nil, err
-	}
-	if err = reg.Commit(ctx); err != nil {
-		release()
-		return nil, err
-	}
-	tx, err := s.Pool.Begin(ctx)
-	if err != nil {
-		release()
-		return nil, err
-	}
-	t := &mutationTx{Tx: tx, s: s, admission: admission, id: id}
+	t := &mutationTx{Tx: tx, s: s, admission: admission, id: id, topology: topology}
 	if s.Canonical.Durability != nil {
 		if err = s.Canonical.Durability.Prepare(ctx, tx); err != nil {
 			_ = t.Rollback(context.Background())
@@ -97,17 +83,6 @@ func (s *Store) beginMutation(ctx context.Context) (pgx.Tx, error) {
 		_ = t.Rollback(context.Background())
 		return nil, err
 	}
-	var state string
-	// Recovery takes FOR UPDATE; it cannot finalize an attempt while a protected
-	// transaction holds this lock, nor can a finalized attempt start new work.
-	err = tx.QueryRow(ctx, "SELECT state FROM canonical_attempts WHERE attempt_id=$1 FOR SHARE", id).Scan(&state)
-	if err != nil || state != "pending" {
-		t.Rollback(context.Background())
-		if err != nil {
-			return nil, err
-		}
-		return nil, canonical.Unavailable()
-	}
 	return t, nil
 }
 func releaseAdmission(c *pgxpool.Conn) {
@@ -119,26 +94,71 @@ func releaseAdmission(c *pgxpool.Conn) {
 	}
 	c.Release()
 }
+
+// Stage changes in the data transaction before publishing the attempt. Every
+// path to a data COMMIT must durably register first, while the admission session
+// excludes live reads. Mixed-version writers remain covered by the persisted
+// pending state and generation checks on both sides of a read.
+func (t *mutationTx) prepareCommit(ctx context.Context) error {
+	if t.registered {
+		return nil
+	}
+	if _, err := t.admission.Exec(ctx, "SELECT pg_advisory_lock($1)", visibilityKey); err != nil {
+		return canonical.Unavailable()
+	}
+	reg, err := t.admission.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer reg.Rollback(ctx)
+	if err = checkAuditAdmission(ctx, reg); err != nil {
+		return err
+	}
+	if t.s.Canonical.Durability != nil {
+		if err = t.s.Canonical.Durability.Prepare(ctx, reg); err != nil {
+			return err
+		}
+	}
+	if _, err = reg.Exec(ctx, "INSERT INTO canonical_attempts(attempt_id,state,topology) VALUES($1,'pending',$2)", t.id, t.topology); err != nil {
+		return err
+	}
+	if _, err = reg.Exec(ctx, "UPDATE canonical_visibility SET generation=generation+1 WHERE singleton"); err != nil {
+		return err
+	}
+	if err = reg.Commit(ctx); err != nil {
+		return err
+	}
+	// Recovery takes FOR UPDATE. It cannot finalize this attempt while the
+	// transaction can still commit, even if its admission connection drops.
+	var state string
+	if err = t.Tx.QueryRow(ctx, "SELECT state FROM canonical_attempts WHERE attempt_id=$1 FOR SHARE", t.id).Scan(&state); err != nil {
+		return err
+	}
+	if state != "pending" {
+		return canonical.Unavailable()
+	}
+	t.registered = true
+	return nil
+}
+
 func (t *mutationTx) Commit(ctx context.Context) error {
 	if t.closed {
 		return pgx.ErrTxClosed
 	}
 	t.closed = true
 	defer releaseAdmission(t.admission)
-	// A long-running or resumed mutation must not commit after its separate
-	// admission session has expired. This refreshes only this live caller's
-	// session; it cannot keep a frozen process alive through another worker.
-	if _, err := t.admission.Exec(ctx, "SELECT 1"); err != nil {
-		cleanup, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = t.Tx.Rollback(cleanup)
-		// Leave the pending attempt for normal fenced decision recovery. A lost
-		// connection or timeout must not be turned into an assumed abort/success.
-		return canonical.Unavailable()
+	defer t.Tx.Rollback(ctx)
+	if err := t.prepareCommit(ctx); err != nil {
+		return err
 	}
 	if _, err := t.Tx.Exec(ctx, "INSERT INTO canonical_attempt_commits(attempt_id) VALUES($1)", t.id); err != nil {
-		t.Tx.Rollback(context.Background())
 		return err
+	}
+	// Recheck the admission session after staging and registration. A frozen
+	// caller cannot commit after losing that session. Recovery decides any
+	// pending outcome using the row fence and distributed decision evidence.
+	if _, err := t.admission.Exec(ctx, "SELECT 1"); err != nil {
+		return canonical.Unavailable()
 	}
 	err := t.Tx.Commit(ctx)
 	if err != nil {
@@ -161,7 +181,10 @@ func (t *mutationTx) Rollback(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return t.s.resolveAttempt(cleanup, t.id)
+	if t.registered {
+		return t.s.resolveAttempt(cleanup, t.id)
+	}
+	return nil
 }
 
 // distributedSettled is intentionally conservative: any prepared decision on
@@ -170,9 +193,11 @@ func (s *Store) primaryTopology(ctx context.Context) (string, int, error) {
 	return readPrimaryTopology(ctx, s.Pool)
 }
 
-func readPrimaryTopology(ctx context.Context, q interface {
+type readQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
-}) (string, int, error) {
+}
+
+func readPrimaryTopology(ctx context.Context, q readQuerier) (string, int, error) {
 	var citus bool
 	if err := q.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname='citus')").Scan(&citus); err != nil {
 		return "", 0, err
@@ -324,38 +349,82 @@ func (s *Store) RecoverAttempts(ctx context.Context) error {
 }
 func (s *Store) visibility(ctx context.Context) (int64, bool, error) {
 	if s.Reads.Authority != nil {
-		if err := s.Reads.Authority(ctx); err != nil {
+		if _, err := s.Reads.Authority(ctx, s.Pool); err != nil {
 			return 0, false, err
 		}
 	}
+	return readVisibility(ctx, s.Pool)
+}
+
+func readVisibility(ctx context.Context, q readQuerier) (int64, bool, error) {
 	var g int64
 	var pending bool
 	var primary bool
-	err := s.Pool.QueryRow(ctx, "SELECT generation,EXISTS(SELECT 1 FROM canonical_attempts WHERE state='pending'),NOT pg_is_in_recovery() FROM canonical_visibility WHERE singleton").Scan(&g, &pending, &primary)
+	err := q.QueryRow(ctx, "SELECT generation,EXISTS(SELECT 1 FROM canonical_attempts WHERE state='pending'),NOT pg_is_in_recovery() FROM canonical_visibility WHERE singleton").Scan(&g, &pending, &primary)
 	if err == nil && !primary {
 		err = canonical.Unavailable()
 	}
 	return g, pending, err
 }
-func (s *Store) validatedRead(ctx context.Context, read func(context.Context) error) error {
-	ctx, cancel := context.WithTimeout(ctx, canonical.Deadline)
-	defer cancel()
-	for {
-		before, pending, err := s.visibility(ctx)
+
+// Use separate READ COMMITTED statements on the same coordinator session.
+// The shared lock prevents new commits during the read. The durable checks also
+// cover uncertain outcomes and writers from before the lock was introduced.
+func (s *Store) readAtStableCut(ctx context.Context, read func(context.Context) error) (bool, error) {
+	pool := s.control
+	if s.readGuard != nil {
+		pool = s.readGuard
+	}
+	guard, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return false, canonical.Unavailable()
+	}
+	defer guard.Rollback(ctx)
+	if _, err = guard.Exec(ctx, "SELECT pg_advisory_xact_lock_shared($1)", visibilityKey); err != nil {
+		return false, canonical.Unavailable()
+	}
+	before, pending, err := readVisibility(ctx, guard)
+	if err != nil || pending {
+		return pending && err == nil, canonical.Unavailable()
+	}
+	var anchor replicationStatus
+	if s.Reads.Authority != nil {
+		anchor, err = s.Reads.Authority(ctx, guard)
 		if err != nil {
-			return canonical.Unavailable()
+			return false, canonical.Unavailable()
 		}
-		if !pending {
-			resultErr := read(ctx)
-			after, pending, e := s.visibility(ctx)
-			if e != nil {
-				return canonical.Unavailable()
-			}
-			if !pending && before == after {
-				return resultErr
-			}
+	}
+	resultErr := read(ctx)
+	after, pending, err := readVisibility(ctx, guard)
+	if err != nil {
+		return false, canonical.Unavailable()
+	}
+	if pending || before != after {
+		return true, canonical.Unavailable()
+	}
+	if s.Reads.Authority != nil {
+		current, err := s.Reads.Authority(ctx, guard)
+		if err != nil || !samePrimary(anchor, current) {
+			return false, canonical.Unavailable()
 		}
-		timer := time.NewTimer(5 * time.Millisecond)
+	}
+	if err = guard.Rollback(ctx); err != nil || ctx.Err() != nil {
+		return false, canonical.Unavailable()
+	}
+	return false, resultErr
+}
+
+func (s *Store) validatedRead(ctx context.Context, read func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(middleware.EnsureCorrelationID(ctx), canonical.Deadline)
+	defer cancel()
+	ctx, span := platform.Start(ctx, "canonical live read")
+	defer span.End()
+	for {
+		retry, err := s.readAtStableCut(ctx, read)
+		if !retry {
+			return err
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
