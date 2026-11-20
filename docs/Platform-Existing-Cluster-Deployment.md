@@ -399,3 +399,98 @@ A reviewed Client API NodePort/NetworkPolicy can provide direct LAN access later
 Runtime pod memory, rolling updates, 3→5→2 scaling, warning latency,
 node loss, source reconciliation and physical-network acceptance still require
 measurement. The 18.875 GiB request estimate is not proof of those results.
+
+## 9. Redistribute existing single-copy volumes
+
+Add `local_placement` to a reviewed copy of the private release descriptor.
+Keep its existing file references, image pins and initialization receipt. Use
+the `services` map for source workloads and the `monitoring` map for stateful
+observability workloads. Each entry names a node from the captured inventory.
+A move off the original node requires a new `volume_suffix`, which creates a
+new PV, PVC and guest path while retaining the original volume.
+
+The following example shifts 320 MiB of requested memory and three local
+volumes from A to B. It leaves BMKG, Sensor Pantai, Prometheus and Tempo on A.
+Confirm B's live requested memory, CPU and free disk, including rollback copies
+and rollout headroom, before selecting this mapping. Use a different unused
+suffix for subsequent moves. Keep the inventory order and the original
+PostgreSQL and broker placement.
+
+```json
+{
+  "local_placement": {
+    "services": {
+      "pvmbg-mock": {"node": "aat-fourhost-b", "volume_suffix": "move1"}
+    },
+    "monitoring": {
+      "loki": {"node": "aat-fourhost-b", "volume_suffix": "move1"},
+      "grafana": {"node": "aat-fourhost-b", "volume_suffix": "move1"}
+    }
+  }
+}
+```
+
+Render to a new directory with `platform-release.py` and review the bundle
+using `platform-deploy.py plan`. Generate the guest scripts with
+`platform-existing.py volumes`. Compare their `plan.json` with the live PV/PVC
+bindings, node names, disk paths, sizes and owners before preparing the target.
+The full apply command refuses to change an existing StatefulSet's claim or
+node pin. Perform each move as a targeted cutover.
+Use the rendered artifacts only for the selected workloads when the read fix
+is running as a targeted image rollout. Keep the exact deployed digest in the
+rollout record until a full-upgrade contract can bind it.
+
+1. Record the live workload, PV/PVC and source frontier or retained-history
+   baseline. Prepare the reviewed destination directory on the target VM.
+2. Scale the selected writer to zero and verify that no pod mounts the old
+   claim. Capture its state while stopped. For a source volume, the guest-side
+   `deployment/platform/capture_source.py` supports a bounded SQLite backup and
+   emits archive bytes with their SHA-256, integrity result and history frontier.
+   Its inputs are the reviewed `cluster_id`, `path`, `claim` and `uid`.
+3. Restore onto the prepared target and verify the archive digest, ownership
+   and application state before starting the writer. For a source archive,
+   `deployment/platform/restore_source.py` accepts reviewed `path`, `uid` and
+   `sha256` metadata and the archive on stdin. For Loki and Grafana, use a
+   stopped-writer backup that includes their data and SQLite state where
+   applicable. Retain the source PV/PVC and the checkpoint.
+4. Apply only the reviewed target PV and PVC, check their binding, then apply
+   the matching StatefulSet with the original replica count. Verify source
+   sequence continuity or stored observability history through its Service.
+   Save the updated descriptor, exact artifacts and pre/post evidence. Fence the
+   moved writer and reconcile changes since cutover before reversing a move.
+
+These placements reduce correlated outages. Each moved service still depends
+on its own host and retained state.
+
+## 10. Prepare redundant validation access
+
+On the Linux controller, select its actual private IPv4 address as seen from
+the guest LAN. Optionally supply the private IPv4 address of a separate load
+generator for direct access. Render to a fresh evidence directory and review
+the NodePort Services, NetworkPolicies and HAProxy config before starting.
+
+```bash
+python3 scripts/platform-access.py render \
+  --inventory "$AAT_DEPLOY_DIR/inventory-existing.json" \
+  --controller-address "$AAT_CONTROLLER_IPV4" \
+  --output "$AAT_DEPLOY_DIR/validation-access"
+
+python3 scripts/platform-access.py start \
+  --inventory "$AAT_DEPLOY_DIR/inventory-existing.json" \
+  --output "$AAT_DEPLOY_DIR/validation-access"
+```
+
+The version 3 Services preserve the external source IP with
+`externalTrafficPolicy: Local`. Only nodes with a local endpoint forward that
+traffic. The loopback proxy checks `/ready` on each node and uses the configured
+controller address for outgoing connections. The generated ingress rules allow
+the declared external callers as `/32` entries. On the actual K3s cluster,
+check traffic from an allowed and an unlisted LAN caller because NetworkPolicy
+enforcement and node traffic exceptions depend on the networking setup. Keep
+the NodePorts on the private network.
+
+Verify authenticated requests through `127.0.0.1:18080` and
+`127.0.0.1:18081` on the controller. Observe which node endpoints are ready,
+then verify continuity during the selected VM fault while the controller stays
+up. These commands set up the entry point. The successful request and fault
+evidence comes from the live run.

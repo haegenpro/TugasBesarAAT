@@ -33,11 +33,30 @@ def prepare_volumes(cluster,requirements):
         cluster.ssh(node,["sudo","-n","python3","-c",module.PREPARE_GUEST],input=json.dumps({"cluster_id":cluster.cfg["cluster_id"],"formation":formation,"paths":paths[node["name"]]}).encode())
 
 
+def check_stateful_volumes(snapshots, live):
+    def placement(obj):
+        pod=obj["spec"]["template"]["spec"]
+        claims={v["name"]:v["persistentVolumeClaim"]["claimName"] for v in pod.get("volumes",[])
+                if "persistentVolumeClaim" in v}
+        return (pod.get("nodeSelector",{}).get("kubernetes.io/hostname"),claims) if claims else None
+
+    for raw in snapshots.values():
+        artifact=json.loads(raw)
+        for obj in artifact["items"] if artifact.get("kind")=="List" else [artifact]:
+            name=obj["metadata"]["name"]
+            if obj["kind"]=="StatefulSet" and name in live:
+                before,after=placement(live[name]),placement(obj)
+                require(before==after,
+                        "local storage switch requires a staged cutover for StatefulSet/"+name)
+
+
 def apply(cluster,report,snapshots):
     require(report["ready_for_apply"],"resolve all bundle blockers before applying")
     if cluster.cfg.get("version")==2:
         require(cluster.doctor()["ready"],"all physical hosts must pass live prerequisites and capacity checks")
     ns=cluster.cfg["namespace"]
+    stateful=json.loads(cluster.kubectl("get","statefulsets","-n",ns,"-o","json").stdout)["items"]
+    check_stateful_volumes(snapshots,{obj["metadata"]["name"]:obj for obj in stateful})
     nodes=json.loads(cluster.kubectl("get","nodes","-o","json").stdout)["items"]
     selected=[n for n in nodes if n["metadata"]["name"]in {v["name"]for v in cluster.cfg["nodes"]}]
     require(len(selected)==4 and all(any(c["type"]=="Ready"and c["status"]=="True"for c in n["status"]["conditions"])for n in selected),"all four existing nodes must be Ready; this command never boots VMs")

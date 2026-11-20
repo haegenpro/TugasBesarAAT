@@ -59,7 +59,7 @@ def render(inventory, config, image, replicas=3):
 
     deployment = resource("apps/v1", "Deployment", name, spec={
         "replicas": replicas, "minReadySeconds": 5, "progressDeadlineSeconds": 300,
-        "strategy": {"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1}},
+        "strategy": {"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 1, "maxSurge": 0}},
         "selector": {"matchLabels": selector}, "template": {"metadata": {"labels": labels, "annotations": {"prometheus.io/scrape": "true", "prometheus.io/port": "8080", "prometheus.io/path": "/metrics"}}, "spec": {
             "automountServiceAccountToken": False, "terminationGracePeriodSeconds": 45,
             "securityContext": {"runAsNonRoot": True, "runAsUser": 10001, "runAsGroup": 10001,

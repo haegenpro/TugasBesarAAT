@@ -194,7 +194,7 @@ class DatabaseIntegrationChecks(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,"ownership"):
                 self.entrypoint.write_member_identity("another-member",linked)
 
-    def release(self,root,inventory):
+    def release(self,root,inventory,placement=None):
         catalog=json.loads((ROOT/"deployment/services/catalog.json").read_text())
         owner=json.loads((ROOT/"deployment/role1/config.example.json").read_text())
         owner.update(analytics_enabled=True,field_priority_enabled=True,bmkg_namespace="bmkg-test-release",satellite_namespace="satellite-test-release")
@@ -208,6 +208,7 @@ class DatabaseIntegrationChecks(unittest.TestCase):
         images.update(storage=self.image,role1=self.image)
         aggregator=json.loads((ROOT/"deployment/aggregator/config.example.json").read_text());aggregator["storage_mode"]="citus"
         config={"version":1,"node_reserve_mib":512}
+        if placement is not None:config["local_placement"]=placement
         for name,value in {"images":images,"aggregator":aggregator,"role1":owner,"services":catalog,"external_flows":[{"app":"ingestion","cidr":"192.0.2.1/32","ports":[443]}]}.items():
             config[name]=name+".json";(root/config[name]).write_text(json.dumps(value))
         (root/"release.json").write_text(json.dumps(config))

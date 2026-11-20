@@ -35,6 +35,18 @@ class ServiceContractChecks(unittest.TestCase):
             self.assertEqual(container['livenessProbe']['httpGet']['path'],'/healthz?js-enabled-only=true')
             self.assertGreaterEqual(container['startupProbe']['periodSeconds']*container['startupProbe']['failureThreshold'],900)
             self.assertEqual(container['resources']['limits']['memory'],'1024Mi')
+
+    def test_singleton_placement_rejects_unknown_nodes_and_unversioned_moves(self):
+        target=self.inventory["nodes"][1]["name"]
+        for placement in (
+            {"bmkg-mock":{"node":"unknown","volume_suffix":"move1"}},
+            {"bmkg-mock":{"node":target}},
+            {"bmkg-mock":{"node":target,"volume_suffix":"../outside"}},
+            {"broker":{"node":target,"volume_suffix":"move1"}},
+            {"schema-registry":{"node":target,"volume_suffix":"move1"}},
+        ):
+            with self.subTest(placement=placement), self.assertRaises(ValueError):
+                render(self.inventory,self.catalog,self.images,placement=placement)
     def test_registry_warmup_has_time_to_finish_within_its_memory_limit(self):
         resources,_=render(self.inventory,self.catalog,self.images)
         obj=next(o for o in resources['items']if o['kind']=='Deployment'and o['metadata']['name']=='schema-registry')

@@ -54,6 +54,8 @@ def export(inventory, bundle, output, *, allow_disk_overcommit=False):
     report, snapshots = inspect(bundle, inventory)
     objects = [o for raw in snapshots.values() for o in json.loads(raw)["items"]]
     nodes = {n["name"]: n for n in inventory["nodes"]}
+    claims = {obj["metadata"]["name"]: obj["spec"] for obj in objects
+              if obj["kind"] == "PersistentVolumeClaim"}
     owners = {}
     for obj in objects:
         if obj["kind"] not in ("StatefulSet", "Deployment", "DaemonSet", "Job"):
@@ -64,9 +66,10 @@ def export(inventory, bundle, output, *, allow_disk_overcommit=False):
                 continue
             claim = volume["persistentVolumeClaim"]["claimName"]
             uid = pod.get("securityContext", {}).get("fsGroup")
+            node = pod.get("nodeSelector", {}).get("kubernetes.io/hostname")
             require(type(uid) is int and uid > 0, "local PVC requires an explicit filesystem owner")
-            require(claim not in owners or owners[claim] == uid, "PVC has conflicting filesystem owners")
-            owners[claim] = uid
+            require(claim not in owners or owners[claim] == (uid, node), "PVC has conflicting owners or workload nodes")
+            owners[claim] = (uid, node)
     payloads = {name: {} for name in nodes}
     sizes = {name: 0 for name in nodes}
     allowed = {*report["formations"], inventory["cluster_id"] + "-services"}
@@ -87,7 +90,13 @@ def export(inventory, bundle, output, *, allow_disk_overcommit=False):
         name = expression["values"][0]
         require(name in nodes, "PV selects a node outside the inventory")
         amount = storage_bytes(spec["capacity"]["storage"])
-        entry = {"name": path.name, "uid": owners[claim["name"]]}
+        pvc = claims.get(claim["name"], {})
+        require(pvc.get("volumeName") == obj["metadata"]["name"] and
+                storage_bytes(pvc["resources"]["requests"]["storage"]) == amount,
+                "local claim must select the declared PV and capacity")
+        uid, workload_node = owners[claim["name"]]
+        require(name == workload_node, "local PV affinity and workload node differ")
+        entry = {"name": path.name, "uid": uid}
         payloads[name].setdefault(path.parent.name, []).append(entry)
         sizes[name] += amount
         volumes.append({"node": name, "path": str(path), "uid": entry["uid"], "capacity_bytes": amount})

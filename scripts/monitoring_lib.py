@@ -102,7 +102,7 @@ loki.write "local" {
     return {"prometheus-config":{"prometheus.json":json.dumps(prom),"alerts.json":json.dumps(alerts)},"loki-config":{"config.json":json.dumps(loki)},"tempo-config":{"config.json":json.dumps(tempo)},"alloy-config":{"config.alloy":alloy},"grafana-datasources":{"sources.json":json.dumps(sources)},"grafana-providers":{"providers.json":json.dumps(provider)},"platform-dashboards":{"platform.json":json.dumps(dashboard),"application.json":(ROOT/"monitoring/templates/grafana/application.json").read_text()}}
 
 
-def render(inventory, storage, images, additional_storages=()):
+def render(inventory, storage, images, additional_storages=(), *, placement=None):
     require(all(s["namespace"]==inventory["namespace"] and s["cluster_id"]==inventory["cluster_id"]for s in(storage,*additional_storages)),"storage plan belongs to another cluster")
     for name in IMAGES:
         require(isinstance(images.get(name),str) and DIGEST.fullmatch(images[name]),"supply immutable image for "+name)
@@ -131,7 +131,7 @@ def render(inventory, storage, images, additional_storages=()):
         if name=="tempo":s["ports"].update({"otlp-http":4318,"otlp-grpc":4317})
         if name=="tempo":s["environment"].update({"GOMEMLIMIT":"128MiB","GOMAXPROCS":"1"})
         services.append(s)
-    resources, report=render_services(inventory,{"version":1,"services":services},images)
+    resources, report=render_services(inventory,{"version":1,"services":services},images,placement=placement)
     ns=inventory["namespace"];items=resources["items"]
     def add(api,kind,name,**fields):
         items.append({"apiVersion":api,"kind":kind,"metadata":{"name":name,"namespace":ns},**fields})

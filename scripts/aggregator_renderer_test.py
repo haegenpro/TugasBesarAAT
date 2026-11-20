@@ -30,7 +30,7 @@ class AggregatorDeploymentChecks(unittest.TestCase):
             self.assertEqual(container["readinessProbe"]["httpGet"]["path"], "/ready")
             self.assertEqual(container["livenessProbe"]["httpGet"]["path"], "/health")
             self.assertGreater(pod["terminationGracePeriodSeconds"], 35)
-            self.assertEqual(deployment["strategy"]["rollingUpdate"]["maxUnavailable"], 0)
+        self.assertEqual(deployment["strategy"]["rollingUpdate"], {"maxUnavailable": 1, "maxSurge": 0})
 
     def test_secrets_are_references_and_acquisition_is_enabled(self):
         objects = render(self.inventory, self.config, self.image)["items"]

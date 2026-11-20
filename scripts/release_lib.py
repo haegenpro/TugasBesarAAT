@@ -36,6 +36,10 @@ def assemble(inventory,config_path,output):
     aggregator=read("aggregator")
     require(aggregator["storage_mode"]=="citus","full release requires the distributed canonical formation")
     catalog=read("services")
+    placement=config.get("local_placement",{})
+    require(isinstance(placement,dict) and set(placement)<={"services","monitoring"},
+            "local_placement must contain services and/or monitoring maps")
+    require(all(isinstance(value,dict) for value in placement.values()),"local_placement sections must be objects")
     initialized=False;initialization=None
     if config.get("initialization_receipt"):
         from maintenance_lib import verify_receipt
@@ -48,7 +52,7 @@ def assemble(inventory,config_path,output):
     catalog.setdefault("external",[]).extend(n for n in ("ingestion","coastal-processor")if n not in catalog.get("external",[]))
     # Prevent accidental duplicate Aggregator resources: role1 extends its base.
     application=render_role1(inventory,aggregator,owner,images["role1"],images["role1"])
-    service_resources,service_requirements=render_services(inventory,catalog,images)
+    service_resources,service_requirements=render_services(inventory,catalog,images,placement=placement.get("services"))
     canonical=plan(inventory,"citus",images["storage"])
     ingestion=plan(inventory,"postgres",images["storage"],"ingestion")
     flows=read("external_flows")if config.get("external_flows")else []
@@ -82,7 +86,7 @@ def assemble(inventory,config_path,output):
         add("owner-databases",owner_resources,["isolation"])
         if not initialized:blockers.append("Initialize owned service database schemas with owning applications stopped, including the pinned registry bootstrap")
     monitored_owners=owner_database_report["formations"]if owner_database_report else []
-    monitoring,monitor_requirements=render_monitoring(inventory,canonical,images,[ingestion,*monitored_owners])
+    monitoring,monitor_requirements=render_monitoring(inventory,canonical,images,[ingestion,*monitored_owners],placement=placement.get("monitoring"))
     services_dependency="owner-databases"
     if initialized:
         auth,auth_name=render_citus_auth(canonical,initialization['durability']['storage'])

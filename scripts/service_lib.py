@@ -69,8 +69,31 @@ def validate(catalog):
     return catalog
 
 
-def render(inventory,catalog,images):
+def singleton_placement(inventory, services, placement):
+    """Resolve explicit placements for retained singleton volumes."""
+    require(isinstance(placement, dict), "singleton placement must be an object")
+    nodes = {node["name"] for node in inventory["nodes"]}
+    baseline = inventory["nodes"][0]["name"]
+    eligible = {s["name"] for s in services if s["kind"] == "StatefulSet" and
+                s["replicas"] == 1 and s.get("storage") and s["name"] != "broker"}
+    for name, target in placement.items():
+        require(name in eligible, "placement requires a local singleton service: " + name)
+        require(isinstance(target, dict) and {"node"} <= set(target) <= {"node", "volume_suffix"},
+                "expected node and optional volume_suffix for " + name)
+        node = target["node"]
+        require(isinstance(node, str) and node in nodes, "unknown placement node for " + name)
+        if "volume_suffix" in target:
+            suffix = target["volume_suffix"]
+            require(isinstance(suffix, str) and re.fullmatch(r"[a-z0-9]{1,16}", suffix),
+                    "invalid local volume suffix for " + name)
+        else:
+            require(node == baseline, "moving a local volume requires a new volume_suffix for " + name)
+    return placement
+
+
+def render(inventory,catalog,images,*,placement=None):
     validate(catalog)
+    placement=singleton_placement(inventory,catalog["services"],{} if placement is None else placement)
     ns,cluster=inventory["namespace"],inventory["cluster_id"]
     objects=[];volumes=[];requests=0
     def add(api,kind,name,**fields):
@@ -127,11 +150,14 @@ def render(inventory,catalog,images):
             member_labels={**labels,"platform.aat/workload":member}
             match={**selector,"platform.aat/workload":member} if s["kind"]=="StatefulSet" else selector
             if s["kind"]=="StatefulSet":
-                node=inventory["nodes"][ordinal%4]["name"]
+                target=placement.get(name,{})
+                node=target.get("node",inventory["nodes"][ordinal%4]["name"])
                 current["nodeSelector"]={"kubernetes.io/hostname":node}
                 storage=s.get("storage")
                 if storage:
                     pv=cluster+"-"+member
+                    if "volume_suffix" in target:
+                        pv+="-"+target["volume_suffix"]
                     path=f"/var/lib/aat/local-pv/{cluster}-services/{pv}"
                     add("v1","PersistentVolume",pv,spec={"capacity":{"storage":storage["size"]},"accessModes":["ReadWriteOnce"],"storageClassName":"",
                         "persistentVolumeReclaimPolicy":"Retain","local":{"path":path},"claimRef":{"name":pv,"namespace":ns},

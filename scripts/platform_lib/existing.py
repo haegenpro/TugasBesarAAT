@@ -80,6 +80,9 @@ class ExistingCluster:
                 "kubeconfig must be a private regular file owned by this user")
         return self.run([*self.cfg["kubectl_command"], "--kubeconfig", str(config), *args], **kwargs)
 
+    def docker(self, *args, **kwargs):
+        return self.run(["docker", *args], **kwargs)
+
     @contextmanager
     def locked(self, allow_resize=False):
         import fcntl
