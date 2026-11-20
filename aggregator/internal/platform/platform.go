@@ -75,7 +75,9 @@ func Init(service string) func(context.Context) error {
 	if v := os.Getenv("INSTANCE_ID"); v != "" {
 		host = v
 	}
-	opts := []sdktrace.TracerProviderOption{sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", service), attribute.String("service.instance.id", host))), sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample()))}
+	// Let the SDK honor OTEL_TRACES_SAMPLER and OTEL_TRACES_SAMPLER_ARG.
+	// Its default remains parent-based always-on when neither is configured.
+	opts := []sdktrace.TracerProviderOption{sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", service), attribute.String("service.instance.id", host)))}
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" || os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != "" {
 		exp, err := otlptracehttp.New(context.Background(), otlptracehttp.WithTimeout(2*time.Second))
 		if err != nil {

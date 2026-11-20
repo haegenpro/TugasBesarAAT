@@ -112,7 +112,9 @@ def traverse(api, path, params=None, limit=1000, max_pages=10000):
         response = api.request("GET", path, params={**(params or {}), "limit": limit, "cursor": cursor}, timeout=30)
         require(response["status"] == 200 and isinstance(response["json"], dict), path + " returned " + str(response["status"]))
         page = response["json"]
-        items += page.get("items", page.get("data", []))
+        rows = page.get("items", page.get("data"))
+        require(isinstance(rows, list), path + " did not return an item array")
+        items += rows
         partial = partial or bool(page.get("partial"))
         units.update(page.get("unavailable_units") or [])
         cursor = page.get("next_cursor")
@@ -189,7 +191,10 @@ def distribution(cluster, audit, inventory, *, client=None, sample=0, evidence):
         rows, page_flags = traverse(client, "/hazards", limit=50, max_pages=200)
         ids = [r.get("hazard_id") for r in rows]
         a["client_pages_unique"] = len(set(ids)) == len(ids)
-        a["client_pages_cover_audit"] = set(ids) <= {e["hazard_id"] for e in events} or page_flags["partial"]
+        after, after_flags = traverse(audit, "/internal/audit/events")
+        a["client_pages_complete"] = not page_flags["partial"] and not page_flags["unavailable_units"]
+        a["client_pages_cover_audit"] = {e["hazard_id"] for e in events} <= set(ids)
+        a["client_pages_only_known_events"] = not after_flags["partial"] and set(ids) <= {e["hazard_id"] for e in after}
         evidence.result["client_pages"] = {"rows": len(rows), **page_flags}
     evidence.result["load"] = node_load(cluster, inventory)
     return evidence
@@ -258,9 +263,18 @@ def ownership(observer, scope):
 
 
 def dispatch_after(observer, database, scope, epoch):
-    expression = ("SELECT coalesce(jsonb_agg(jsonb_build_object('lane',lane,'epoch',epoch,'state',state,'completed_at',completed_at)),'[]'::jsonb) "
+    expression = ("SELECT coalesce(jsonb_agg(jsonb_build_object('lane',lane,'epoch',epoch,'state',state,'status',status,'completed_at',completed_at)),'[]'::jsonb) "
                   "FROM acquisition_dispatch WHERE scope=" + literal(scope) + " AND epoch>=" + str(int(epoch)))
     return observer.query(database, expression)["data"]
+
+
+def canonical_progress(observer, source):
+    return observer.query("storage", "SELECT jsonb_build_object('last_seen',(SELECT max(last_seen_at) FROM hazard_events WHERE source=" + literal(source) +
+                          "),'applied',(SELECT max(applied_through) FROM input_sessions WHERE source=" + literal(source) + "))")["data"]
+
+
+def progressed(before, after):
+    return isinstance(after, dict) and any(after.get(k) is not None and (before.get(k) is None or after[k] > before[k]) for k in ("last_seen", "applied"))
 
 
 def literal(value):
@@ -278,6 +292,8 @@ def takeover(cluster, observer, audit, inventory, *, scope, app, upstream, evide
     ns = inventory["namespace"]
     since = now()
     before = ownership(observer, scope)
+    source = scope.split(":", 1)[1]
+    progress_before = canonical_progress(observer, source)
     require(before.get("holder"), "no current owner for " + scope + "; start the acquisition first")
     evidence.event("owner-before", **{k: before[k] for k in ("holder", "epoch", "database")})
     candidates = [p["metadata"]["name"] for p in pods(cluster, ns, app)]
@@ -301,10 +317,13 @@ def takeover(cluster, observer, audit, inventory, *, scope, app, upstream, evide
             killed = name
             while clock() < killed_at + limit + 30:
                 rows = dispatch_after(observer, taken["new"]["database"], scope, taken["new"]["epoch"])
-                done = [r for r in rows if r["epoch"] == taken["new"]["epoch"] and r["state"] in ("complete", "pending", "closed")]
+                done = [r for r in rows if r["epoch"] == taken["new"]["epoch"] and r["state"] == "complete"
+                        and isinstance(r.get("status"), int) and 200 <= r["status"] < 300 and r.get("completed_at")]
                 if done:
-                    resumed = {"seconds": round(clock() - killed_at, 3), "dispatch": done}
-                    break
+                    progress = canonical_progress(observer, source)
+                    if progressed(progress_before, progress):
+                        resumed = {"seconds": round(clock() - killed_at, 3), "dispatch": done, "canonical_progress": progress}
+                        break
                 sleep(0.5)
             break
     a = evidence.result["assertions"]
@@ -317,7 +336,7 @@ def takeover(cluster, observer, audit, inventory, *, scope, app, upstream, evide
     analysis = single_acquirer(upstream_rows)
     evidence.result["upstream"] = analysis
     a["upstream_one_requester_no_stale_epoch"] = analysis["passed"]
-    source = scope.split(":", 1)[1]
+    a["new_owner_successful_upstream_request"] = bool(taken) and any(r["epoch"] == taken["new"]["epoch"] and r.get("status") == 200 for r in upstream_rows)
     dup = duplicates_by_source(audit, source)
     evidence.result["canonical"] = dup
     a["no_duplicate_hazard_events"] = dup["duplicates"] == 0 and not dup["partial"]
@@ -452,7 +471,7 @@ def replay(ingestion_ops, audit, *, namespace, adapter, evidence, wait=300, slee
 def field_reports(cluster, client_field, inventory, *, count, evidence, wait=300, sleep=time.sleep, clock=time.monotonic):
     """P3.6: every 202-accepted report survives receiver crashes and is processed exactly once."""
     ns = inventory["namespace"]
-    receipts, crashed = {}, []
+    receipts, crashed, conflicts = {}, [], []
     for index in range(count):
         key = "demo-" + evidence.run_id + "-" + str(index)
         response = client_field.request("POST", "/field-reports", body=field_report_body(index), headers={"Idempotency-Key": key})
@@ -468,20 +487,26 @@ def field_reports(cluster, client_field, inventory, *, count, evidence, wait=300
         for _ in range(20):
             response = client_field.request("POST", "/field-reports", body=field_report_body(index), headers={"Idempotency-Key": key})
             if response["status"] == 202:
-                repeated[key] = response["json"]["receipt_id"];break
+                receipt = response["json"]["receipt_id"]
+                repeated[key] = receipt
+                if receipts.setdefault(key, receipt) != receipt:
+                    conflicts.append(key)
+                break
             sleep(2)
     deadline, statuses = clock() + wait, {}
     while clock() < deadline:
         for key, receipt in receipts.items():
             if statuses.get(key) != "processed":
-                value = client_field.request("GET", "/field-reports/" + receipt)["json"] or {}
-                statuses[key] = value.get("status")
+                response = client_field.request("GET", "/field-reports/" + receipt)
+                value = response["json"] or {}
+                statuses[key] = value.get("status") if response["status"] == 200 else None
         if receipts and all(v == "processed" for v in statuses.values()):
             break
         sleep(3)
     a = evidence.result["assertions"]
     a["receivers_crashed_mid_stream"] = bool(crashed)
-    a["every_202_has_one_stable_receipt"] = bool(receipts) and all(repeated.get(k) == v for k, v in receipts.items())
+    a["every_202_has_one_stable_receipt"] = bool(receipts) and not conflicts and all(repeated.get(k) == v for k, v in receipts.items())
+    a["distinct_keys_have_distinct_receipts"] = len(set(receipts.values())) == len(receipts)
     a["every_accepted_report_processed"] = bool(receipts) and all(statuses.get(k) == "processed" for k in receipts)
     a["late_retries_accepted"] = len(repeated) == count
     evidence.result["reports"] = {"sent": count, "accepted": len(receipts), "statuses": statuses}
@@ -555,6 +580,23 @@ def coastal_breaker(prometheus, client, *, paths, rate_query, evidence, seconds=
 
 # --------------------------------------------------------------------------- Tester Agent
 
+def healthy_checksum(response, source):
+    body = response.get("json")
+    return (response.get("status") == 200 and isinstance(body, dict) and body.get("source") == source
+            and type(body.get("count")) is int and body["count"] >= 0
+            and isinstance(body.get("checksum"), str) and re.fullmatch(r"[0-9a-f]{64}", body["checksum"]) is not None
+            and body.get("partial") is False and not body.get("unavailable_units"))
+
+
+def checksum_snapshot(audit):
+    replies = {s: audit.request("GET", "/internal/audit/checksum", params={"source": s}) for s in SOURCES}
+    return {s: r.get("json") for s, r in replies.items()}, sorted(s for s, r in replies.items() if not healthy_checksum(r, s))
+
+
+def event_identities(events):
+    return {(e["source"], e["source_ref_id"], e["hazard_id"]) for e in events}
+
+
 def tester(cluster, audit, inventory, *, scenario, mode, extra, recovery_seconds, evidence, sleep=time.sleep):
     """Run a Tester Agent scenario, then only observe (no intervention) during the recovery window."""
     require(mode in ("practice", "exam", "list"), "mode must be practice, exam or list")
@@ -566,26 +608,31 @@ def tester(cluster, audit, inventory, *, scenario, mode, extra, recovery_seconds
         return evidence
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}", scenario or ""), "scenario name required")
     since = now()
-    before = {s: audit.request("GET", "/internal/audit/checksum", params={"source": s})["json"] for s in SOURCES}
-    evidence.result["before"] = {"checksums": before, "restarts": restarts(cluster, inventory["namespace"])}
+    before, unavailable = checksum_snapshot(audit)
+    require(not unavailable, "complete successful Audit checksums required before injecting a fault: " + ", ".join(unavailable))
+    baseline, flags = traverse(audit, "/internal/audit/events")
+    require(baseline and not flags["partial"] and not flags["unavailable_units"], "a nonempty complete Audit baseline is required before injecting a fault")
+    baseline_ids = event_identities(baseline)
+    evidence.result["before"] = {"checksums": before, "event_identities": sorted(baseline_ids), "restarts": restarts(cluster, inventory["namespace"])}
     started = cluster.kubectl(*command, "run", mode, scenario, *extra, check=False, timeout=900)
     evidence.event("scenario-finished", exit_code=started.returncode)
     (evidence.dir / "tester-output.txt").write_bytes(started.stdout + b"\n" + started.stderr)
     samples = []
     for _ in range(max(1, recovery_seconds // 10)):  # observation only; the group must not intervene
-        health = {s: audit.request("GET", "/internal/audit/checksum", params={"source": s})["json"] for s in SOURCES}
-        samples.append({"at": now(), "partial": sorted(s for s, v in health.items() if not v or v.get("partial"))})
+        _, unavailable = checksum_snapshot(audit)
+        samples.append({"at": now(), "partial": unavailable})
         sleep(10)
     with (evidence.dir / "tester-agent.log").open("wb") as stream:  # every node's agent pod
         for pod in kubectl_json(cluster, "get", "pods", "-n", "tester-agent")["items"]:
             name = pod["metadata"]["name"]
             log = cluster.kubectl("logs", "-n", "tester-agent", name, "--since-time=" + since, "--all-containers=true", check=False)
             stream.write(("==== " + name + " (" + str(pod["spec"].get("nodeName")) + ")\n").encode() + log.stdout + b"\n")
-    after = {s: audit.request("GET", "/internal/audit/checksum", params={"source": s})["json"] for s in SOURCES}
-    lost = [s for s in SOURCES if before.get(s) and after.get(s) and after[s].get("count", 0) < before[s].get("count", 0)]
+    after, unavailable = checksum_snapshot(audit)
+    final_events, final_flags = traverse(audit, "/internal/audit/events")
+    missing = sorted(baseline_ids - event_identities(final_events))
     a = evidence.result["assertions"]
     a["scenario_ran"] = started.returncode == 0
-    a["no_hazard_events_lost"] = not lost
-    a["recovered_not_partial_at_end"] = bool(samples) and not samples[-1]["partial"]
-    evidence.result["after"] = {"checksums": after, "restarts": restarts(cluster, inventory["namespace"]), "recovery_samples": samples}
+    a["no_hazard_events_lost"] = not missing and not final_flags["partial"] and not final_flags["unavailable_units"] and not unavailable
+    a["recovered_not_partial_at_end"] = bool(samples) and not samples[-1]["partial"] and not unavailable
+    evidence.result["after"] = {"checksums": after, "missing_event_identities": missing, "restarts": restarts(cluster, inventory["namespace"]), "recovery_samples": samples}
     return evidence

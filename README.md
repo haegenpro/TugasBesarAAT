@@ -34,6 +34,9 @@ Then follow the [manual K3s bootstrap](docs/m2/Platform-Manual-K3s-Setup.md) to 
 the four guests into one cluster.
 For the application phase, use the [GHCR preparation and deployment sequence](docs/m2/Platform-Manual-GHCR-and-Application-Deployment.md).
 After images are published, follow the [existing-cluster deployment guide](docs/m2/Platform-Existing-Cluster-Deployment.md).
+For an explicitly authorized fresh application dataset, use the
+[application-only reset procedure](docs/m2/Platform-Application-Reset.md), which
+preserves the VMs and K3s nodes and keeps no VM data archives.
 Inventory v3 uses the existing K3s API and operator-run volume preparation on
 the root disks. Initial deployment and maintenance have been exercised on the
 four-VM cluster; source/load/failure acceptance and VM replacement integration

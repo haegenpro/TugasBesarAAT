@@ -23,9 +23,12 @@ func (s *Store) NewFieldReadView(ctx context.Context) (*Store, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	view := &Store{Pool: pool, logger: s.logger, control: s.control, Canonical: s.Canonical, Inputs: s.Inputs, Reads: s.Reads, Acquisition: s.Acquisition, Processor: s.Processor, idleTransactionTimeout: s.idleTransactionTimeout, snapshots: s.snapshots}
+	view := &Store{Pool: pool, logger: s.logger, control: s.control, Canonical: s.Canonical, Inputs: s.Inputs, Reads: s.Reads, Acquisition: s.Acquisition, Processor: s.Processor, idleTransactionTimeout: s.idleTransactionTimeout, snapshots: s.snapshots, readPlacement: s.readPlacement}
 	var observer *replicatedDurability
 	closeView := func() {
+		if view.readPlacementOwner {
+			view.readPlacement.close()
+		}
 		pool.Close()
 		if observer != nil {
 			observer.Close()
@@ -36,7 +39,7 @@ func (s *Store) NewFieldReadView(ctx context.Context) (*Store, func(), error) {
 		for _, source := range original.pools {
 			config := source.Config()
 			config.MaxConns = 1
-			config.MinConns = 0
+			config.MinConns = 1
 			config.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
 			p, e := pgxpool.NewWithConfig(ctx, config)
 			if e != nil {

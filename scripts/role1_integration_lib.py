@@ -82,6 +82,7 @@ def render(inventory, aggregator_config, config, aggregator_image, ingestion_ima
     # This readiness handler checks multiple streams followed by durability.
     # Its combined duration can exceed a single operation's two-second budget.
     # Keep business deadlines intact while letting the full check complete.
+    owned["containers"][0]["env"] += values({"REPLICATION_MAX_OPEN_CONNS":"4", "OTEL_TRACES_SAMPLER":"parentbased_traceidratio", "OTEL_TRACES_SAMPLER_ARG":"0.05"})
     owned["containers"][0]["readinessProbe"] = {**container["readinessProbe"], "periodSeconds": 10, "timeoutSeconds": 5}
     selector = {"app.kubernetes.io/name": "ingestion", "platform.aat/cluster": cluster}
     owned["topologySpreadConstraints"][0]["labelSelector"] = {"matchLabels": selector}

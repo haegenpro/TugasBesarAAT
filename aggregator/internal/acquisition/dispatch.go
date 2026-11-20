@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +104,14 @@ func Client(repository DispatchRepository, source, base string, timeout time.Dur
 	t.DisableKeepAlives = true
 	t.Protocols = new(http.Protocols)
 	t.Protocols.SetHTTP1(true)
+	// Clone can inherit h2 ALPN after another client initialized the default
+	// transport. Protocols alone does not remove those TLS advertisements.
+	if t.TLSClientConfig == nil {
+		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	t.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	t.ForceAttemptHTTP2 = false
+	t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	t.Proxy = nil
 	t.MaxConnsPerHost = 8
 	t.DialContext = (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext

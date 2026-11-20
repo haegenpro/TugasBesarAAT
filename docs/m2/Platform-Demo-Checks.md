@@ -90,16 +90,26 @@ Tester Agent pod's log.
 - **distribution**: Audit listing complete and ordered by `ingested_at, hazard_id`;
   checksums equal a recomputation from the listing; every event has ≥2 nodes;
   no node holds every event; primaries on more than one node; optional Client API
-  pages unique. Per-node store CPU/memory is recorded.
+  pages are unique, complete, cover the initial Audit IDs and contain only IDs
+  present in a second Audit traversal. New arrivals between traversals are
+  allowed. Per-node store CPU/memory is recorded.
 - **takeover**: crashes instances (`--grace-period=0`) until the lease holder
   changes (the holder ID is not a pod name), then requires a higher epoch and a
-  new dispatch within 60 s. Upstream mock logs (`acquisition.request_id/epoch`)
+  completed successful dispatch and advancing canonical `last_seen_at` or applied
+  frontier within 60 s. A pending dispatch never proves recovery. Upstream mock logs (`acquisition.request_id/epoch`)
   must show no repeated first request and no older epoch after a newer one; the
   Audit API must show no duplicate `source_ref_id`.
 - **fencing**: the same upstream and duplicate checks over a time window, plus
   the number of stale commits rejected (`ownership expired before commit`).
 - **field-reports**: one stable receipt per idempotency key across crashes and
-  retries, and every accepted report reaches `processed`.
+  retries, and every accepted report reaches `processed`, including reports first
+  accepted on a retry. Different keys must have different receipts.
+- **tester**: successful complete checksums and a nonempty Audit listing are
+  required before injecting a fault. Recovery must retain every baseline
+  `(source, source_ref_id, hazard_id)` identity and restore complete successful
+  reads; a stable or increasing count cannot hide lost records. Run this retention
+  check over a dataset whose baseline identities are expected to remain active;
+  deliberate satellite retractions require their separate reference comparison.
 - **processor-crash**: the processor catches up (`applied_through ==
   received_through`), no duplicate fires, and the SATELIT count/checksum equals
   the supplied reference.

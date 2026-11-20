@@ -97,6 +97,15 @@ class DistributionChecks(unittest.TestCase):
         self.assertFalse(result["assertions"]["audit_order_ingested_at_then_hazard_id"])
         self.assertFalse(result["passed"])
 
+    def test_client_must_cover_baseline_and_be_complete(self):
+        events = self.events();names = [n["name"] for n in inventory()["nodes"]]
+        locations = {e["hazard_id"]: [{"node": names[i % 4], "role": "primary"}, {"node": names[(i+1) % 4], "role": "replica"}] for i,e in enumerate(events)}
+        for rows, partial, expected in (([],False,False),(events[:-1],False,False),(events,True,False),(events,False,True)):
+            with self.subTest(rows=len(rows),partial=partial), tempfile.TemporaryDirectory() as folder:
+                client=FakeApi(lambda *args:{"data":rows,"partial":partial,"next_cursor":None})
+                result=checks.distribution(store_cluster(),FakeApi(audit_routes(events,locations)),inventory(),client=client,evidence=evidence(folder)).finish()
+                self.assertEqual(result["passed"],expected,result["assertions"])
+
 
 class AcquisitionChecks(unittest.TestCase):
     def test_upstream_duplicate_and_stale_epoch_requests_are_detected(self):
@@ -105,17 +114,19 @@ class AcquisitionChecks(unittest.TestCase):
         self.assertFalse(checks.single_acquirer(good + [{"request_id": "b", "epoch": 2, "time": "4"}])["passed"])
         self.assertFalse(checks.single_acquirer(good + [{"request_id": "c", "epoch": 1, "time": "5"}])["passed"])
 
-    def test_takeover_crashes_until_the_holder_changes_and_measures_resumption(self):
+    def takeover_result(self, dispatch_state="complete", advance=True):
         clock = Clock();state = {"holder": "worker-1", "epoch": 1, "killed": []}
         class Observer:
             def query(self, suffix, expression):
+                if "max(last_seen_at)" in expression:
+                    return {"data":{"last_seen":"after" if advance and "aggregator-b" in state["killed"] and clock.now > state.get("taken_at",0) else "before", "applied":1 if advance and "aggregator-b" in state["killed"] else 0}}
                 if "canonical_ownership" in expression:
                     if suffix != "storage":return {"data": None}
                     if "aggregator-b" in state["killed"] and clock.now > state["taken_at"]:
                         return {"data": {"holder": "worker-2", "epoch": 2, "expires_at": "t", "now": "t"}}
                     return {"data": {"holder": state["holder"], "epoch": state["epoch"], "expires_at": "t", "now": "t"}}
-                return {"data": [{"lane": "l", "epoch": 2, "state": "complete", "completed_at": "t"}]}
-        logs = "\n".join(json.dumps({"time": "2026-11-20T00:00:0%dZ" % i, "acquisition": {"request_id": "r%d" % i, "epoch": 1 if i < 3 else 2}}) for i in range(6)).encode()
+                return {"data": [{"lane": "l", "epoch": 2, "state": dispatch_state, "status":200, "completed_at": "t" if dispatch_state=="complete" else None}]}
+        logs = "\n".join(json.dumps({"time": "2026-11-20T00:00:0%dZ" % i, "status_code":200,"acquisition": {"request_id": "r%d" % i, "epoch": 1 if i < 3 else 2}}) for i in range(6)).encode()
         def handler(args):
             if args[:2] == ("get", "pods"):
                 return done({"items": [{"metadata": {"name": n}, "status": {"phase": "Running"}} for n in ("aggregator-a", "aggregator-b", "aggregator-c")]})
@@ -129,10 +140,24 @@ class AcquisitionChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             result = checks.takeover(FakeCluster(handler), Observer(), FakeApi(audit_routes(events, {})), inventory(), scope="acquisition:PVMBG", app="aggregator",
                                      upstream="pvmbg-mock", evidence=evidence(folder), sleep=clock.sleep, clock=clock).finish()
+        return result, state
+
+    def test_takeover_crashes_until_the_holder_changes_and_measures_resumption(self):
+        result,state=self.takeover_result()
         self.assertTrue(result["passed"], result["assertions"])
         self.assertEqual(result["takeover"]["crashed"], "aggregator-b")
         self.assertEqual(state["killed"], ["aggregator-a", "aggregator-b"])
         self.assertLessEqual(result["takeover"]["resumed"]["seconds"], 60)
+
+    def test_pending_dispatch_does_not_prove_resumed_acquisition(self):
+        result,_=self.takeover_result(dispatch_state="pending")
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["assertions"]["acquisition_resumed_within_60s"])
+
+    def test_completed_dispatch_without_canonical_progress_fails(self):
+        result,_=self.takeover_result(advance=False)
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["assertions"]["acquisition_resumed_within_60s"])
 
 
 class ReportChecks(unittest.TestCase):
@@ -165,6 +190,21 @@ class ReportChecks(unittest.TestCase):
         self.assertTrue(result["passed"], result["assertions"])
         self.assertTrue(any(c[0] == "delete" for c in cluster.calls))
 
+    def test_retry_only_202_is_included_in_processing_checks(self):
+        clock=Clock();attempts={}
+        def routes(method,path,params,headers,body,raw):
+            if method=="POST":
+                key=headers["Idempotency-Key"];index=key.rsplit("-",1)[1]
+                attempts[key]=attempts.get(key,0)+1
+                if index=="1" and attempts[key]==1:return {"status":503,"json":{},"ms":1}
+                return {"status":202,"json":{"receipt_id":"receipt-"+index},"ms":1}
+            return {"status":"processed" if path.endswith("-0") else "accepted"}
+        with tempfile.TemporaryDirectory()as folder:
+            result=checks.field_reports(self.cluster(),FakeApi(routes),inventory(),count=2,evidence=evidence(folder),sleep=clock.sleep,clock=clock).finish()
+        self.assertEqual(result["reports"]["accepted"],2)
+        self.assertFalse(result["assertions"]["every_accepted_report_processed"])
+        self.assertFalse(result["passed"])
+
     def test_ops_only_access_matrix(self):
         statuses = {"audit-token": {"/internal/audit/unprocessed": 200, "/internal/ingestion/failures": 403},
                     "ops-token": {"/internal/audit/unprocessed": 403, "/internal/ingestion/failures": 200},
@@ -179,6 +219,43 @@ class ReportChecks(unittest.TestCase):
         with patch.object(checks, "Api", Api), tempfile.TemporaryDirectory() as folder:
             result = checks.ops_only("http://a", "http://i", {"ops": "ops-token", "field": "field-token"}, evidence=evidence(folder)).finish()
         self.assertFalse(result["passed"])
+
+
+class GameDayEvidenceChecks(unittest.TestCase):
+    def run_scenario(self, *, missing=False, final_unavailable=False):
+        initial=[{"source":"BMKG","source_ref_id":"r1","hazard_id":"h1"},
+                 {"source":"BMKG","source_ref_id":"r2","hazard_id":"h2"}]
+        # Losing r1 is masked by an equal or larger final count in the old check.
+        later=[initial[1],{"source":"BMKG","source_ref_id":"r3","hazard_id":"h3"},
+               {"source":"BMKG","source_ref_id":"r4","hazard_id":"h4"}] if missing else initial
+        state={"fault":False}
+        def routes(method,path,params,headers,body,raw):
+            rows=later if state["fault"] else initial
+            if path=="/internal/audit/events":return {"items":rows,"partial":False,"next_cursor":None}
+            if final_unavailable and state["fault"]:return {"status":503,"json":{"error":"unavailable"},"ms":1}
+            ids=[e["source_ref_id"]for e in rows if e["source"]==params["source"]]
+            return {"source":params["source"],"count":len(ids),"checksum":checks.checksum(ids),"partial":False}
+        def handler(args):
+            if args[0]=="exec":state["fault"]=True
+            return done({"items":[]}) if args[:2]==("get","pods") else done()
+        with tempfile.TemporaryDirectory()as folder:
+            return checks.tester(FakeCluster(handler),FakeApi(routes),inventory(),scenario="node-loss",mode="practice",extra=[],recovery_seconds=1,evidence=evidence(folder),sleep=lambda s:None).finish()
+
+    def test_success_requires_successful_complete_audit_and_retained_identities(self):
+        self.assertTrue(self.run_scenario()["passed"])
+        missing=self.run_scenario(missing=True)
+        self.assertFalse(missing["passed"])
+        self.assertEqual(missing["after"]["missing_event_identities"],[("BMKG","r1","h1")])
+        unavailable=self.run_scenario(final_unavailable=True)
+        self.assertFalse(unavailable["passed"])
+        self.assertFalse(unavailable["assertions"]["recovered_not_partial_at_end"])
+
+    def test_503_baseline_never_injects_a_fault_or_passes(self):
+        cluster=FakeCluster(lambda args:done())
+        api=FakeApi(lambda *args:{"status":503,"json":{"error":"unavailable"},"ms":1})
+        with tempfile.TemporaryDirectory()as folder, self.assertRaisesRegex(ValueError,"successful Audit"):
+            checks.tester(cluster,api,inventory(),scenario="node-loss",mode="practice",extra=[],recovery_seconds=1,evidence=evidence(folder),sleep=lambda s:None)
+        self.assertEqual(cluster.calls,[])
 
 
 class WifiEvidenceChecks(unittest.TestCase):

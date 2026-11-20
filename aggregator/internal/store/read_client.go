@@ -8,6 +8,9 @@ import (
 )
 
 func (s *Store) CheckReadControl(ctx context.Context) error {
+	if s.Reads.MetadataReady != nil && !s.Reads.MetadataReady() {
+		return canonical.Unavailable()
+	}
 	if s.Reads.Authority != nil {
 		if _, err := s.Reads.Authority(ctx, s.Pool); err != nil {
 			return err

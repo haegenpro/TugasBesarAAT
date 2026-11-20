@@ -133,6 +133,10 @@ def render(inventory, storage, images, additional_storages=(), *, placement=None
         services.append(s)
     resources, report=render_services(inventory,{"version":1,"services":services},images,placement=placement)
     ns=inventory["namespace"];items=resources["items"]
+    tempo=next(o for o in items if o['kind']=='StatefulSet'and o['metadata']['name']=='tempo-a')['spec']['template']['spec']['containers'][0]
+    tempo['startupProbe'].update(timeoutSeconds=5,periodSeconds=5,failureThreshold=60)
+    tempo['readinessProbe'].update(timeoutSeconds=5,periodSeconds=5,failureThreshold=3)
+    tempo['livenessProbe'].update(timeoutSeconds=5,periodSeconds=10,failureThreshold=6)
     def add(api,kind,name,**fields):
         items.append({"apiVersion":api,"kind":kind,"metadata":{"name":name,"namespace":ns},**fields})
     for name,data in configs(inventory,storage,additional_storages).items():add("v1","ConfigMap",name,data=data)

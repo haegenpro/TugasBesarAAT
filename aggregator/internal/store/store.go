@@ -36,6 +36,8 @@ type Store struct {
 	idleTransactionTimeout time.Duration
 	analytics              *analyticsState
 	snapshots              *snapshotService
+	readPlacement          *podPlacementCache
+	readPlacementOwner     bool
 }
 
 func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, error) {
@@ -88,6 +90,9 @@ func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, 
 }
 
 func (s *Store) Close() {
+	if s.readPlacementOwner {
+		s.readPlacement.close()
+	}
 	if adapter, ok := s.Canonical.Durability.(interface{ Close() }); ok {
 		adapter.Close()
 	}
@@ -106,7 +111,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // CheckSchema validates the canonical tables without changing the schema.
 func (s *Store) CheckSchema(ctx context.Context) error {
 	ctx = middleware.EnsureCorrelationID(ctx)
-	for _, query := range []string{
+	queries := []string{
 		`SELECT route_key, hazard_id, source, source_ref_id, attributes, active FROM hazard_events LIMIT 0`,
 		`SELECT generation FROM canonical_visibility LIMIT 0`,
 		`SELECT attempt_id,state FROM canonical_attempts LIMIT 0`,
@@ -114,19 +119,22 @@ func (s *Store) CheckSchema(ctx context.Context) error {
 		`SELECT capture_id,state FROM platform_audit_captures LIMIT 0`,
 		`SELECT volcano_id, area_name, latitude, longitude FROM volcano_reference LIMIT 0`,
 		`SELECT hazard_id, event_payload, correlation_id, queued_at FROM hazard_outbox LIMIT 0`,
-	} {
-		if _, err := s.Pool.Exec(ctx, query); err != nil {
+	}
+	if len(s.Inputs.Starts) > 0 {
+		queries = append(queries, `SELECT received_through,prepared_through,applied_through FROM input_sessions LIMIT 0`, `SELECT route_key,envelope,original_payload,state FROM input_history LIMIT 0`, `SELECT batch_id,batch,result FROM input_outputs LIMIT 0`, `SELECT history_sequence,payload,observed_at FROM input_bmkg_observations LIMIT 0`, `SELECT snapshot_started,validated_position FROM input_bmkg_checks LIMIT 0`, `SELECT namespace,state FROM input_cutovers LIMIT 0`, `SELECT schema_id,schema_text,sha256 FROM input_schema_cache LIMIT 0`)
+	}
+	batch := &pgx.Batch{}
+	for _, query := range queries {
+		batch.Queue(query)
+	}
+	results := s.Pool.SendBatch(ctx, batch)
+	defer results.Close()
+	for range queries {
+		if _, err := results.Exec(); err != nil {
 			return err
 		}
 	}
-	if len(s.Inputs.Starts) > 0 {
-		for _, query := range []string{`SELECT received_through,prepared_through,applied_through FROM input_sessions LIMIT 0`, `SELECT route_key,envelope,original_payload,state FROM input_history LIMIT 0`, `SELECT batch_id,batch,result FROM input_outputs LIMIT 0`, `SELECT history_sequence,payload,observed_at FROM input_bmkg_observations LIMIT 0`, `SELECT snapshot_started,validated_position FROM input_bmkg_checks LIMIT 0`, `SELECT namespace,state FROM input_cutovers LIMIT 0`, `SELECT schema_id,schema_text,sha256 FROM input_schema_cache LIMIT 0`} {
-			if _, err := s.Pool.Exec(ctx, query); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return results.Close()
 }
 
 // SaveDedup upserts a HazardEvent, deduplicating on (source, source_ref_id).

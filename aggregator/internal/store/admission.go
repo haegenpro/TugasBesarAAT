@@ -187,9 +187,16 @@ func (t *mutationTx) Rollback(ctx context.Context) error {
 	return nil
 }
 
-// distributedSettled is intentionally conservative: any prepared decision on
-// any participating primary blocks finalization, and unavailable workers block.
+// distributedSettled is intentionally conservative: any prepared decision in
+// this database on a participating primary blocks finalization. Unrelated
+// databases on the same PostgreSQL instance are not participants in this cut.
 func (s *Store) primaryTopology(ctx context.Context) (string, int, error) {
+	if r, ok := s.Canonical.Durability.(*replicatedDurability); ok {
+		if r.cfg.Mode == "postgres" {
+			return "postgres", 0, nil
+		}
+		return readCitusTopology(ctx, s.Pool)
+	}
 	return readPrimaryTopology(ctx, s.Pool)
 }
 
@@ -205,6 +212,10 @@ func readPrimaryTopology(ctx context.Context, q readQuerier) (string, int, error
 	if !citus {
 		return "postgres", 0, nil
 	}
+	return readCitusTopology(ctx, q)
+}
+
+func readCitusTopology(ctx context.Context, q readQuerier) (string, int, error) {
 	var topology string
 	var count, inactive int
 	err := q.QueryRow(ctx, "SELECT coalesce(jsonb_agg(jsonb_build_array(nodeid,nodename,nodeport,groupid) ORDER BY nodeid),'[]'::jsonb)::text,count(*),count(*) FILTER(WHERE NOT isactive) FROM pg_dist_node WHERE groupid>0 AND noderole='primary'").Scan(&topology, &count, &inactive)
@@ -231,7 +242,7 @@ func (s *Store) distributedSettled(ctx context.Context, expected string) error {
 	}
 
 	var n int
-	if err := s.Pool.QueryRow(ctx, "SELECT count(*) FROM pg_prepared_xacts").Scan(&n); err != nil {
+	if err := s.Pool.QueryRow(ctx, "SELECT count(*) FROM pg_prepared_xacts WHERE database=current_database()").Scan(&n); err != nil {
 		return err
 	}
 	if n != 0 {
@@ -240,7 +251,7 @@ func (s *Store) distributedSettled(ctx context.Context, expected string) error {
 	if workers == 0 {
 		return nil
 	}
-	rows, err := s.Pool.Query(ctx, "SELECT success,result FROM run_command_on_workers('SELECT count(*) FROM pg_prepared_xacts')")
+	rows, err := s.Pool.Query(ctx, "SELECT success,result FROM run_command_on_workers('SELECT count(*) FROM pg_prepared_xacts WHERE database=current_database()')")
 	if err != nil {
 		return err
 	}
@@ -383,26 +394,45 @@ func (s *Store) readAtStableCut(ctx context.Context, read func(context.Context) 
 	if _, err = guard.Exec(ctx, "SELECT pg_advisory_xact_lock_shared($1)", visibilityKey); err != nil {
 		return false, canonical.Unavailable()
 	}
-	before, pending, err := readVisibility(ctx, guard)
+	var before int64
+	var pending bool
+	var anchor replicationStatus
+	if s.Reads.Cut != nil {
+		before, pending, anchor, err = s.Reads.Cut(ctx, guard, false)
+	} else {
+		before, pending, err = readVisibility(ctx, guard)
+	}
 	if err != nil || pending {
 		return pending && err == nil, canonical.Unavailable()
 	}
-	var anchor replicationStatus
-	if s.Reads.Authority != nil {
+	if s.Reads.Cut == nil && s.Reads.Authority != nil {
 		anchor, err = s.Reads.Authority(ctx, guard)
 		if err != nil {
 			return false, canonical.Unavailable()
 		}
 	}
 	resultErr := read(ctx)
-	after, pending, err := readVisibility(ctx, guard)
+	var after int64
+	var current replicationStatus
+	if s.Reads.Cut != nil {
+		after, pending, current, err = s.Reads.Cut(ctx, guard, true)
+	} else {
+		after, pending, err = readVisibility(ctx, guard)
+	}
 	if err != nil {
 		return false, canonical.Unavailable()
 	}
 	if pending || before != after {
 		return true, canonical.Unavailable()
 	}
-	if s.Reads.Authority != nil {
+	if s.Reads.Cut != nil {
+		// The same coordinator session must still be the same physical primary,
+		// and the final Cut must establish its live Patroni lease. The publication
+		// lock remains held until after these checks; no write can fracture rows.
+		if !samePrimary(anchor, current) {
+			return false, canonical.Unavailable()
+		}
+	} else if s.Reads.Authority != nil {
 		current, err := s.Reads.Authority(ctx, guard)
 		if err != nil || !samePrimary(anchor, current) {
 			return false, canonical.Unavailable()

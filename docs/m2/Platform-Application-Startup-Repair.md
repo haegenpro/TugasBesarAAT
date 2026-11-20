@@ -1,5 +1,10 @@
 # Application startup repair — 2026-11-20
 
+This records the earlier deployment. Its database identities and bundles were
+superseded by the later application reset. See
+[read and source repair](Platform-Read-and-Source-Repair.md) for the current work.
+Do not reapply the historical bundles below to the reset application.
+
 The first full release applied its services but exceeded the Aggregator's
 progress deadline. Live diagnosis found the following startup and recovery
 configuration problems.
@@ -36,7 +41,7 @@ offsets, and the same 40 local-PV definitions. No database was reset. Memory
 requests are 19,456 MiB including the additional one-time 128 MiB authentication
 Job; individual role requests and limits retain the M2 values.
 
-## Current artifacts
+## Historical artifacts
 
 ```text
 ~/aat-deploy/completed-runtime-fix/release.json
@@ -44,7 +49,7 @@ Job; individual role requests and limits retain the M2 values.
 ~/aat-deploy/repairs/application-startup-93e3e4c9f3/
 ```
 
-Use this bundle for subsequent applies. The earlier `full-release/` bundle
+These paths are retained as historical inputs. The earlier `full-release/` bundle
 contains the original socket paths and lacks the authentication step and
 Patroni rule. Intermediate repair renderings are retained for inspection.
 The existing demo volume-preparation scripts remain applicable.

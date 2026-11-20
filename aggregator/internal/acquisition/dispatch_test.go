@@ -116,6 +116,38 @@ func TestDispatchTLSUsesHTTP1WithoutHiddenHTTP2Retries(t *testing.T) {
 	})
 }
 
+func TestDispatchTLSDoesNotInheritHTTP2ALPN(t *testing.T) {
+	repo := &repositoryFixture{}
+	c := fixtureCoordinator(t, repo)
+	var protocol atomic.Int64
+	source := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protocol.Store(int64(r.ProtoMajor))
+		_, _ = w.Write([]byte("original"))
+	}))
+	source.EnableHTTP2 = true
+	source.StartTLS()
+	defer source.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(source.Certificate())
+	// A prior HTTPS call can initialize the process default transport's ALPN.
+	// Clone retains that TLS configuration even when Protocols is later HTTP/1.
+	original := http.DefaultTransport
+	inherited := original.(*http.Transport).Clone()
+	inherited.TLSClientConfig = &tls.Config{RootCAs: roots, NextProtos: []string{"h2", "http/1.1"}}
+	http.DefaultTransport = inherited
+	t.Cleanup(func() { http.DefaultTransport = original; inherited.CloseIdleConnections() })
+	journal := &lostReceiptReply{receipts: map[string]Receipt{}}
+	client, err := Client(journal, "BMKG", source.URL, time.Second, 4096)
+	require.NoError(t, err)
+	c.Run(context.Background(), "BMKG", func(owned context.Context) {
+		req, err := http.NewRequestWithContext(WithRequestKey(owned, "namespace:0"), "GET", source.URL+"/seismic-events", nil)
+		require.NoError(t, err)
+		_, err = client.Do(req)
+		require.ErrorIs(t, err, ErrDispatchPending)
+		require.EqualValues(t, 1, protocol.Load(), "TLS ALPN must agree with the HTTP/1-only dispatch transport")
+	})
+}
+
 func (r *lostReceiptReply) CheckDispatch(context.Context, Dispatch) error             { return nil }
 func (r *lostReceiptReply) OpenDispatchStream(context.Context, Dispatch) error        { return nil }
 func (r *lostReceiptReply) InterruptDispatch(context.Context, Dispatch, string) error { return nil }

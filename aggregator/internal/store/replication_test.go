@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,6 +22,34 @@ func replicationFixture() (*replicatedDurability, replicationStatus) {
 		Started: "2026-01-01 00:00:00+00", Timeline: "00000001", Fsync: "on", FullPages: "on", SyncCommit: "on",
 		Standbys: `ANY 1 ("member-b","member-c")`}
 	return r, status
+}
+
+func TestReplicationOwnershipBoundaryPreservesCoordinatorProof(t *testing.T) {
+	r, status := replicationFixture()
+	r.cfg.Mode = "citus"
+	coordinator := &pgxpool.Pool{}
+	r.pools = []*pgxpool.Pool{coordinator}
+	for i := 1; i < 5; i++ {
+		g := r.cfg.Groups[0]
+		g.ID = i
+		r.cfg.Groups = append(r.cfg.Groups, g)
+		r.pools = append(r.pools, &pgxpool.Pool{})
+	}
+	control := r.coordinatorOnly()
+	require.Equal(t, "citus", r.cfg.Mode, "the entity adapter remains distributed")
+	require.Len(t, r.cfg.Groups, 5)
+	require.Len(t, r.pools, 5)
+	require.Equal(t, "postgres", control.cfg.Mode)
+	require.Equal(t, r.cfg.Formation, control.cfg.Formation)
+	require.Equal(t, r.cfg.Groups[:1], control.cfg.Groups)
+	require.Same(t, coordinator, control.pools[0])
+	n, members, err := control.quorum(status, control.cfg.Groups[0])
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.Len(t, members, 2, "ownership still requires an original synchronous peer")
+	status.SystemID = "replacement"
+	_, _, err = control.quorum(status, control.cfg.Groups[0])
+	require.Error(t, err, "narrowing participants must never allow a replacement coordinator")
 }
 
 func TestReplicationWALPositions(t *testing.T) {

@@ -154,7 +154,10 @@ func main() {
 			wildfireEngine, configErr = wildfireprocessor.New(st, wc)
 		}
 		if configErr == nil {
-			check, cancel := context.WithTimeout(ctx, canonical.Deadline)
+			// Startup checks only inspect schema and immutable configuration.
+			// Allow cold DNS/TLS/SQL connections to initialize independently of
+			// the unchanged two-second budget on live canonical operations.
+			check, cancel := context.WithTimeout(ctx, 15*time.Second)
 			configErr = wildfireEngine.Check(check)
 			cancel()
 		}

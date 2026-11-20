@@ -114,7 +114,14 @@ func (a *Authority) begin(ctx context.Context) (pgx.Tx, error) {
 		return nil, canonical.Unavailable()
 	}
 	if a.Durability != nil {
-		if err = a.Durability.Prepare(ctx, tx); err != nil {
+		if control, ok := a.Durability.(interface {
+			PrepareOwnership(context.Context, pgx.Tx) error
+		}); ok {
+			err = control.PrepareOwnership(ctx, tx)
+		} else {
+			err = a.Durability.Prepare(ctx, tx)
+		}
+		if err != nil {
 			_ = tx.Rollback(context.Background())
 			return nil, canonical.Unavailable()
 		}

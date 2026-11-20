@@ -36,7 +36,9 @@ def render(inventory, config, image, replicas=3):
         "AGGREGATOR_POLL_ENABLED": "true", "AGGREGATOR_REPLAY_ENABLED": "true", "AGGREGATOR_PUBLISH_ENABLED": "true",
         "DB_IDLE_TRANSACTION_TIMEOUT": "15s", "DB_ADMISSION_IDLE_TIMEOUT": "30s",
         "SHUTDOWN_TIMEOUT": "30s", "DB_MAX_OPEN_CONNS": "16", "DB_STATEMENT_TIMEOUT": "5s", "DB_LOCK_TIMEOUT": "2s",
+        "REPLICATION_MAX_OPEN_CONNS": "4",
         "OTEL_EXPORTER_OTLP_ENDPOINT": "http://tempo:4318",
+        "OTEL_TRACES_SAMPLER": "parentbased_traceidratio", "OTEL_TRACES_SAMPLER_ARG": "0.05",
         "BMKG_SEISMIC_READER_SCHEMA": "/schemas/seismic.avsc", "BMKG_TSUNAMI_READER_SCHEMA": "/schemas/tsunami.avsc",
         "PVMBG_READER_SCHEMA": "/schemas/volcanic-v1.avsc",
     })

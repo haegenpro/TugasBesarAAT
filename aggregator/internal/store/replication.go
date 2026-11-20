@@ -104,15 +104,19 @@ func (s *Store) ConfigureReplication(ctx context.Context, path string) error {
 		return err
 	}
 	r := &replicatedDurability{s: s, cfg: cfg}
+	budget := int32(platform.Int("REPLICATION_MAX_OPEN_CONNS", 4))
+	if budget < 1 || budget > 8 || (platform.Bool("FIELD_READ_PRIORITY_ENABLED", false) && budget < 2) {
+		return errors.New("REPLICATION_MAX_OPEN_CONNS must be 1..8 and at least 2 with Field isolation")
+	}
 	for _, group := range cfg.Groups {
 		pc, err := pgxpool.ParseConfig(os.Getenv(group.DSNEnv))
 		if os.Getenv(group.DSNEnv) == "" || err != nil {
 			r.Close()
 			return fmt.Errorf("missing or invalid replication DSN for group %d", group.ID)
 		}
-		pc.MaxConns, pc.MinConns = 2, 0
+		pc.MaxConns, pc.MinConns = budget, 1
 		if platform.Bool("FIELD_READ_PRIORITY_ENABLED", false) {
-			pc.MaxConns = 1
+			pc.MaxConns = budget - 1
 		}
 		pc.ConnConfig.ConnectTimeout = time.Second
 		pc.ConnConfig.RuntimeParams["statement_timeout"] = "1500"
@@ -260,6 +264,22 @@ func (r *replicatedDurability) Prepare(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
+// Ownership and acquisition-dispatch rows live only on coordinator group 0.
+// Their WAL proof must cover that group and its synchronous peer. Entity/batch
+// writes still use the original all-participant adapter above.
+func (r *replicatedDurability) coordinatorOnly() *replicatedDurability {
+	copy := *r
+	copy.cfg = r.cfg
+	copy.cfg.Mode = "postgres"
+	copy.cfg.Groups = r.cfg.Groups[:1]
+	copy.pools = r.pools[:1]
+	return &copy
+}
+
+func (r *replicatedDurability) PrepareOwnership(ctx context.Context, tx pgx.Tx) error {
+	return r.coordinatorOnly().Prepare(ctx, tx)
+}
+
 func samePrimary(a, b replicationStatus) bool {
 	return a.SystemID == b.SystemID && a.Member == b.Member && a.Started == b.Started && a.Timeline == b.Timeline
 }
@@ -375,10 +395,11 @@ func (r *replicatedDurability) ConfirmCapture(ctx context.Context, id, state str
 }
 
 func (r *replicatedDurability) ConfirmOwnership(ctx context.Context, owner canonical.Ownership, released bool) error {
+	control := r.coordinatorOnly()
 	if released {
-		return r.confirmRecord(ctx, "SELECT EXISTS(SELECT 1 FROM canonical_ownership WHERE scope=$1 AND epoch=$2 AND holder IS NULL AND expires_at IS NULL)", owner.Scope, owner.Epoch)
+		return control.confirmRecord(ctx, "SELECT EXISTS(SELECT 1 FROM canonical_ownership WHERE scope=$1 AND epoch=$2 AND holder IS NULL AND expires_at IS NULL)", owner.Scope, owner.Epoch)
 	}
-	return r.confirmRecord(ctx, "SELECT EXISTS(SELECT 1 FROM canonical_ownership WHERE scope=$1 AND epoch=$2 AND holder=$3 AND expires_at>clock_timestamp())", owner.Scope, owner.Epoch, owner.Holder)
+	return control.confirmRecord(ctx, "SELECT EXISTS(SELECT 1 FROM canonical_ownership WHERE scope=$1 AND epoch=$2 AND holder=$3 AND expires_at>clock_timestamp())", owner.Scope, owner.Epoch, owner.Holder)
 }
 
 func (r *replicatedDurability) confirmRecord(ctx context.Context, query string, args ...any) error {
@@ -476,9 +497,12 @@ func (r *replicatedDurability) validateTopology(raw string) error {
 }
 
 func (r *replicatedDurability) topology(ctx context.Context) (string, error) {
+	if r.cfg.Mode == "postgres" {
+		return "postgres", nil
+	}
 	// The caller can already hold an application transaction/connection. Avoid
 	// waiting for another application slot when every reader has one checked out.
-	raw, _, err := readPrimaryTopology(ctx, r.pools[0])
+	raw, _, err := readCitusTopology(ctx, r.pools[0])
 	if err != nil {
 		return "", err
 	}

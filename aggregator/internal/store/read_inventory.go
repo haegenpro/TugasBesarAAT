@@ -25,7 +25,86 @@ type KubernetesInventory struct {
 	API, Namespace, TokenFile string
 	Kube, Patroni             *http.Client
 	replication               *replicatedDurability
+	placement                 *podPlacementCache
 }
+
+// Pod-to-node binding is immutable for a pod's lifetime. Refresh this placement
+// metadata outside the read budget; all physical-primary, lease and row checks
+// remain live on every read. Expired metadata is never served indefinitely.
+type podPlacementCache struct {
+	mu      sync.RWMutex
+	nodes   map[string]string
+	updated time.Time
+	ready   chan struct{}
+	done    chan struct{}
+	cancel  context.CancelFunc
+}
+
+const placementMaxAge = 10 * time.Second
+
+func newPodPlacementCache(load func(context.Context) (map[string]string, error)) *podPlacementCache {
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &podPlacementCache{ready: make(chan struct{}), done: make(chan struct{}), cancel: cancel}
+	go func() {
+		defer close(c.done)
+		first := true
+		for ctx.Err() == nil {
+			call, stop := context.WithTimeout(ctx, 5*time.Second)
+			nodes, err := load(call)
+			stop()
+			if err == nil {
+				c.mu.Lock()
+				c.nodes = nodes
+				c.updated = time.Now()
+				c.mu.Unlock()
+				platform.Add("read_placement_refresh_success_total", 1)
+				if first {
+					close(c.ready)
+					first = false
+				}
+			} else {
+				platform.Add("read_placement_refresh_failures_total", 1)
+			}
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+	}()
+	return c
+}
+
+func (c *podPlacementCache) current() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return !c.updated.IsZero() && time.Since(c.updated) <= placementMaxAge
+}
+
+func (c *podPlacementCache) read(ctx context.Context) (map[string]string, error) {
+	select {
+	case <-ctx.Done():
+		return nil, canonical.Unavailable()
+	case <-c.ready:
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	age := time.Since(c.updated)
+	platform.Gauge("read_placement_age_seconds", age.Seconds())
+	if c.updated.IsZero() || age > placementMaxAge {
+		return nil, canonical.Unavailable()
+	}
+	out := make(map[string]string, len(c.nodes))
+	for name, node := range c.nodes {
+		out[name] = node
+	}
+	return out, nil
+}
+
+func (c *podPlacementCache) close() { c.cancel(); <-c.done }
+
 type podList struct {
 	Metadata struct {
 		Continue string `json:"continue"`
@@ -81,12 +160,17 @@ func (s *Store) ConfigureLiveReads(key []byte) error {
 	if tokenFile == "" {
 		tokenFile = root + "token"
 	}
-	provider := &KubernetesInventory{Store: s, API: strings.TrimRight(api, "/"), Namespace: ns, TokenFile: tokenFile, replication: replication, Kube: &http.Client{Timeout: 600 * time.Millisecond, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}}}, Patroni: &http.Client{Timeout: 400 * time.Millisecond}}
+	provider := &KubernetesInventory{Store: s, API: strings.TrimRight(api, "/"), Namespace: ns, TokenFile: tokenFile, replication: replication, Kube: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}, ForceAttemptHTTP2: true}}, Patroni: &http.Client{Timeout: 600 * time.Millisecond}}
+	if s.readPlacement == nil {
+		s.readPlacement = newPodPlacementCache(provider.loadPodNodes)
+		s.readPlacementOwner = true
+	}
+	provider.placement = s.readPlacement
 	groups := map[int]*pgxpool.Pool{}
 	for i, g := range replication.cfg.Groups {
 		groups[g.ID] = replication.pools[i]
 	}
-	s.Reads = ReadOptions{Signer: pagecursor.Signer{Key: key}, Groups: groups, Inventory: provider.Discover, Authority: provider.Authoritative}
+	s.Reads = ReadOptions{Signer: pagecursor.Signer{Key: key}, Groups: groups, Inventory: provider.Discover, Authority: provider.Authoritative, Cut: provider.ReadCut, MetadataReady: s.readPlacement.current}
 	return nil
 }
 func (k *KubernetesInventory) request(ctx context.Context, client *http.Client, endpoint, token string, out any) error {
@@ -120,18 +204,49 @@ func (k *KubernetesInventory) Authoritative(ctx context.Context, q readQuerier) 
 	if err != nil {
 		return status, canonical.Unavailable()
 	}
+	return status, k.checkAuthority(ctx, status, true)
+}
+
+func (k *KubernetesInventory) checkAuthority(ctx context.Context, status replicationStatus, lease bool) error {
 	g := k.replication.cfg.Groups[0]
 	if !status.Primary || status.SystemID != g.SystemID || status.Formation != k.replication.cfg.Formation || status.GroupID != 0 {
-		return status, canonical.Unavailable()
+		return canonical.Unavailable()
 	}
 	for _, member := range g.Members {
 		if member.Name == status.Member {
-			return status, k.request(ctx, k.Patroni, "http://"+member.Host+":8008/primary", "", nil)
+			if !lease {
+				return nil
+			}
+			return k.request(ctx, k.Patroni, "http://"+member.Host+":8008/primary", "", nil)
 		}
 	}
-	return status, canonical.Unavailable()
+	return canonical.Unavailable()
+}
+
+func (k *KubernetesInventory) ReadCut(ctx context.Context, q readQuerier, final bool) (int64, bool, replicationStatus, error) {
+	ctx, span := platform.Start(ctx, "canonical visibility and authority")
+	defer span.End()
+	var generation int64
+	var pending bool
+	var raw []byte
+	var status replicationStatus
+	err := q.QueryRow(ctx, `SELECT generation,EXISTS(SELECT 1 FROM canonical_attempts WHERE state='pending'),public.platform_replication_status() FROM canonical_visibility WHERE singleton`).Scan(&generation, &pending, &raw)
+	if err == nil {
+		err = json.Unmarshal(raw, &status)
+	}
+	if err == nil {
+		err = k.checkAuthority(ctx, status, final)
+	}
+	return generation, pending, status, err
 }
 func (k *KubernetesInventory) podNodes(ctx context.Context) (map[string]string, error) {
+	if k.placement != nil {
+		return k.placement.read(ctx)
+	}
+	return k.loadPodNodes(ctx)
+}
+
+func (k *KubernetesInventory) loadPodNodes(ctx context.Context) (map[string]string, error) {
 	ctx, span := platform.Start(ctx, "canonical pod placement")
 	defer span.End()
 	token, err := os.ReadFile(k.TokenFile)
@@ -152,6 +267,40 @@ func (k *KubernetesInventory) podNodes(ctx context.Context) (map[string]string, 
 	return nodes, nil
 }
 
+// /primary includes the same Patroni state document as /patroni, with status
+// 200 only while this member owns the leader lock. Replicas return 503 with
+// their state document. One exchange obtains both role and lease evidence.
+func (k *KubernetesInventory) memberUnit(ctx context.Context, group int, member ReplicationMember) audit.Unit {
+	u := audit.Unit{Name: member.Name, Host: member.Host, Group: group}
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://"+member.Host+":8008/primary", nil)
+	if err != nil {
+		return u
+	}
+	resp, err := k.Patroni.Do(req)
+	if err != nil {
+		return u
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
+		return u
+	}
+	var p struct {
+		Role  string `json:"role"`
+		State string `json:"state"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 512<<10)).Decode(&p) != nil || p.State != "running" {
+		return u
+	}
+	switch p.Role {
+	case "master", "primary":
+		u.Primary = true
+		u.RoleKnown = resp.StatusCode == http.StatusOK
+	case "replica", "sync_standby", "quorum_standby":
+		u.RoleKnown = resp.StatusCode == http.StatusServiceUnavailable
+	}
+	return u
+}
+
 func (k *KubernetesInventory) Discover(ctx context.Context) (audit.Inventory, error) {
 	ctx, span := platform.Start(ctx, "canonical read inventory")
 	defer span.End()
@@ -166,7 +315,11 @@ func (k *KubernetesInventory) Discover(ctx context.Context) (audit.Inventory, er
 	}()
 	go func() {
 		defer wg.Done()
-		out.Topology, _, topologyErr = k.Store.primaryTopology(ctx)
+		if topology, ok := ctx.Value(inventoryTopologyKey{}).(string); ok {
+			out.Topology = topology
+		} else {
+			out.Topology, _, topologyErr = k.Store.primaryTopology(ctx)
+		}
 	}()
 	units := make([][]audit.Unit, len(k.replication.cfg.Groups))
 	statuses := make([]replicationStatus, len(units))
@@ -178,7 +331,7 @@ func (k *KubernetesInventory) Discover(ctx context.Context) (audit.Inventory, er
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			call, stop := context.WithTimeout(ctx, 450*time.Millisecond)
+			call, stop := context.WithTimeout(ctx, 750*time.Millisecond)
 			defer stop()
 			statuses[i], statusErrors[i] = readReplication(call, k.replication.pools[i])
 		}()
@@ -187,24 +340,9 @@ func (k *KubernetesInventory) Discover(ctx context.Context) (audit.Inventory, er
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				unit := &units[i][j]
-				*unit = audit.Unit{Name: member.Name, Host: member.Host, Group: group.ID}
-				call, stop := context.WithTimeout(ctx, 400*time.Millisecond)
+				call, stop := context.WithTimeout(ctx, 600*time.Millisecond)
 				defer stop()
-				var p struct {
-					Role  string `json:"role"`
-					State string `json:"state"`
-				}
-				err := k.request(call, k.Patroni, "http://"+member.Host+":8008/patroni", "", &p)
-				if err == nil && p.State == "running" {
-					switch p.Role {
-					case "master", "primary":
-						unit.Primary = true
-						unit.RoleKnown = k.request(call, k.Patroni, "http://"+member.Host+":8008/primary", "", nil) == nil
-					case "replica", "sync_standby", "quorum_standby":
-						unit.RoleKnown = true
-					}
-				}
+				units[i][j] = k.memberUnit(call, group.ID, member)
 			}()
 		}
 	}

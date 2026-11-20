@@ -89,25 +89,31 @@ func New(s *store.Store, c Config) (*Engine, error) {
 	return &Engine{Store: s, Config: c, provinces: p, fingerprint: fp}, nil
 }
 func (e *Engine) Check(ctx context.Context) error {
-	for _, sql := range []string{`SELECT member_position,member_sha256,header_sha256 FROM wildfire_fire_versions LIMIT 0`, `SELECT member_key FROM wildfire_memberships LIMIT 0`, `SELECT related_id FROM wildfire_lineage LIMIT 0`, `SELECT charged_bytes FROM wildfire_finalize LIMIT 0`, `SELECT finalization_version,seal_after,seal_hash FROM wildfire_jobs LIMIT 0`} {
-		if _, err := e.Store.Pool.Exec(ctx, sql); err != nil {
-			return err
-		}
+	// Validate all required columns and the immutable run in one network
+	// exchange. A cold connection must not spend the startup budget on eleven
+	// serial round trips before any application work can begin.
+	checks := []string{`SELECT member_position,member_sha256,header_sha256 FROM wildfire_fire_versions LIMIT 0`, `SELECT member_key FROM wildfire_memberships LIMIT 0`, `SELECT related_id FROM wildfire_lineage LIMIT 0`, `SELECT charged_bytes FROM wildfire_finalize LIMIT 0`, `SELECT finalization_version,seal_after,seal_hash FROM wildfire_jobs LIMIT 0`, `SELECT config_sha256,prepared_through,applied_through FROM wildfire_runs LIMIT 0`, `SELECT phase,checkpoint,state_sha256,sealed FROM wildfire_jobs LIMIT 0`, `SELECT route_key,payload,sha256 FROM wildfire_state LIMIT 0`, `SELECT node_key,component,done FROM wildfire_work LIMIT 0`, `SELECT ordinal,payload,sha256 FROM wildfire_output_chunks LIMIT 0`}
+	batch := &pgx.Batch{}
+	for _, sql := range checks {
+		batch.Queue(sql)
 	}
-	for _, sql := range []string{`SELECT config_sha256,prepared_through,applied_through FROM wildfire_runs LIMIT 0`, `SELECT phase,checkpoint,state_sha256,sealed FROM wildfire_jobs LIMIT 0`, `SELECT route_key,payload,sha256 FROM wildfire_state LIMIT 0`, `SELECT node_key,component,done FROM wildfire_work LIMIT 0`, `SELECT ordinal,payload,sha256 FROM wildfire_output_chunks LIMIT 0`} {
-		if _, err := e.Store.Pool.Exec(ctx, sql); err != nil {
+	batch.Queue(`SELECT config_sha256 FROM wildfire_runs WHERE namespace=$1`, e.Config.Namespace)
+	results := e.Store.Pool.SendBatch(ctx, batch)
+	defer results.Close()
+	for range checks {
+		if _, err := results.Exec(); err != nil {
 			return err
 		}
 	}
 	var stored string
-	err := e.Store.Pool.QueryRow(ctx, `SELECT config_sha256 FROM wildfire_runs WHERE namespace=$1`, e.Config.Namespace).Scan(&stored)
+	err := results.QueryRow().Scan(&stored)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	if err == nil && stored != e.fingerprint {
 		return fmt.Errorf("immutable run configuration mismatch")
 	}
-	return nil
+	return results.Close()
 }
 func (e *Engine) begin(ctx context.Context, owner canonical.Ownership) (pgx.Tx, error) {
 	if owner.Scope != "processor:SATELIT" {

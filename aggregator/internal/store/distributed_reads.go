@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
@@ -31,6 +32,10 @@ type ReadOptions struct {
 	// deployment derives these from the captured formation, never HTTP input.
 	Groups    map[int]*pgxpool.Pool
 	Authority func(context.Context, readQuerier) (replicationStatus, error)
+	// Live cuts combine visibility and physical identity in one SQL snapshot.
+	// The final cut additionally checks Patroni's current leader lease.
+	Cut           func(context.Context, readQuerier, bool) (int64, bool, replicationStatus, error)
+	MetadataReady func() bool
 }
 type readShard struct {
 	ID    int64
@@ -56,6 +61,9 @@ type readResult struct {
 }
 
 func (s *Store) readCatalog(ctx context.Context) ([]readShard, string, error) {
+	if r, ok := s.Canonical.Durability.(*replicatedDurability); ok && r.cfg.Mode == "citus" {
+		return s.readCitusCatalog(ctx)
+	}
 	topology, count, err := s.primaryTopology(ctx)
 	if err != nil {
 		return nil, "", err
@@ -84,6 +92,41 @@ func (s *Store) readCatalog(ctx context.Context) ([]readShard, string, error) {
 	}
 	if err = rows.Err(); err != nil {
 		return nil, "", err
+	}
+	if len(shards) == 0 {
+		return nil, "", canonical.Unavailable()
+	}
+	return shards, topology, nil
+}
+
+// Read the routing generation and all placements in one coordinator snapshot.
+// Repeated metadata round trips consume the same two-second budget as the rows.
+func (s *Store) readCitusCatalog(ctx context.Context) ([]readShard, string, error) {
+	var topology string
+	var count, inactive int
+	var raw []byte
+	err := s.Pool.QueryRow(ctx, `SELECT
+ (SELECT coalesce(jsonb_agg(jsonb_build_array(nodeid,nodename,nodeport,groupid) ORDER BY nodeid),'[]'::jsonb)::text FROM pg_dist_node WHERE groupid>0 AND noderole='primary'),
+ (SELECT count(*) FROM pg_dist_node WHERE groupid>0 AND noderole='primary'),
+ (SELECT count(*) FROM pg_dist_node WHERE groupid>0 AND noderole='primary' AND NOT isactive),
+ (SELECT coalesce(jsonb_agg(jsonb_build_object('ID',s.shardid,'Group',p.groupid) ORDER BY s.shardid),'[]'::jsonb) FROM pg_dist_shard s JOIN pg_dist_placement p USING(shardid) WHERE s.logicalrelid='hazard_events'::regclass AND p.shardstate=1)`).Scan(&topology, &count, &inactive, &raw)
+	if err != nil {
+		return nil, "", err
+	}
+	if count == 0 || inactive != 0 {
+		return nil, "", canonical.Unavailable()
+	}
+	var shards []readShard
+	if err = json.Unmarshal(raw, &shards); err != nil {
+		return nil, "", canonical.Unavailable()
+	}
+	seen := map[int64]bool{}
+	for i := range shards {
+		if seen[shards[i].ID] {
+			return nil, "", fmt.Errorf("ambiguous logical shard placement")
+		}
+		seen[shards[i].ID] = true
+		shards[i].Table = "hazard_events_" + strconv.FormatInt(shards[i].ID, 10)
 	}
 	if len(shards) == 0 {
 		return nil, "", canonical.Unavailable()
@@ -186,6 +229,12 @@ func (s *Store) readInventory(ctx context.Context) (audit.Inventory, error) {
 	}
 	return s.Reads.Inventory(ctx)
 }
+
+type inventoryTopologyKey struct{}
+
+func (s *Store) readInventoryAt(ctx context.Context, topology string) (audit.Inventory, error) {
+	return s.readInventory(context.WithValue(ctx, inventoryTopologyKey{}, topology))
+}
 func (s *Store) readDistributed(ctx context.Context, q readSpec) (readResult, error) {
 	ctx, span := platform.Start(ctx, "canonical distributed rows")
 	defer span.End()
@@ -203,12 +252,12 @@ func (s *Store) readDistributed(ctx context.Context, q readSpec) (readResult, er
 		wg.Go(func() {
 			routed, span := platform.Start(ctx, "canonical routed read")
 			defer span.End()
-			normal, stop := context.WithTimeout(routed, 350*time.Millisecond)
+			normal, stop := context.WithTimeout(routed, 750*time.Millisecond)
 			defer stop()
 			events, metadata, normalErr = fetchRows(normal, s.Pool, []string{"hazard_events"}, q)
 		})
 	}
-	inventory, err := s.readInventory(ctx)
+	inventory, err := s.readInventoryAt(ctx, topology)
 	wg.Wait()
 	if err != nil {
 		return out, canonical.Unavailable()
@@ -401,7 +450,7 @@ func (s *Store) AuditChecksum(ctx context.Context, source string) (audit.Checksu
 		if err != nil {
 			return err
 		}
-		inventory, err := s.readInventory(ctx)
+		inventory, err := s.readInventoryAt(ctx, topology)
 		if err != nil || (inventory.Topology != "" && inventory.Topology != topology) {
 			return canonical.Unavailable()
 		}
@@ -430,13 +479,6 @@ func (s *Store) AuditChecksum(ctx context.Context, source string) (audit.Checksu
 			}
 			started++
 			go func() {
-				probe, stop := context.WithTimeout(ctx, 450*time.Millisecond)
-				probeErr := pool.Ping(probe)
-				stop()
-				if probeErr != nil {
-					streams <- checksumStream{unit: unit.Name}
-					return
-				}
 				parts := make([]string, 0, len(tables))
 				for _, table := range tables {
 					parts = append(parts, `SELECT source_ref_id,source,hazard_id FROM `+table+` WHERE active AND ($1='' OR source=$1)`)
