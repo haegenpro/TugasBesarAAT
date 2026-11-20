@@ -85,7 +85,13 @@ func (l *Lab) m2Faults(ctx context.Context) {
 			if err == nil {
 				err = l.fault(ctx, r.Action, r.Service)
 			}
-			_ = writeJSON(filepath.Join(l.Dir, fmt.Sprintf("fault-response-%d.json", r.Sequence)), map[string]any{"error": errString(err), "action": r.Action, "service": r.Service, "dsn": l.DSN[r.Service]})
+			response := filepath.Join(l.Dir, fmt.Sprintf("fault-response-%d.json", r.Sequence))
+			temporary := response + ".tmp"
+			// Test clients poll for the final name. Publish it only after the
+			// entire response has been written and closed.
+			if err := writeJSON(temporary, map[string]any{"error": errString(err), "action": r.Action, "service": r.Service, "dsn": l.DSN[r.Service]}); err == nil {
+				_ = os.Rename(temporary, response)
+			}
 		}
 		select {
 		case <-ctx.Done():
