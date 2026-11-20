@@ -870,7 +870,10 @@ cd aggregator && TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/
 
 On the four-laptop K3s cluster, [M2 demo checks](docs/m2/Platform-Demo-Checks.md)
 maps every multi-node M2 criterion (P1–P5 and the real Wi-Fi cut bonus) to one
-command. `scripts/platform-demo-check.py` triggers and verifies a criterion and
+command. [`scripts/m2/`](scripts/m2/README.md) holds one entry point per
+criterion, named by problem (`p1-data-spread.py`, `p2-takeover.py`, …,
+`bonus-wifi-cut.py`); each runs the underlying tool such as
+`scripts/platform-demo-check.py`, which triggers and verifies a criterion and
 keeps its evidence. `scripts/platform-vm-control.py` (VM pause, freeze, power)
 and `scripts/platform-host-probe.py` (Wi-Fi cut) run on the laptop that hosts
 the VM. Load, scaling and rollout use `scripts/platform-game-day.py`.

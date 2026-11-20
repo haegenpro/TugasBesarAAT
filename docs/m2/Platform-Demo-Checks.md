@@ -50,6 +50,11 @@ the right VM. Guest steps (volume preparation, restores) are exported as
 
 ## Criteria
 
+Each criterion also has a named entry point in
+[`scripts/m2/`](../../scripts/m2/README.md), for example
+`python scripts/m2/p2-takeover.py …` instead of
+`platform-demo-check.py takeover …`; arguments are passed through unchanged.
+
 | Criterion | Command | Operator part |
 | --- | --- | --- |
 | P1.1–1.3 data spread, cross-location ordered reads | `platform-demo-check.py distribution --inventory $INV $AUDIT $CLIENT` | none |
