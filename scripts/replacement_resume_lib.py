@@ -91,6 +91,46 @@ else:
  os.replace(temporary,marker)
 '''
 
+# Existing-cluster (inventory v3) equivalent of an empty replacement disk: the
+# same VM keeps its K3s identity, and only the lost node's owned application
+# volumes are moved aside (never deleted) and recreated empty, exactly once
+# per replacement run. Controllers of these volumes are held at zero replicas.
+V3_PREPARE=r'''
+import json,os,pathlib,subprocess,sys
+p=json.load(sys.stdin)
+if os.geteuid()!=0:raise RuntimeError('run with sudo inside the intended VM')
+addresses=json.loads(subprocess.check_output(['ip','-j','-4','address','show'],text=True))
+if not any(a.get('local')==p['address']for nic in addresses for a in nic.get('addr_info',[])):raise RuntimeError('this VM does not have the captured node address')
+root=pathlib.Path('/var/lib/aat');base=root/'local-pv';marker=root/'replacement-run.json'
+expected={k:p[k]for k in('cluster_id','inventory_sha256','node','run_id')}
+for path in(root,base):
+ if os.path.realpath(path)!=str(path):raise RuntimeError('storage ancestors must not be symlinks')
+ path.mkdir(mode=0o755,exist_ok=True)
+if marker.exists()and(marker.is_symlink()or json.loads(marker.read_text())!=expected):raise RuntimeError('guest belongs to another replacement generation')
+quarantine=root/'replaced'/p['run_id'];prepared=[]
+for v in p['volumes']:
+ path=pathlib.Path(v['path']);formation=path.parent
+ if formation.parent!=base or path.name in('','.','..')or os.path.realpath(formation)!=str(formation):raise RuntimeError('volume path outside owned local-pv')
+ formation.mkdir(mode=0o755,exist_ok=True);owner=formation/'.owner.json';want={'cluster_id':p['cluster_id'],'formation':formation.name}
+ if owner.exists()and json.loads(owner.read_text())!=want:raise RuntimeError('formation ownership differs')
+ if not owner.exists():owner.write_text(json.dumps(want))
+ state=formation/('.'+path.name+'.replaced-'+p['run_id'])
+ if not state.exists():
+  if path.is_symlink():raise RuntimeError('volume must not be a symlink')
+  if path.exists():
+   target=quarantine/formation.name/path.name;target.parent.mkdir(parents=True,exist_ok=True,mode=0o700);os.replace(path,target)
+  path.mkdir(mode=0o700);os.chown(path,v['uid'],v['uid']);state.write_text(p['run_id']+'\n')
+ elif path.is_symlink()or not path.is_dir()or path.stat().st_uid!=v['uid']:raise RuntimeError('prepared volume changed after preparation')
+ prepared.append(str(path))
+if not marker.exists():marker.write_text(json.dumps(expected)+'\n')
+print(json.dumps({'prepared':prepared,'quarantine':str(quarantine)}))
+'''
+
+def volume_uid(volume):
+    """Filesystem owner of a recreated volume: Patroni 999, etcd 1000, services as declared."""
+    if 'uid' in volume:return volume['uid']
+    return 1000 if '-etcd-'in volume['claim'] else 999
+
 class ReplacementRunner:
     def __init__(self,inventory,prepared,run_id=None,cluster=None):
         require(prepared['ready'],'resolve every recovery blocker before mutation')
@@ -103,6 +143,10 @@ class ReplacementRunner:
         else:
             report={'version':3,'cluster_id':inventory['cluster_id'],'inventory_sha256':fingerprint(inventory),'prepared_sha256':digest(prepared),'run_id':self.run_id,'node':self.target['name'],'started_at':datetime.now(timezone.utc).isoformat(),'passed':False,'events':[],'steps':{},'scope':prepared['scope']}
         self.journal=PhaseJournal(self.output/'result.json',report);self.report=report;self.module=recovery_module();self.helpers={}
+        # Inventory v3: manually managed VMs on separate laptops. VM actions and
+        # guest steps are operator-performed and observed; K3s membership is kept.
+        self.existing=inventory.get('version')==3
+        if self.existing:self.cluster.tolerate_unready.add(self.target['name'])
         for f in prepared['formations']:
             helper=self.module.Recovery(inventory,f['plan'],f['config'],self.target['name'],provider_aware=True);helper.cluster=self.cluster
             self.helpers[helper.storage['formation']]=helper
@@ -112,11 +156,17 @@ class ReplacementRunner:
             try:return check()
             except (ValueError,KeyError,RuntimeError,subprocess.SubprocessError):
                 require(time.monotonic()<deadline,message);time.sleep(2)
-    def fenced(self):require(self.cluster.vm_state(self.target)=='shut off','original VM must remain fenced before disk replacement')
+    def fenced(self):
+        if self.existing:
+            # The operator powered the VM off (or the fault did); its kubelet must not answer.
+            require(self.cluster.vm_state(self.target)in('shut off','unreachable'),'original VM must remain powered off before volume replacement')
+            return
+        require(self.cluster.vm_state(self.target)=='shut off','original VM must remain fenced before disk replacement')
     def get(self,kind,name,namespace=None):
         result=self.cluster.kubectl('get',kind,name,*(['-n',namespace]if namespace else[]),'--ignore-not-found=true','-o','json')
         return json.loads(result.stdout)if result.stdout.strip()else None
     def guest(self,verify=False):
+        if self.existing:return  # v3 identity/generation checks run inside the V3_PREPARE guest step
         payload={'cluster_id':self.inventory['cluster_id'],'inventory_sha256':fingerprint(self.inventory),'node':self.target['name'],'run_id':self.run_id,'verify_only':False}
         # verify_only is an execution instruction, not part of stored identity.
         script=GUEST_MARK.replace("if p['verify_only']or",'if '+str(verify)+' or')
@@ -151,7 +201,9 @@ class ReplacementRunner:
         return {'holds':holds,'anchors':anchors,'dcs_members':members,'brokers':brokers,'pods':recorded,'node_uid':node_uid}
     def remove_node(self,baseline):
         c=self.cluster;self.fenced();current=self.get('node',self.target['name'])
-        if current:
+        # v3 keeps the K3s node object: deleting a server node would remove its
+        # K3s etcd membership, and the same VM rejoins with its original identity.
+        if current and not self.existing:
             require(current['metadata']['uid']==baseline['node_uid'],'Kubernetes node was recreated outside original replacement')
             c.kubectl('delete','node',self.target['name'],'--wait=true','--timeout=60s',timeout=70)
         for pod in baseline['pods']:
@@ -159,18 +211,34 @@ class ReplacementRunner:
             if current and current['metadata']['uid']==pod['uid']:
                 c.kubectl('delete','pod',pod['name'],'-n',self.ns,'--grace-period=0','--force','--ignore-not-found=true')
     def provider(self):
+        if self.existing:
+            # No provider disk swap: owned volumes are moved aside and recreated
+            # empty inside the guest after boot, while their controllers are held.
+            self.fenced();self.survivor_prefix(self.report['steps']['preflight']['result'])
+            return {'phase':'complete','mode':'existing-cluster: volumes recreated empty in prepare-volumes'}
         self.fenced();self.survivor_prefix(self.report['steps']['preflight']['result']);status=self.cluster.replacement_status(self.target,self.run_id)
         if status['phase']=='complete':return status
         self.cluster.replace_empty(self.target,self.run_id)
         status=self.cluster.replacement_status(self.target,self.run_id);require(status['phase']=='complete','provider did not finish original replacement');return status
     def boot(self):
-        c=self.cluster;require(c.replacement_status(self.target,self.run_id)['phase']=='complete','original provider generation unavailable')
+        c=self.cluster
+        if self.existing:
+            if c.vm_state(self.target)!='running':c.vm_action(self.target,'start')
+            node=c.wait_node_ready(self.target['name'],600,uid=self.target['uid'])
+            return {'node_uid':node['metadata']['uid'],'boot_id':node['status'].get('nodeInfo',{}).get('bootID')}
+        require(c.replacement_status(self.target,self.run_id)['phase']=='complete','original provider generation unavailable')
         state=c.vm_state(self.target);require(state in('running','shut off'),'replacement VM has an unexpected state')
         if state=='shut off':
             c.run(['ssh-keygen','-R',self.target['address'],'-f',c.private/'known_hosts'],check=False);c.vm_action(self.target,'start')
         c.wait_ssh(self.target);self.guest()
     def join(self):
-        c=self.cluster;self.guest(verify=True)
+        c=self.cluster
+        if self.existing:
+            # The same VM rejoins with its retained K3s identity; a re-registered
+            # node (new UID) requires recapturing the inventory instead.
+            node=c.wait_node_ready(self.target['name'],600,uid=self.target['uid'])
+            return {'node_uid':node['metadata']['uid'],'mode':'retained K3s membership'}
+        self.guest(verify=True)
         seed=next(n for n in self.inventory['nodes']if n['role']=='server'and n['name']!=self.target['name'])
         token=c.ssh(seed,['sudo','-n','cat','/var/lib/rancher/k3s/server/token']).stdout.decode().strip()
         require(token.startswith('K10')and'::'in token,'CA-pinned original join token required');c.redactions.append(token)
@@ -188,6 +256,10 @@ class ReplacementRunner:
         c.install_node(self.target,binary,installer,token,False,join_server=seed['address'])
         marker=json.loads((c.state/'owner.json').read_text());marker['bootstrap_seed']=seed['name'];write_json(c.state/'owner.json',marker)
     def prepare_volumes(self):
+        if self.existing:
+            volumes=[{'path':v['path'],'uid':volume_uid(v)}for v in self.prepared['volumes']]
+            payload={'cluster_id':self.inventory['cluster_id'],'inventory_sha256':fingerprint(self.inventory),'node':self.target['name'],'run_id':self.run_id,'address':self.target['address'],'volumes':volumes}
+            return self.cluster.guest_step(self.target,'prepare-volumes',V3_PREPARE,json.dumps(payload).encode(),run_id=self.run_id)
         self.guest(verify=True)
         def module(name,path):
             spec=importlib.util.spec_from_file_location(name,ROOT/'scripts'/path);value=importlib.util.module_from_spec(spec);spec.loader.exec_module(value);return value
@@ -201,7 +273,12 @@ class ReplacementRunner:
         require(current['metadata']['uid']==expected['uid']and current['spec'].get('replicas',1)==0,'source controller lost its original restoration hold')
         raw=Path(volume['archive']).read_bytes()
         require(len(raw)<=64<<20 and hashlib.sha256(raw).hexdigest()==volume['sha256'],'checkpoint changed since original plan')
-        self.cluster.ssh(self.target,['sudo','-n','python3','-c',RESTORE,json.dumps({k:volume[k]for k in('path','uid','sha256')})],input=raw)
+        argument=json.dumps({k:volume[k]for k in('path','uid','sha256')})
+        if self.existing:
+            # Same restore program; its argument is fixed in the exported script.
+            script='import sys\nsys.argv=[sys.argv[0],'+repr(argument)+']\n'+RESTORE
+            return self.cluster.guest_step(self.target,'restore:'+volume['claim'],script,raw,run_id=self.run_id)
+        self.cluster.ssh(self.target,['sudo','-n','python3','-c',RESTORE,argument],input=raw)
     def promote(self,helper,learner):
         if not learner:return
         values=json.loads(helper.etcd(learner[0],'member','list','--write-out=json').stdout)['members']

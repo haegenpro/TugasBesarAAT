@@ -862,6 +862,15 @@ cd aggregator && TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/
 
 ---
 
+## M2 multi-node test scenarios
+
+On the four-laptop K3s cluster, [M2 demo checks](docs/Platform-Demo-Checks.md)
+maps every multi-node M2 criterion (P1–P5 and the real Wi-Fi cut bonus) to one
+command. `scripts/platform-demo-check.py` triggers and verifies a criterion and
+keeps its evidence. `scripts/platform-vm-control.py` (VM pause, freeze, power)
+and `scripts/platform-host-probe.py` (Wi-Fi cut) run on the laptop that hosts
+the VM. Load, scaling and rollout use `scripts/platform-game-day.py`.
+
 ## Acceptance test scenario index
 
 After fresh setup, follow [Test Runbook](docs/Test%20Runbook.md) phases 0 through

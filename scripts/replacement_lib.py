@@ -99,7 +99,10 @@ def validate_checkpoint(inventory,volume,policy,base):
     return {'captured_at':receipt['captured_at'],'sha256':receipt['sha256'],'sqlite':receipt.get('sqlite',[]),'scope':receipt.get('scope')}
 
 def load_plan(inventory,path,node_name):
-    require(inventory.get("version")==2 and len(inventory.get("hosts",[]))==4,"integrated replacement requires four physical provider hosts")
+    provider_hosts=inventory.get("version")==2 and len(inventory.get("hosts",[]))==4
+    # v3: four existing VMs on four distinct physical hosts, managed by an operator.
+    existing=inventory.get("version")==3 and len({n["physical_host"]for n in inventory.get("nodes",[])})==4
+    require(provider_hosts or existing,"integrated replacement requires four physical provider hosts or a four-host existing cluster")
     path=Path(path).resolve();base=path.parent;config=json.loads(path.read_text())
     require(config.get("version")==1,"replacement configuration version must be 1")
     target=next((n for n in inventory["nodes"]if n["name"]==node_name),None);require(target,"unknown replacement node")

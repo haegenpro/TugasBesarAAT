@@ -33,6 +33,10 @@ report-ready summaries. Preserve failure counterexamples as failures.
 
 ## Acceptance matrix
 
+Triggers and pass/fail checks for these rows on the existing four-laptop
+cluster are in [M2 demo checks](Platform-Demo-Checks.md); they remain
+unexecuted until run against the live deployment.
+
 | Requirement | Proof / measurements | Partners | Status |
 | --- | --- | --- | --- |
 | Four separate-kernel Kubernetes nodes | four Ready QEMU/KVM guests, unique boot IDs, required namespace, core deployments | Platform | Passed on light 7 GiB bootstrap; [report](Platform-Bootstrap-Validation.md) |
