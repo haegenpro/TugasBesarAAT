@@ -75,9 +75,7 @@ func Init(service string) func(context.Context) error {
 	if v := os.Getenv("INSTANCE_ID"); v != "" {
 		host = v
 	}
-	// Let the SDK honor OTEL_TRACES_SAMPLER and OTEL_TRACES_SAMPLER_ARG.
-	// Its default remains parent-based always-on when neither is configured.
-	opts := []sdktrace.TracerProviderOption{sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", service), attribute.String("service.instance.id", host)))}
+	opts := []sdktrace.TracerProviderOption{sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", service), attribute.String("service.instance.id", host))), sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample()))}
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" || os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != "" {
 		exp, err := otlptracehttp.New(context.Background(), otlptracehttp.WithTimeout(2*time.Second))
 		if err != nil {
@@ -212,30 +210,10 @@ type sample struct {
 var mu sync.Mutex
 var requests = map[string]*sample{}
 var gauges = map[string]float64{}
-var observations = map[string]*sample{}
 var bounds = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 5}
 
 func Gauge(name string, value float64) { mu.Lock(); defer mu.Unlock(); gauges[name] = value }
 func Add(name string, value float64)   { mu.Lock(); defer mu.Unlock(); gauges[name] += value }
-
-// Observe records bounded-label application latency histograms. Names are
-// internal constants, never source identities or request-controlled labels.
-func Observe(name string, value float64) {
-	mu.Lock()
-	defer mu.Unlock()
-	s := observations[name]
-	if s == nil {
-		s = &sample{}
-		observations[name] = s
-	}
-	s.Count++
-	s.Sum += value
-	for i, b := range bounds {
-		if value <= b {
-			s.Buckets[i]++
-		}
-	}
-}
 func Metrics(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -249,13 +227,6 @@ func Metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	for n, v := range gauges {
 		fmt.Fprintf(w, "app_%s %g\n", n, v)
-	}
-	for n, s := range observations {
-		fmt.Fprintf(w, "app_%s_sum %g\napp_%s_count %d\n", n, s.Sum, n, s.Count)
-		for i, b := range bounds {
-			fmt.Fprintf(w, "app_%s_bucket{le=%q} %d\n", n, strconv.FormatFloat(b, 'g', -1, 64), s.Buckets[i])
-		}
-		fmt.Fprintf(w, "app_%s_bucket{le=\"+Inf\"} %d\n", n, s.Count)
 	}
 }
 
@@ -279,10 +250,10 @@ func (w *response) Write(b []byte) (int, error) {
 func (w *response) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func route(path string) string {
 	switch path {
-	case "/internal/field/hazards", "/internal/field/notices", "/health", "/ready", "/metrics", "/hazards", "/notices", "/internal/hazards", "/internal/notices", "/internal/login", "/internal/logout", "/internal/refresh", "/internal/introspect", "/auth/login", "/auth/logout", "/auth/refresh", "/records", "/history", "/seismic-events", "/tsunami-warnings", "/volcanic-reports", "/admin/outage", "/admin/schema-version", "/internal/field-reports", "/internal/coastal/status", "/internal/ingestion/failures", "/internal/ingestion/replays", "/internal/ingestion/legacy-replays", "/internal/audit/unprocessed":
+	case "/health", "/ready", "/metrics", "/hazards", "/notices", "/internal/hazards", "/internal/notices", "/internal/login", "/internal/logout", "/internal/refresh", "/internal/introspect", "/auth/login", "/auth/logout", "/auth/refresh", "/records", "/history", "/seismic-events", "/tsunami-warnings", "/volcanic-reports", "/admin/outage", "/admin/schema-version":
 		return path
 	}
-	for _, prefix := range []string{"/internal/field/hazards/", "/internal/field/notices/", "/hazards/", "/notices/", "/internal/hazards/", "/internal/notices/", "/internal/field-reports/", "/internal/ingestion/replays/"} {
+	for _, prefix := range []string{"/hazards/", "/notices/", "/internal/hazards/", "/internal/notices/"} {
 		if strings.HasPrefix(path, prefix) {
 			return prefix + ":id"
 		}

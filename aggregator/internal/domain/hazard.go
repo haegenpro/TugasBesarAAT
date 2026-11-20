@@ -11,15 +11,11 @@ type HazardType string
 type Severity string
 
 const (
-	SourceBMKG         Source = "BMKG"
-	SourcePVMBG        Source = "PVMBG"
-	SourceSatelit      Source = "SATELIT"
-	SourceSensorPantai Source = "SENSOR_PANTAI"
+	SourceBMKG  Source = "BMKG"
+	SourcePVMBG Source = "PVMBG"
 
 	HazardSeismic  HazardType = "SEISMIC"
 	HazardVolcanic HazardType = "VOLCANIC"
-	HazardWildfire HazardType = "WILDFIRE"
-	HazardCoastal  HazardType = "COASTAL"
 
 	SeverityNormal  Severity = "NORMAL"
 	SeverityWaspada Severity = "WASPADA"
@@ -46,12 +42,8 @@ func Now() time.Time { return time.Now().UTC() }
 
 // Empty values represent an omitted filter. Each service owns its contract checks.
 func ValidHazardType(v string) bool {
-	return v == "" || v == string(HazardSeismic) || v == string(HazardVolcanic) || v == string(HazardWildfire) || v == string(HazardCoastal)
+	return v == "" || v == string(HazardSeismic) || v == string(HazardVolcanic)
 }
 func ValidSeverity(v string) bool {
 	return v == "" || v == string(SeverityNormal) || v == string(SeverityWaspada) || v == string(SeveritySiaga) || v == string(SeverityAwas)
-}
-
-func ValidSource(v string) bool {
-	return v == string(SourceBMKG) || v == string(SourcePVMBG) || v == string(SourceSatelit) || v == string(SourceSensorPantai)
 }

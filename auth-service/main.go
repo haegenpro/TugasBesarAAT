@@ -30,7 +30,7 @@ func main() {
 		log.Error("cannot open auth storage", "service", "auth-service", "error", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer store.db.Close()
 	server := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("auth-service", (&authServer{config: cfg, store: store, log: log}).router()), ReadHeaderTimeout: 5 * time.Second}
 	log.Info("auth service listening", "service", "auth-service", "port", cfg.Port)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

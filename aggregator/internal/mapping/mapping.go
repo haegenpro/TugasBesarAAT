@@ -137,9 +137,9 @@ func VolcanicToHazard(ctx context.Context, lookup volcano.Lookuper, report clien
 		return domain.HazardEvent{}, fmt.Errorf("invalid PVMBG alert_level %q", report.AlertLevel)
 	}
 
-	attrs := map[string]interface{}{"eruption_count_24h": report.EruptionCount24h}
-	if report.AshColumnHeightM != nil {
-		attrs["ash_column_height_m"] = *report.AshColumnHeightM
+	attrs := map[string]interface{}{
+		"eruption_count_24h":  report.EruptionCount24h,
+		"ash_column_height_m": report.AshColumnHeightM,
 	}
 	for key, value := range report.Attributes {
 		attrs[key] = value

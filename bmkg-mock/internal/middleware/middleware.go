@@ -5,10 +5,8 @@ package middleware
 
 import (
 	"bmkg-mock/internal/platform"
-	"encoding/hex"
 	"log/slog"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -61,7 +59,6 @@ func JSONLogger(logger *slog.Logger, service string) gin.HandlerFunc {
 			slog.String("path", c.Request.URL.Path),
 			slog.Int("status_code", c.Writer.Status()),
 			slog.Int64("latency_ms", latency),
-			acquisitionLogFields(c),
 		)
 	}
 }
@@ -88,26 +85,4 @@ func NewLogger() *slog.Logger {
 		},
 	}
 	return slog.New(slog.NewJSONHandler(os.Stdout, opts))
-}
-
-// Record logical recovery reads separately from ordinary polling. These fields
-// are caller-reported evidence, not authorization or upstream deduplication.
-// Validate their fixed format instead of dumping arbitrary request headers.
-func acquisitionLogFields(c *gin.Context) slog.Attr {
-	id := c.GetHeader("X-Acquisition-Request-ID")
-	if len(id) != 64 {
-		return slog.Attr{}
-	}
-	if _, err := hex.DecodeString(id); err != nil {
-		return slog.Attr{}
-	}
-	epoch, err := strconv.ParseInt(c.GetHeader("X-Acquisition-Epoch"), 10, 64)
-	if err != nil || epoch <= 0 {
-		return slog.Attr{}
-	}
-	recovery := c.GetHeader("X-Acquisition-Recovery")
-	if recovery != "true" && recovery != "false" {
-		return slog.Attr{}
-	}
-	return slog.Group("acquisition", slog.String("request_id", id), slog.Int64("epoch", epoch), slog.Bool("recovery", recovery == "true"))
 }

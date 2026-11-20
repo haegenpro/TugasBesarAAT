@@ -44,7 +44,6 @@ type TsunamiWarning struct {
 }
 
 type BMKGClient struct {
-	BeforeFetch    func(context.Context, string) error
 	CaptureFailure FailureRecorder
 	BaseURL        string
 	APIKey         string
@@ -66,11 +65,6 @@ func NewBMKGClient(baseURL, apiKey string, logger *slog.Logger) *BMKGClient {
 func (c *BMKGClient) get(ctx context.Context, correlationID, path string, required []string, out interface{}) (retErr error) {
 	callCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if c.BeforeFetch != nil {
-		if err := c.BeforeFetch(callCtx, "BMKG"); err != nil {
-			return err
-		}
-	}
 
 	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, c.BaseURL+path, nil)
 	if err != nil {
@@ -90,9 +84,9 @@ func (c *BMKGClient) get(ctx context.Context, correlationID, path string, requir
 		return err
 	}
 	defer resp.Body.Close()
-	rawBody, truncated, payloadStream, readErr := readResponseFailureBody(resp)
+	rawBody, truncated, readErr := platform.ReadPayload(resp.Body)
 	defer func() {
-		capture(callCtx, c.CaptureFailure, Failure{Source: "BMKG", Entity: path, Payload: rawBody, PayloadStream: payloadStream, ContentType: resp.Header.Get("Content-Type"), Truncated: truncated, CorrelationID: correlationID}, &retErr, resp)
+		capture(callCtx, c.CaptureFailure, Failure{Source: "BMKG", Entity: path, Payload: rawBody, Truncated: truncated, CorrelationID: correlationID}, &retErr)
 	}()
 	if readErr != nil {
 		return fmt.Errorf("%w: %v", ErrContractViolation, readErr)

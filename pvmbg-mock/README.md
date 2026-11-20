@@ -9,4 +9,4 @@ bounded live window and survive restart. Authenticated `GET /history`
 uses sequence cursors and each source's existing credentials/delays; PVMBG history
 also respects outage and confidence visibility. Live responses add an
 `X-Source-Sequence` header without changing their required bodies. See
-[Reporting Lifecycle](../docs/m1/Reporting%20Lifecycle.md).
+[Reporting Lifecycle](../docs/Reporting%20Lifecycle.md).

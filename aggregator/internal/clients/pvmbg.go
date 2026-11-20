@@ -10,8 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
-	"sync/atomic"
 	"time"
 
 	"aggregator/internal/avrowire"
@@ -25,47 +23,21 @@ type VolcanicReport struct {
 	VolcanoID        string
 	AlertLevel       string
 	EruptionCount24h int
-	AshColumnHeightM *float64
+	AshColumnHeightM float64
 	ReportedAt       time.Time
 	Attributes       map[string]any
 }
 
-const (
-	VolcanicAdapterV1 = 1
-	VolcanicAdapterV2 = 2
-)
-
-var volcanicAdapter atomic.Int32
-
-func init() { volcanicAdapter.Store(VolcanicAdapterV1) }
-
-func SetVolcanicAdapter(version int) error {
-	if version != VolcanicAdapterV1 && version != VolcanicAdapterV2 {
-		return fmt.Errorf("unsupported PVMBG adapter version %d", version)
-	}
-	volcanicAdapter.Store(int32(version))
-	return nil
-}
-
-func VolcanicAdapter() int { return int(volcanicAdapter.Load()) }
-
-func VolcanicAdapterName() string { return fmt.Sprintf("pvmbg-adapter-v%d", VolcanicAdapter()) }
-
 func decodeVolcanicReport(raw map[string]interface{}) (VolcanicReport, error) {
 	var r VolcanicReport
 	var err error
-	adapted := VolcanicAdapter() == VolcanicAdapterV2
 	if r.ReportID, err = requiredString(raw, "report_id"); err != nil {
 		return r, err
 	}
 	if r.VolcanoID, err = requiredString(raw, "volcano_id"); err != nil {
 		return r, err
 	}
-	levelField := "alert_level"
-	if _, ok := raw[levelField]; !ok && adapted {
-		levelField = "level"
-	}
-	if r.AlertLevel, err = requiredString(raw, levelField); err != nil {
+	if r.AlertLevel, err = requiredString(raw, "alert_level"); err != nil {
 		return r, err
 	}
 	switch r.AlertLevel {
@@ -73,15 +45,11 @@ func decodeVolcanicReport(raw map[string]interface{}) (VolcanicReport, error) {
 	default:
 		return r, fmt.Errorf("%w: invalid alert_level %q", ErrContractViolation, r.AlertLevel)
 	}
-	if r.EruptionCount24h, err = eruptionCount(raw, adapted); err != nil {
+	if r.EruptionCount24h, err = requiredInt(raw, "eruption_count_24h"); err != nil {
 		return r, err
 	}
-	if value, present := raw["ash_column_height_m"]; present && value != nil || !adapted {
-		ash, err := requiredNumber(raw, "ash_column_height_m")
-		if err != nil {
-			return r, err
-		}
-		r.AshColumnHeightM = &ash
+	if r.AshColumnHeightM, err = requiredNumber(raw, "ash_column_height_m"); err != nil {
+		return r, err
 	}
 	reportedAt, err := requiredString(raw, "reported_at")
 	if err != nil {
@@ -91,24 +59,11 @@ func decodeVolcanicReport(raw map[string]interface{}) (VolcanicReport, error) {
 	if err != nil {
 		return r, fmt.Errorf("%w: invalid required field %q: %v", ErrContractViolation, "reported_at", err)
 	}
-	r.Attributes = unmappedFields(raw, "report_id", "volcano_id", levelField, "reported_at", "eruption_count_24h", "ash_column_height_m")
+	r.Attributes = unmappedFields(raw, "report_id", "volcano_id", "alert_level", "reported_at", "eruption_count_24h", "ash_column_height_m")
 	return r, nil
 }
 
-func eruptionCount(raw map[string]any, adapted bool) (int, error) {
-	text, isText := raw["eruption_count_24h"].(string)
-	if !isText || !adapted {
-		return requiredInt(raw, "eruption_count_24h")
-	}
-	n, err := strconv.ParseUint(text, 10, 31)
-	if err != nil {
-		return 0, fmt.Errorf("%w: eruption_count_24h %q is not a nonnegative integer", ErrContractViolation, text)
-	}
-	return int(n), nil
-}
-
 type PVMBGClient struct {
-	BeforeFetch    func(context.Context, string) error
 	CaptureFailure FailureRecorder
 	BaseURL        string
 	Token          string
@@ -126,82 +81,6 @@ func NewPVMBGClient(baseURL, token string, logger *slog.Logger) *PVMBGClient {
 		HTTP:    platform.Client(5 * time.Second),
 		Logger:  logger,
 	}
-}
-
-type ParkedPayload struct {
-	ID        string
-	Entity    string
-	Payload   []byte
-	Truncated bool
-	Rejection string
-}
-
-func (c *PVMBGClient) Reprocess(ctx context.Context, p ParkedPayload) ([]VolcanicReport, error) {
-	if p.Rejection != "" {
-		return nil, fmt.Errorf("%w: %s", ErrContractViolation, p.Rejection)
-	}
-	if p.Truncated || len(p.Payload) == 0 {
-		return nil, fmt.Errorf("%w: original response bytes were not retained completely", ErrContractViolation)
-	}
-	reader := c.Reader
-	if c.ReaderSwitch != nil {
-		var release func()
-		var err error
-		ctx, reader, release, err = c.ReaderSwitch.Begin(ctx)
-		if err != nil {
-			return nil, err
-		}
-		defer release()
-	}
-	framed := c.Registry != nil && len(p.Payload) > 5 && p.Payload[0] == 0
-	if framed && reader == nil {
-		return nil, fmt.Errorf("explicit reader schema required for volcanic-reports")
-	}
-	var raws []map[string]any
-	if strings.HasPrefix(p.Entity, "history:") {
-		var page HistoryPage
-		if framed {
-			native, err := c.Registry.DecodeWithReader(ctx, p.Payload, reader.History)
-			if err != nil {
-				return nil, err
-			}
-			b, err := json.Marshal(native)
-			if err != nil {
-				return nil, err
-			}
-			if err = json.Unmarshal(b, &page); err != nil {
-				return nil, err
-			}
-		} else if err := json.Unmarshal(p.Payload, &page); err != nil {
-			return nil, fmt.Errorf("%w: history JSON: %v", ErrContractViolation, err)
-		}
-		for _, item := range page.Data {
-			var fields map[string]any
-			if err := decodeHistoryFields(item.Payload, &fields); err != nil {
-				return nil, fmt.Errorf("%w: history item: %v", ErrContractViolation, err)
-			}
-			raws = append(raws, fields)
-		}
-	} else if framed {
-		native, err := c.Registry.DecodeWithReader(ctx, p.Payload, reader.Live)
-		if err != nil {
-			return nil, err
-		}
-		if raws, err = avrowire.Records(native); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrContractViolation, err)
-		}
-	} else if err := json.Unmarshal(p.Payload, &raws); err != nil {
-		return nil, fmt.Errorf("%w: JSON: %v", ErrContractViolation, err)
-	}
-	reports := make([]VolcanicReport, 0, len(raws))
-	for i, raw := range raws {
-		r, err := decodeVolcanicReport(raw)
-		if err != nil {
-			return nil, fmt.Errorf("record %d: %w", i, err)
-		}
-		reports = append(reports, r)
-	}
-	return reports, nil
 }
 
 func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID string, since time.Time) (result []VolcanicReport, retErr error) {
@@ -222,11 +101,6 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if c.BeforeFetch != nil {
-		if err := c.BeforeFetch(callCtx, "PVMBG"); err != nil {
-			return nil, err
-		}
-	}
 
 	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, c.BaseURL+path, nil)
 	if err != nil {
@@ -246,9 +120,9 @@ func (c *PVMBGClient) FetchVolcanicReports(ctx context.Context, correlationID st
 		return nil, err
 	}
 	defer resp.Body.Close()
-	rawBody, truncated, payloadStream, readErr := readResponseFailureBody(resp)
+	rawBody, truncated, readErr := platform.ReadPayload(resp.Body)
 	defer func() {
-		capture(callCtx, c.CaptureFailure, Failure{Source: "PVMBG", Entity: path, Payload: rawBody, PayloadStream: payloadStream, ContentType: resp.Header.Get("Content-Type"), Truncated: truncated, CorrelationID: correlationID}, &retErr, resp)
+		capture(callCtx, c.CaptureFailure, Failure{Source: "PVMBG", Entity: path, Payload: rawBody, Truncated: truncated, CorrelationID: correlationID}, &retErr)
 	}()
 	if readErr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrContractViolation, readErr)

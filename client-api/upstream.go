@@ -16,13 +16,9 @@ import (
 )
 
 type api struct {
-	cfg            config
-	log            logger
-	client         *http.Client
-	chatClient     *http.Client
-	authSlots      chan struct{}
-	fieldAuthSlots chan struct{}
-	fieldClient    *http.Client
+	cfg    config
+	log    logger
+	client *http.Client
 }
 
 type logger interface {
@@ -49,29 +45,12 @@ func (a *api) call(c *gin.Context, service, method, endpoint string, payload any
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if service == "aggregator" && a.cfg.FieldReadToken != "" {
-		if value, ok := c.Get("principal"); ok {
-			if p, valid := value.(principal); valid && p.Role == "field" {
-				for _, prefix := range []string{"/internal/hazards", "/internal/notices"} {
-					if req.URL.Path == prefix || strings.HasPrefix(req.URL.Path, prefix+"/") {
-						req.URL.Path = "/internal/field" + strings.TrimPrefix(req.URL.Path, "/internal")
-						req.Header.Set("X-Field-Read-Key", a.cfg.FieldReadToken)
-						break
-					}
-				}
-			}
-		}
-	}
 	req.Header.Set("X-Correlation-ID", c.GetString("correlation_id"))
 	if internal {
 		req.Header.Set("X-Internal-Key", a.cfg.AuthInternalKey)
 	}
 	start := time.Now()
-	client := a.client
-	if c.GetBool("field_auth_lane") && a.fieldClient != nil {
-		client = a.fieldClient
-	}
-	resp, err := client.Do(req)
+	resp, err := a.client.Do(req)
 	if err != nil {
 		a.log.Warn("outbound request", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "latency_ms", time.Since(start).Milliseconds(), "success", false, "error", err.Error())
 		return 0, errUpstream

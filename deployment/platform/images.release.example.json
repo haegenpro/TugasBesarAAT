@@ -1,9 +1,0 @@
-{
-  "version": 1,
-  "registry": "YOUR_REGISTRY/YOUR_PROJECT",
-  "platform": "linux/amd64",
-  "external_images": {
-    "tempo": "SUPPLY_ACTUAL_IMMUTABLE_IMAGE",
-    "node-exporter": "SUPPLY_ACTUAL_IMMUTABLE_IMAGE"
-  }
-}

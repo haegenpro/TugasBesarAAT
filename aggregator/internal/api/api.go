@@ -3,7 +3,6 @@
 package api
 
 import (
-	"aggregator/internal/canonical"
 	"aggregator/internal/platform"
 	"context"
 	"errors"
@@ -35,7 +34,6 @@ type API struct {
 	Deps           *Dependencies
 	BMKGFreshness  time.Duration
 	PVMBGFreshness time.Duration
-	Coastal        *CoastalStatus
 }
 
 func New(s Repository, status *poller.PVMBGStatus, deps *Dependencies, bmkgFreshness, pvmbgFreshness time.Duration) *API {
@@ -61,10 +59,7 @@ type sourceStatus struct {
 }
 
 func (a *API) ListHazards(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), canonical.Deadline)
-	defer cancel()
-	c.Request = c.Request.WithContext(ctx)
-	if !a.Deps.ReadReady() {
+	if !a.Deps.StoreReady() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "store unavailable")})
 		return
 	}
@@ -123,10 +118,7 @@ func (a *API) ListHazards(c *gin.Context) {
 }
 
 func (a *API) GetHazard(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), canonical.Deadline)
-	defer cancel()
-	c.Request = c.Request.WithContext(ctx)
-	if !a.Deps.ReadReady() {
+	if !a.Deps.StoreReady() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "store unavailable")})
 		return
 	}
@@ -135,17 +127,7 @@ func (a *API) GetHazard(c *gin.Context) {
 		c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid hazard ID")})
 		return
 	}
-	var event domain.HazardEvent
-	var storedMetadata domain.RecordMetadata
-	var err error
-	unavailable := []string{}
-	if repository, ok := a.Store.(interface {
-		GetByIDAvailability(context.Context, string) (domain.HazardEvent, domain.RecordMetadata, []string, error)
-	}); ok {
-		event, storedMetadata, unavailable, err = repository.GetByIDAvailability(c.Request.Context(), id)
-	} else {
-		event, storedMetadata, err = a.Store.GetByIDWithMetadata(c.Request.Context(), id)
-	}
+	event, storedMetadata, err := a.Store.GetByIDWithMetadata(c.Request.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": platform.ProblemStatus(http.StatusNotFound, "hazard not found")})
@@ -161,7 +143,7 @@ func (a *API) GetHazard(c *gin.Context) {
 		return
 	}
 	metadata := a.recordMetadata([]domain.HazardEvent{event}, status, map[string]domain.RecordMetadata{event.HazardID: storedMetadata})
-	c.JSON(http.StatusOK, gin.H{"data": event, "source_status": status, "metadata": metadata[event.HazardID], "as_of": timeutil.New(domain.Now()), "partial": len(unavailable) > 0, "unavailable_units": unavailable})
+	c.JSON(http.StatusOK, gin.H{"data": event, "source_status": status, "metadata": metadata[event.HazardID], "as_of": timeutil.New(domain.Now())})
 }
 
 func Health(c *gin.Context) {
@@ -169,11 +151,7 @@ func Health(c *gin.Context) {
 }
 
 func (a *API) Ready(c *gin.Context) {
-	if a.Deps.Draining() {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "draining"})
-		return
-	}
-	storeReady := a.Deps.ReadReady()
+	storeReady := a.Deps.StoreReady()
 	brokerReady := a.Deps.BrokerReady() && a.Deps.LifecycleReady()
 	status := "ready"
 	code := http.StatusOK

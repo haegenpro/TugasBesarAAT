@@ -14,11 +14,9 @@ import (
 )
 
 type authServer struct {
-	config       config
-	store        Sessions
-	log          *slog.Logger
-	generalSlots chan struct{}
-	fieldSlots   chan struct{}
+	config config
+	store  Sessions
+	log    *slog.Logger
 }
 
 type loginRequest struct {
@@ -41,10 +39,6 @@ func sameSecret(a, b string) bool {
 }
 
 func (a *authServer) router() *gin.Engine {
-	if a.config.PriorityEnabled {
-		a.generalSlots = make(chan struct{}, a.config.MaxInFlight-a.config.FieldReserved)
-		a.fieldSlots = make(chan struct{}, a.config.FieldReserved)
-	}
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.HandleMethodNotAllowed = true
@@ -89,11 +83,6 @@ func (a *authServer) login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": platform.ProblemStatus(http.StatusUnauthorized, "invalid credentials")})
 		return
 	}
-	release := a.reserve(c, identity.Role == "field")
-	if release == nil {
-		return
-	}
-	defer release()
 	pair, err := a.store.issue(c.Request.Context(), identity)
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "auth storage unavailable")})
@@ -108,11 +97,6 @@ func (a *authServer) refresh(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": platform.ProblemStatus(http.StatusBadRequest, "refresh_token is required")})
 		return
 	}
-	release := a.reserve(c, a.fieldToken(req.RefreshToken, "refresh"))
-	if release == nil {
-		return
-	}
-	defer release()
 	pair, err := a.store.rotate(c.Request.Context(), req.RefreshToken)
 	if errors.Is(err, errInvalidToken) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": platform.ProblemStatus(http.StatusUnauthorized, "invalid refresh token")})
@@ -131,11 +115,6 @@ func (a *authServer) logout(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": platform.ProblemStatus(http.StatusBadRequest, "refresh_token is required")})
 		return
 	}
-	release := a.reserve(c, a.fieldToken(req.RefreshToken, "refresh"))
-	if release == nil {
-		return
-	}
-	defer release()
 	err := a.store.logout(c.Request.Context(), req.RefreshToken)
 	if errors.Is(err, errInvalidToken) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": platform.ProblemStatus(http.StatusUnauthorized, "invalid refresh token")})
@@ -154,11 +133,6 @@ func (a *authServer) introspect(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": platform.ProblemStatus(http.StatusBadRequest, "access_token is required")})
 		return
 	}
-	release := a.reserve(c, a.fieldToken(req.AccessToken, "access"))
-	if release == nil {
-		return
-	}
-	defer release()
 	principal, err := a.store.verify(c.Request.Context(), req.AccessToken)
 	if errors.Is(err, errInvalidToken) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": platform.ProblemStatus(http.StatusUnauthorized, "invalid access token")})

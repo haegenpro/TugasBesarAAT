@@ -62,7 +62,6 @@ func (s *projectionStore) readRecords(ctx context.Context, view string) ([]map[s
 		"notices":       `SELECT notice_id,payload,processed_at FROM notice_records ORDER BY processed_at DESC,notice_id DESC LIMIT 100`,
 		"history":       `SELECT event_id,payload,processed_at FROM lifecycle_events ORDER BY processed_at DESC,event_id DESC LIMIT 100`,
 		"notifications": `SELECT event_id,payload,processed_at FROM notifications ORDER BY processed_at DESC,event_id DESC LIMIT 100`,
-		"warnings":      `SELECT r.notification_id,n.payload,r.committed_at::text FROM coastal_warning_receipts r JOIN notifications n ON n.event_id=r.notification_id ORDER BY r.committed_at DESC,r.notification_id DESC LIMIT 100`,
 	}
 	query, ok := queries[view]
 	if !ok {

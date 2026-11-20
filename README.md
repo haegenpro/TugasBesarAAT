@@ -6,58 +6,11 @@ an interactive downstream client, and two durable broker consumers.
 
 The M1 preparation refactor preserves these service boundaries. Auth and both
 consumers now own separate PostgreSQL instances; the two source history archives
-remain SQLite. M2 adds [offline canonical migrations](store/README.md#m2-offline-migrations)
-and a first [canonical ownership/fencing integration](docs/m2/Platform-Coordination-Contract.md).
-M2 platform drafts now cover replicated storage/deployment, source election,
-Kubernetes, processor/audit coordination, recovery, isolation, observability,
-priority admission and deferred load/fault evidence. Teammate source/processor/
-Audit API work has been pulled and integrated into release preparation; full runtime acceptance remains pending. See the
-[preparation verification report](docs/m1/Preparation%20Verification.md) for measured
+remain SQLite. This checkout starts from fresh volumes: no existing-data migration
+is provided. Sharding, replication, leader election/fencing, Kubernetes, additional
+M2 sources and the M2 Audit API remain future work. See the
+[preparation verification report](docs/Preparation%20Verification.md) for measured
 results and limitations.
-
-The Platform, Coordination & Reliability handoff is documented in the
-[coordination contract](docs/m2/Platform-Coordination-Contract.md),
-[deployment plan](docs/m2/Platform-Deployment-Contract.md), and
-[acceptance matrix](docs/m2/Platform-Acceptance-Plan.md). Run its isolated local
-ownership proof with `python3 scripts/test-coordination.py`; full HA/load/VM
-acceptance is tracked separately.
-
-Start the next integration phase with the
-[platform integration handoff](docs/m2/Platform-Integration-Handoff.md). It links
-each subsection, owner inputs, capacity limits and the prepared deployment
-workflow. The target is [four physical hosts with one VM each](docs/m2/Platform-Four-Physical-Hosts.md).
-The current setup uses the same Wi-Fi LAN and manually created Ubuntu Server
-VMs in VirtualBox on Linux Mint and Windows; the VPS is outside the initial
-cluster. Start with the [VirtualBox and Ubuntu setup guide](docs/m2/Platform-VirtualBox-WiFi-Setup.md)
-for downloads, VM sizing, installer choices, a single disk per VM and network checks.
-Then follow the [manual K3s bootstrap](docs/m2/Platform-Manual-K3s-Setup.md) to join
-the four guests into one cluster.
-For the application phase, use the [GHCR preparation and deployment sequence](docs/m2/Platform-Manual-GHCR-and-Application-Deployment.md).
-After images are published, follow the [existing-cluster deployment guide](docs/m2/Platform-Existing-Cluster-Deployment.md).
-For an explicitly authorized fresh application dataset, use the
-[application-only reset procedure](docs/m2/Platform-Application-Reset.md), which
-preserves the VMs and K3s nodes and keeps no VM data archives.
-Inventory v3 uses the existing K3s API and operator-run volume preparation on
-the root disks. Initial deployment and maintenance have been exercised on the
-four-VM cluster; source/load/failure acceptance and VM replacement integration
-remain pending. See the [startup repair record](docs/m2/Platform-Application-Startup-Repair.md)
-for readiness results and the remaining data-read availability problem.
-The [integrated release](deployment/platform/RELEASE.md) includes owned service
-databases and [empty-disk recovery](docs/m2/Platform-Integrated-Node-Replacement.md),
-including [consistent source checkpoints](docs/m2/Platform-Source-Checkpoints.md)
-and a [verified broker disk-rebuild protocol](docs/m2/Platform-Broker-Recovery.md).
-The current full profile requests about 18.9 GiB RAM across the four VMs before
-overhead (the four service databases share one replicated formation); measured
-hardware capacity and physical acceptance remain pending.
-
-A separate [four-node QEMU/KVM k3s bootstrap](deployment/platform/README.md) is available
-via `python3 scripts/platform-cluster.py up`. Its light laptop profile uses
-three 2 GiB servers and one 1 GiB agent, with a memory/headroom preflight. This
-provisions Kubernetes and the supplied Tester Agent; it does not deploy the full
-Citus/application stack. Its multi-host provider requires wired Ethernet and
-Linux/libvirt plus Windows/VirtualBox 7.0.x; it does not adopt the manual
-VirtualBox/Wi-Fi VMs. See the [bootstrap validation](docs/m2/Platform-Bootstrap-Validation.md)
-for the earlier, separate laptop experiment.
 
 ## Services
 
@@ -84,7 +37,7 @@ and runs on `alpine:3.24`. All Go modules require Go 1.27.1.
 ## Broker choice: NATS JetStream
 
 We went with **NATS JetStream**, and the reasoning is in
-[Technical stacks](docs/m1/Technical%20Stacks.md) and [Contracts](docs/m1/Contracts.md).
+[Technical stacks](docs/Technical%20Stacks.md) and [Contracts](docs/Contracts.md).
 
 Here is how the broker is set up:
 
@@ -136,29 +89,6 @@ stopping recovery. Both consumers apply versioned corrections through the added
 procedures below describe storage and delivery; the test runbook includes the
 preliminary-report and recovery checks.
 
-## M2 ingestion and delivery
-
-The `raw-ingestion` binary runs the components named in `INGESTION_COMPONENTS`:
-`bmkg`, `field-reports`, `satellite` and `coastal`. Kubernetes runs them as two
-workloads, `ingestion` and `coastal-processor`.
-
-- **Field reports.** `POST /field-reports` (Tim Lapangan only) returns 202 after
-  the report is durable in JetStream. Retries with the same `Idempotency-Key`
-  return the same receipt.
-- **Satellite.** The connector streams the satellite feed into the wildfire
-  pipeline without gaps or duplicates.
-- **Sensor Pantai.** Acquisition sits behind circuit breakers. Critical
-  observations are delivered to the notifier's `tim-lapangan-v1` consumer, and
-  `GET /warnings/slo` reports the delivery SLO.
-- **PVMBG schemas.** The mock gains incompatible schema modes. Parked PVMBG
-  failures replay through the Ops replay API after `PVMBG_ADAPTER_VERSION=2` is
-  rolled out.
-
-Configuration, scenario triggers and metrics are in
-[R3 Ingestion and Delivery](docs/m2/R3-Ingestion-and-Delivery.md). The sensor's
-observed behaviour is in
-[Sensor Pantai Characterization](docs/m2/Sensor-Pantai-Characterization.md).
-
 ## Repository layout
 
 ```text
@@ -173,24 +103,20 @@ broker/           # NATS JetStream + stream initializer
 registry/         # Apicurio Registry + separate persistent database
 consumer-dashboard/ # durable dashboard projection
 consumer-notifier/  # durable simulated notifications
-scripts/          # M2 platform, deployment, recovery and demo-check tools (+ tests)
-  m1/             # M1 Compose tools: smoke test, isolation demo, k6 load test, setup-env, evidence probes
+scripts/          # smoke test, isolation demo, k6 load test
 monitoring/      # five monitoring wrappers + Tempo, configuration, dashboards
 deployment/      # PostgreSQL bootstrap role/grant scripts
 docker-compose.yml
 .env.example
-docs/
-  m1/             # M1 contracts, runbook, demo guide, stack, report PDF
-  m2/             # M2 platform, ingestion, processing, audit and demo-check docs
-  fixtures/       # shared test fixtures read by M1 and M2 code
+docs/             # Team contract docs (wire format, stack, deployment)
 ```
 
 ## Quick start: Docker Compose
 
-Untuk persiapan presentasi, lihat [Panduan Demo M1](docs/m1/Panduan%20Demo%20M1.md)
+Untuk persiapan presentasi, lihat [Panduan Demo M1](docs/Panduan%20Demo%20M1.md)
 yang memuat urutan demo, kriteria P1–P5, pembagian waktu, dan alat bantu operator.
-Jalankan `node scripts/m1/m1-demo.mjs --help` untuk daftar perintah. Pada checkout
-tanpa konfigurasi, `python3 scripts/m1/setup-env.py` membuat `.env` lokal dengan
+Jalankan `node scripts/m1-demo.mjs --help` untuk daftar perintah. Pada checkout
+tanpa konfigurasi, `python3 scripts/setup-env.py` membuat `.env` lokal dengan
 kredensial acak yang konsisten tanpa menimpa file yang sudah ada.
 
 Start from a fresh clone with Docker Engine / Docker Desktop running (Linux
@@ -204,7 +130,7 @@ curl and Python 3; examples using `jq` require jq.
 Open a terminal in the cloned repository root, then run on Linux/macOS/Git Bash:
 
 ```bash
-python3 scripts/m1/setup-env.py
+python3 scripts/setup-env.py
 docker compose --profile monitoring --profile demo --profile tools --profile consumer-demo config --quiet
 docker compose up -d --build --wait --wait-timeout 300
 docker compose ps
@@ -213,7 +139,7 @@ docker compose ps
 PowerShell (the wrapper also requires Python 3):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/m1/setup-env.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-env.ps1
 docker compose --profile monitoring --profile demo --profile tools --profile consumer-demo config --quiet
 docker compose up -d --build --wait --wait-timeout 300
 docker compose ps
@@ -226,7 +152,7 @@ configuration is preserved. A partial set is rejected without writing files,
 because generating only the missing files could produce mismatched secrets.
 
 For an older checkout that will start with fresh volumes, run
-`python3 scripts/m1/setup-env.py --fresh`. This moves existing local configuration to
+`python3 scripts/setup-env.py --fresh`. This moves existing local configuration to
 the gitignored `.local-config-backup/<UTC timestamp>/` directory and generates a
 coherent replacement set. The PowerShell wrapper supports initial generation;
 invoke Python directly for `--fresh`. Do not regenerate credentials against data
@@ -304,13 +230,13 @@ A few things are worth knowing about startup:
 - The Registry container keeps retrying if its database is absent. Its API
   and readiness probe remain unavailable until initialization succeeds.
   Set `REGISTRY_RETRY_DELAY_SEC` explicitly in `registry/.env` (example `5`).
-  See the [startup and independent restart procedure](docs/m1/Test%20Runbook.md).
+  See the [startup and independent restart procedure](docs/Test%20Runbook.md).
 
 For host-side commands below, load the configured host URLs once in each terminal.
 Bash (requires Python 3, like the demo scripts):
 
 ```bash
-source scripts/m1/demo-common.sh
+source scripts/demo-common.sh
 API_URL="http://localhost:$(demo_env_value "$DEMO_ROOT/.env" CLIENT_API_HOST_PORT)"
 BMKG_URL="http://localhost:$(demo_env_value "$DEMO_ROOT/.env" BMKG_HOST_PORT)"
 PVMBG_URL="http://localhost:$(demo_env_value "$DEMO_ROOT/.env" PVMBG_HOST_PORT)"
@@ -605,7 +531,6 @@ are single instances without replication or failover in this preparation setup.
 | `CLIENT_API_MAX_INFLIGHT_PER_CLIENT` | Max concurrent protected reads per verified `client_id`, across all sessions (`0` disables) | `32` |
 | `BNPB_API_URL` | TUI destination URL | `http://localhost:18080` |
 | `MEDIA_CLIENT_ID`, `FIELD_CLIENT_ID`, `INTERNAL_CLIENT_ID` | Public client IDs shown by the TUI | Required |
-| `CLIENT_TUI_LOG_FORMAT` | `json` keeps raw JSON call logs on an interactive terminal; otherwise the TUI shows one compact line per call there, and JSON whenever stderr is redirected | Optional |
 
 **Consumer process environment** (port and endpoint URLs injected by Compose; remaining settings in the consumer env files)
 
@@ -735,13 +660,13 @@ Run the smoke test to check most of this in one go:
 
 ```bash
 API_URL="${API_URL}" BMKG_URL="${BMKG_URL}" PVMBG_URL="${PVMBG_URL}" \
-  scripts/m1/smoke.sh --restart-auth --wait-for-expiry --test-outage
+  scripts/smoke.sh --restart-auth --wait-for-expiry --test-outage
 ```
 
 On Windows, use PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/m1/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage -ApiUrl "${API_URL}" -BmkgUrl "${BMKG_URL}" -PvmbgUrl "${PVMBG_URL}"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke.ps1 -RestartAuth -WaitForExpiry -TestOutage -ApiUrl "${API_URL}" -BmkgUrl "${BMKG_URL}" -PvmbgUrl "${PVMBG_URL}"
 ```
 
 It checks institution credential isolation, the three client identities,
@@ -796,7 +721,7 @@ Go modules and inherits integration settings without printing their values:
 python3 scripts/test-services.py
 python3 scripts/test-services.py --race
 python3 scripts/test-services.py --vet
-node --test scripts/m1/*.test.mjs
+node --test scripts/*.test.mjs
 ```
 
 `TEST_POSTGRES_URL` enables Auth/consumer tests using isolated schemas and
@@ -812,8 +737,8 @@ The preparation verifier runs against a **disposable** live Compose project
 (replace `your-project` with its actual Compose project name):
 
 ```bash
-python3 scripts/m1/verify-preparation.py --project your-project
-python3 scripts/m1/verify-preparation.py --project your-project --read-only
+python3 scripts/verify-preparation.py --project your-project
+python3 scripts/verify-preparation.py --project your-project --read-only
 ```
 
 The default mode restarts Auth/consumers and checks session persistence,
@@ -821,7 +746,7 @@ projections, pagination, errors, role restrictions, metrics and stored traces.
 `--read-only` skips restarts but still logs in and sends verification requests.
 Start the `monitoring` profile and allow ingestion/trace export first. This check
 does not erase volumes. Results from the completed preparation run are recorded
-in the [verification report](docs/m1/Preparation%20Verification.md); the full M1
+in the [verification report](docs/Preparation%20Verification.md); the full M1
 ten-to-twenty-minute outage remains a separate demonstration.
 
 For manual module-by-module execution, each Go directory is a separate module;
@@ -835,7 +760,7 @@ foreach ($module in 'bmkg-mock','pvmbg-mock','aggregator','auth-service','client
   try { go test ./...; if ($LASTEXITCODE -ne 0) { throw "Tests failed: $module" } }
   finally { Pop-Location }
 }
-node --test scripts/m1/*.test.mjs
+node --test scripts/*.test.mjs
 ```
 
 Bash equivalent:
@@ -844,7 +769,7 @@ Bash equivalent:
 for module in bmkg-mock pvmbg-mock aggregator auth-service client-api client-tui consumer-dashboard consumer-notifier broker monitoring/launcher; do
   (cd "$module" && go test ./...) || exit 1
 done
-node --test scripts/m1/*.test.mjs
+node --test scripts/*.test.mjs
 ```
 
 Expected: all packages pass and the Node test summary has zero failures.
@@ -869,21 +794,9 @@ cd aggregator && TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/
 
 ---
 
-## M2 multi-node test scenarios
-
-On the four-laptop K3s cluster, [M2 demo checks](docs/m2/Platform-Demo-Checks.md)
-maps every multi-node M2 criterion (P1–P5 and the real Wi-Fi cut bonus) to one
-command. [`scripts/m2/`](scripts/m2/README.md) holds one entry point per
-criterion, named by problem (`p1-data-spread.py`, `p2-takeover.py`, …,
-`bonus-wifi-cut.py`); each runs the underlying tool such as
-`scripts/platform-demo-check.py`, which triggers and verifies a criterion and
-keeps its evidence. `scripts/platform-vm-control.py` (VM pause, freeze, power)
-and `scripts/platform-host-probe.py` (Wi-Fi cut) run on the laptop that hosts
-the VM. Load, scaling and rollout use `scripts/platform-game-day.py`.
-
 ## Acceptance test scenario index
 
-After fresh setup, follow [Test Runbook](docs/m1/Test%20Runbook.md) phases 0 through
+After fresh setup, follow [Test Runbook](docs/Test%20Runbook.md) phases 0 through
 7 in order. Phase 0 defines the Bash/PowerShell helpers and evidence capture;
 the numbered steps contain the exact triggers, expected results, and restoration
 commands. Run load tests last because they change source delay configuration.
@@ -892,16 +805,16 @@ guessing how to trigger it.
 
 | Scenario | Trigger / runbook steps | Expected result |
 | --- | --- | --- |
-| Clean startup, baseline mapping, health, correlation logging | Phase 1, steps 1.1–1.4; `node scripts/m1/evidence-probes.mjs health`, `mapping`, `trace` | Ready APIs, valid canonical mapping, correlation IDs across service calls |
-| Runtime schema evolution and heterogeneous storage | Phase 2, steps 2.1–2.4; `node scripts/m1/evidence-probes.mjs schema`, then `node scripts/m1/evidence-probes.mjs storage` | Added confidence field is handled without process restart or database migration |
-| Institution credential isolation | Phase 3.1; `scripts/m1/isolation-demo.ps1 -BmkgUrl $BMKG_URL -PvmbgUrl $PVMBG_URL` | Own credentials accepted; cross-institution and unauthorized admin access rejected |
+| Clean startup, baseline mapping, health, correlation logging | Phase 1, steps 1.1–1.4; `node scripts/evidence-probes.mjs health`, `mapping`, `trace` | Ready APIs, valid canonical mapping, correlation IDs across service calls |
+| Runtime schema evolution and heterogeneous storage | Phase 2, steps 2.1–2.4; `node scripts/evidence-probes.mjs schema`, then `node scripts/evidence-probes.mjs storage` | Added confidence field is handled without process restart or database migration |
+| Institution credential isolation | Phase 3.1; `scripts/isolation-demo.ps1 -BmkgUrl $BMKG_URL -PvmbgUrl $PVMBG_URL` | Own credentials accepted; cross-institution and unauthorized admin access rejected |
 | Three roles, Media projection, token expiry/rotation, persistent sessions | Phase 3.2–3.4; smoke command in Client API and TUI section, including `-RestartAuth -WaitForExpiry` | Media raw access denied, expired/old access tokens rejected, refresh works, sessions survive restart |
-| Configuration and secret hygiene | Phase 3.5; `node scripts/m1/evidence-probes.mjs secrets`; required-config Go tests in the loop above | Missing configuration rejected; evidence scan reports its findings and scope |
+| Configuration and secret hygiene | Phase 3.5; `node scripts/evidence-probes.mjs secrets`; required-config Go tests in the loop above | Missing configuration rejected; evidence scan reports its findings and scope |
 | Fan-out, independent durable delivery, stopped consumer catch-up, third subscriber | Phase 4; stop/start notifier and start the `consumer-demo` profile as instructed | Same event reaches independent consumers; producer continues and stopped consumer catches up |
 | Invalid messages, DLQ, halt and operator recovery | Durable consumers and DLQ section below, including `publish-invalid`, inspection and resume commands | Invalid message archived with reason; recovery follows the documented policy |
 | Independent service restart, flexible Store schema, database isolation | Phase 5 | Only selected service restarts, old/new records coexist, only Aggregator reaches Store |
-| Slow PVMBG alongside fast BMKG, concurrent clients and overload | Phase 6.0–6.2b; load wrappers in Demo F below; run `node scripts/m1/evidence-probes.mjs runtime` in a second terminal during k6 | Recorded latency/error thresholds pass; overload returns the configured 429 behavior |
-| Ten-minute PVMBG outage and recovery | Phase 6.3; `node scripts/m1/evidence-probes.mjs outage --seconds 600` | Cached data stays readable with stale status, BMKG continues, ingestion recovers without restart |
+| Slow PVMBG alongside fast BMKG, concurrent clients and overload | Phase 6.0–6.2b; load wrappers in Demo F below; run `node scripts/evidence-probes.mjs runtime` in a second terminal during k6 | Recorded latency/error thresholds pass; overload returns the configured 429 behavior |
+| Ten-minute PVMBG outage and recovery | Phase 6.3; `node scripts/evidence-probes.mjs outage --seconds 600` | Cached data stays readable with stale status, BMKG continues, ingestion recovers without restart |
 | Restore demo state | Phase 7 | Outage disabled and original delay settings restored |
 
 Evidence probes run from the repository root and write measured `PASS`/`FAIL`
@@ -1301,7 +1214,7 @@ The Aggregator compiles and caches those rules with each writer schema ID.
 Avro checks structure and types; the custom validator checks inclusive numeric
 bounds and typed scalar `allowedValues` lists. Rules also work on nested scalar
 schemas, including array items and map values. See
-[Schema validation](docs/m1/Schema%20Validation.md) for supported types and failure policy.
+[Schema validation](docs/Schema%20Validation.md) for supported types and failure policy.
 Both live polling and `/history` replay request Avro when the registry is configured;
 a JSON response is rejected rather than silently bypassing validation. JSON source
 reads remain available to operators. Archive storage remains JSON in source-owned
@@ -1587,7 +1500,7 @@ FIELD_CLIENT_SECRET=$(demo_env_value "$DEMO_ROOT/auth-service/.env" FIELD_CLIENT
 ```
 
 For PowerShell helpers and every M1 criterion's detailed procedure, use
-[Test Runbook](docs/m1/Test%20Runbook.md). `node scripts/m1/m1-demo.mjs preflight`
+[Test Runbook](docs/Test%20Runbook.md). `node scripts/m1-demo.mjs preflight`
 checks the current project, and its `fanout`/`third-consumer` commands capture
 asserted evidence without hand-comparing moving record counts.
 
@@ -1599,8 +1512,8 @@ asserted evidence without hand-comparing moving record counts.
 | P2 | Sustained load, controlled `429` | Demo F (`sustained`) |
 | P2 | PVMBG outage and recovery | Demo C |
 | P3 | Institution credentials rejected across institutions | Demo E |
-| P3 | Media gets summary fields only, raw request gets `403` | [Client API and TUI](#client-api-and-tui), `scripts/m1/smoke.sh` or `scripts/m1/smoke.ps1` |
-| P3 | Natural token expiry, refresh, old token rejected | [Client API and TUI](#client-api-and-tui), `scripts/m1/smoke.sh --wait-for-expiry` or `scripts/m1/smoke.ps1 -WaitForExpiry` |
+| P3 | Media gets summary fields only, raw request gets `403` | [Client API and TUI](#client-api-and-tui), `scripts/smoke.sh` or `scripts/smoke.ps1` |
+| P3 | Natural token expiry, refresh, old token rejected | [Client API and TUI](#client-api-and-tui), `scripts/smoke.sh --wait-for-expiry` or `scripts/smoke.ps1 -WaitForExpiry` |
 | P4 | One container rebuilt without touching the others | Demo G |
 | P4 | Old and new record shapes side by side, Store reachable only by the Aggregator | Demo H |
 | P5 | Two consumers, one stopped and catching up, a third added | [Durable consumers and DLQ](#durable-consumers-and-dlq) |
@@ -1618,7 +1531,7 @@ docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATO
 You should see at least 20 seismic records from BMKG and at least 20
 volcanic reports from PVMBG, available as canonical `HazardEvent`s. Aggregator's
 `count` is the current page size, not a total; follow `next_cursor` for a complete
-traversal or use `node scripts/m1/evidence-probes.mjs mapping`. Each mock adds one
+traversal or use `node scripts/evidence-probes.mjs mapping`. Each mock adds one
 record every 10 seconds; its live window is bounded while durable history and
 canonical storage continue growing. Meanwhile,
 `docker compose logs aggregator | grep "outbound call"` shows source requests
@@ -1644,8 +1557,8 @@ Start with PVMBG on v1 (its initial state). With the full stack healthy and
 Node.js 18+ available, run from the repository root:
 
 ```bash
-node scripts/m1/evidence-probes.mjs schema --name schema
-node scripts/m1/evidence-probes.mjs storage --name storage
+node scripts/evidence-probes.mjs schema --name schema
+node scripts/evidence-probes.mjs storage --name storage
 ```
 
 The schema command reads connection settings and credentials from the local env
@@ -1685,7 +1598,7 @@ its schema and the toggle works again.
 
 The following is a short manual check. Retry backoff can delay recovery by
 `SOURCE_RETRY_MAX_SEC` plus source/processing time; a five-second sleep is not a
-recovery assertion. Use `node scripts/m1/evidence-probes.mjs outage --seconds 600`
+recovery assertion. Use `node scripts/evidence-probes.mjs outage --seconds 600`
 for the full M1 outage with cached-read, new-report and no-restart assertions.
 
 ```bash
@@ -1737,13 +1650,13 @@ measures the public gateway, authentication, PostgreSQL reads and serialization.
 ### Demo E: institution credential isolation
 
 ```bash
-BMKG_URL="${BMKG_URL}" PVMBG_URL="${PVMBG_URL}" scripts/m1/isolation-demo.sh
+BMKG_URL="${BMKG_URL}" PVMBG_URL="${PVMBG_URL}" scripts/isolation-demo.sh
 ```
 
 On Windows, use PowerShell:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/m1/isolation-demo.ps1 -BmkgUrl "${BMKG_URL}" -PvmbgUrl "${PVMBG_URL}"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/isolation-demo.ps1 -BmkgUrl "${BMKG_URL}" -PvmbgUrl "${PVMBG_URL}"
 ```
 
 The script prints one pass or fail line per probe:
@@ -1758,16 +1671,16 @@ It reads the credentials from the service env files and never prints them.
 ### Demo F: load test (k6 in Docker)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/m1/load-test.ps1 -Mode sustained -Vus 60 -Duration 70s -BaseUrl "${K6_BASE_URL}"
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/m1/load-test.ps1 -Mode mixed -Vus 50 -Duration 65s -BaseUrl "${K6_BASE_URL}"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode sustained -Vus 60 -Duration 70s -BaseUrl "${K6_BASE_URL}"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/load-test.ps1 -Mode mixed -Vus 50 -Duration 65s -BaseUrl "${K6_BASE_URL}"
 ```
 
 On Linux, macOS or Git Bash use the shell twin, which takes the same options as
 positional arguments:
 
 ```bash
-BASE_URL="${K6_BASE_URL}" scripts/m1/load-test.sh sustained 60 70s
-BASE_URL="${K6_BASE_URL}" scripts/m1/load-test.sh mixed 50 65s
+BASE_URL="${K6_BASE_URL}" scripts/load-test.sh sustained 60 70s
+BASE_URL="${K6_BASE_URL}" scripts/load-test.sh mixed 50 65s
 ```
 
 In `mixed` mode both wrappers reject the run when `pvmbg-mock/.env` does not hold a 3000 ms
@@ -1788,7 +1701,7 @@ P2.1, P2.2 and P2.3 are separate tests. Only P2.2 specifies at least
 running Compose project whose PVMBG delay is already 3000 ms, use:
 
 ```bash
-PURPOSE=isolation BASE_URL="${K6_BASE_URL}" EVIDENCE_NAME=p2-isolation bash scripts/m1/load-test.sh mixed 2 65s
+PURPOSE=isolation BASE_URL="${K6_BASE_URL}" EVIDENCE_NAME=p2-isolation bash scripts/load-test.sh mixed 2 65s
 ```
 
 On PowerShell:

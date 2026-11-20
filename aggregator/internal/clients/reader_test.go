@@ -86,7 +86,7 @@ func TestSourceReaderPolicyMatchesLiveAndHistory(t *testing.T) {
 					replayed, err := DecodeVolcanic(page.Data[0].Payload)
 					require.NoError(t, err)
 					for _, r := range []VolcanicReport{reports[0], replayed} {
-						require.Equal(t, float64(500), *r.AshColumnHeightM)
+						require.Equal(t, float64(500), r.AshColumnHeightM)
 						if writerHas && readerHas {
 							value, err := requiredNumber(r.Attributes, "confidence_level")
 							require.NoError(t, err)

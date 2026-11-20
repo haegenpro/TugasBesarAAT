@@ -9,7 +9,6 @@ import (
 	"pvmbg-mock/internal/history"
 	"pvmbg-mock/internal/middleware"
 	"pvmbg-mock/internal/platform"
-	"pvmbg-mock/internal/state"
 	"strconv"
 	"strings"
 )
@@ -69,19 +68,13 @@ func (h *Handler) History(c *gin.Context) {
 		c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive unavailable")})
 		return
 	}
-	mode := h.Toggles.Mode()
 	for i := range page.Data {
 		var r domain.VolcanicReport
 		if err := json.Unmarshal(page.Data[i].Payload, &r); err != nil {
 			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive invalid")})
 			return
 		}
-		var b []byte
-		if mode.Incompatible() {
-			b, _ = json.Marshal(wireRecord(r, mode))
-		} else {
-			b, _ = json.Marshal(r.WireCopy(mode == state.ModeV2))
-		}
+		b, _ := json.Marshal(r.WireCopy(h.Toggles.ShowConfidence()))
 		page.Data[i].Payload = b
 	}
 	if strings.Contains(c.GetHeader("Accept"), avrowire.MediaType) {
@@ -89,12 +82,12 @@ func (h *Handler) History(c *gin.Context) {
 			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "schema registry unavailable")})
 			return
 		}
-		text, err := volcanicHistorySchema(mode)
+		text, err := volcanicHistorySchema(h.Toggles.ShowConfidence())
 		if err != nil {
 			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "history schema invalid")})
 			return
 		}
-		schema, err := h.Registry.RegisterWith(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), historySubject(mode), text, compatibility(mode))
+		schema, err := h.Registry.Register(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), volcanicHistorySubject, text)
 		if err != nil {
 			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "history schema unavailable")})
 			return

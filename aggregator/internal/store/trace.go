@@ -32,7 +32,6 @@ var (
 	_ pgx.ConnectTracer     = (*sqlTracer)(nil)
 	_ pgx.PrepareTracer     = (*sqlTracer)(nil)
 	_ pgxpool.AcquireTracer = (*sqlTracer)(nil)
-	_ pgx.BatchTracer       = (*sqlTracer)(nil)
 )
 
 func startSQL(ctx context.Context, operation, query string) context.Context {
@@ -92,22 +91,6 @@ func (t *sqlTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.T
 }
 
 func (t *sqlTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
-	t.end(ctx, data.Err)
-}
-
-func (t *sqlTracer) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
-	return startSQL(ctx, "batch", "")
-}
-
-func (t *sqlTracer) TraceBatchQuery(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchQueryData) {
-	// Batch results share one exchange; keep each query's fingerprint without
-	// exposing SQL text or arguments. BatchEnd records total network latency.
-	digest := sha256.Sum256([]byte(data.SQL))
-	batch, _ := ctx.Value(sqlTraceKey{}).(sqlTrace)
-	logSQL(t.logger, ctx, "batch_query", hex.EncodeToString(digest[:]), batch.started, data.Err)
-}
-
-func (t *sqlTracer) TraceBatchEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchEndData) {
 	t.end(ctx, data.Err)
 }
 

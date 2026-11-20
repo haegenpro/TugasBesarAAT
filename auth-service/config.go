@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"time"
 )
@@ -15,16 +14,12 @@ type identity struct {
 }
 
 type config struct {
-	Port            string
-	DatabaseURL     string
-	InternalKey     string
-	AccessTTL       time.Duration
-	RefreshTTL      time.Duration
-	Identities      map[string]identity
-	PriorityEnabled bool
-	PriorityKey     string
-	MaxInFlight     int
-	FieldReserved   int
+	Port        string
+	DatabaseURL string
+	InternalKey string
+	AccessTTL   time.Duration
+	RefreshTTL  time.Duration
+	Identities  map[string]identity
 }
 
 func loadConfig() (config, error) {
@@ -72,31 +67,7 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 	port, path := v["AUTH_PORT"], v["DATABASE_URL"]
-	cfg := config{Port: port, DatabaseURL: path, InternalKey: internalKey, AccessTTL: accessTTL, RefreshTTL: refreshTTL, Identities: identities}
-	raw := os.Getenv("AUTH_PRIORITY_ENABLED")
-	if raw != "" && raw != "true" && raw != "false" {
-		return config{}, errors.New("invalid AUTH_PRIORITY_ENABLED")
-	}
-	cfg.PriorityEnabled = raw == "true"
-	if cfg.PriorityEnabled {
-		cfg.PriorityKey = os.Getenv("AUTH_PRIORITY_KEY")
-		if len(cfg.PriorityKey) < 32 || cfg.PriorityKey == internalKey {
-			return config{}, errors.New("distinct AUTH_PRIORITY_KEY of at least 32 bytes required")
-		}
-		settings, e := requiredEnv("AUTH_MAX_INFLIGHT", "AUTH_FIELD_RESERVED")
-		if e != nil {
-			return config{}, e
-		}
-		cfg.MaxInFlight, e = envInt(settings, "AUTH_MAX_INFLIGHT", 2, 65536)
-		if e != nil {
-			return config{}, e
-		}
-		cfg.FieldReserved, e = envInt(settings, "AUTH_FIELD_RESERVED", 1, cfg.MaxInFlight-1)
-		if e != nil {
-			return config{}, e
-		}
-	}
-	return cfg, nil
+	return config{Port: port, DatabaseURL: path, InternalKey: internalKey, AccessTTL: accessTTL, RefreshTTL: refreshTTL, Identities: identities}, nil
 }
 
 func durationSeconds(values map[string]string, name string) (time.Duration, error) {

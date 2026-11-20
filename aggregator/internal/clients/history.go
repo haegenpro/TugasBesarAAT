@@ -46,9 +46,9 @@ func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, ke
 		return p, err
 	}
 	defer resp.Body.Close()
-	rawBody, truncated, payloadStream, readErr := readResponseFailureBody(resp)
+	rawBody, truncated, readErr := platform.ReadPayload(resp.Body)
 	defer func() {
-		capture(ctx, recorder, Failure{Source: strings.ToUpper(source), Entity: "history:" + entity, Payload: rawBody, PayloadStream: payloadStream, ContentType: resp.Header.Get("Content-Type"), Truncated: truncated, CorrelationID: cid}, &retErr, resp)
+		capture(ctx, recorder, Failure{Source: strings.ToUpper(source), Entity: "history:" + entity, Payload: rawBody, Truncated: truncated, CorrelationID: cid}, &retErr)
 	}()
 	if readErr != nil {
 		if truncated {
@@ -111,11 +111,6 @@ func fetchHistory(ctx context.Context, httpClient *http.Client, base, header, ke
 	return p, nil
 }
 func (c *BMKGClient) FetchHistory(ctx context.Context, cid, entity string, after int64) (HistoryPage, error) {
-	if c.BeforeFetch != nil {
-		if err := c.BeforeFetch(ctx, "BMKG"); err != nil {
-			return HistoryPage{}, err
-		}
-	}
 	return fetchHistory(ctx, c.HTTP, c.BaseURL, "X-BMKG-Key", c.APIKey, "bmkg", entity, cid, after, c.Logger, c.Registry, c.Readers["/"+entity], c.CaptureFailure)
 }
 func (c *PVMBGClient) FetchHistory(ctx context.Context, cid, entity string, after int64) (HistoryPage, error) {
@@ -128,11 +123,6 @@ func (c *PVMBGClient) FetchHistory(ctx context.Context, cid, entity string, afte
 			return HistoryPage{}, err
 		}
 		defer release()
-	}
-	if c.BeforeFetch != nil {
-		if err := c.BeforeFetch(ctx, "PVMBG"); err != nil {
-			return HistoryPage{}, err
-		}
 	}
 	return fetchHistory(ctx, c.HTTP, c.BaseURL, "Authorization", "Bearer "+c.Token, "pvmbg", entity, cid, after, c.Logger, c.Registry, reader, c.CaptureFailure)
 }

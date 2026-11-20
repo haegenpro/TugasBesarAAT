@@ -7,37 +7,11 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	"go.opentelemetry.io/otel/trace"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
-
-func TestInitHonorsSamplingAndPreservesSampledRequest(t *testing.T) {
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
-	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "0")
-	old := otel.GetTracerProvider()
-	defer otel.SetTracerProvider(old)
-	shutdown := Init("sampling-test")
-	defer shutdown(context.Background())
-	_, root := Start(context.Background(), "background")
-	defer root.End()
-	if root.IsRecording() {
-		t.Fatal("configured zero root sampling was ignored")
-	}
-	parent := trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID: trace.TraceID{1}, SpanID: trace.SpanID{1},
-		TraceFlags: trace.FlagsSampled, Remote: true,
-	})
-	_, child := Start(trace.ContextWithRemoteSpanContext(context.Background(), parent), "demo-request")
-	defer child.End()
-	if !child.IsRecording() || child.SpanContext().TraceID() != parent.TraceID() {
-		t.Fatal("explicitly sampled request did not retain its trace")
-	}
-}
 
 func TestHTTPTraceContinuesAcrossServiceCall(t *testing.T) {
 	exp := tracetest.NewInMemoryExporter()

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"aggregator/internal/analytics"
 	"aggregator/internal/platform"
 	"context"
 	"log/slog"
@@ -12,21 +11,15 @@ import (
 	"syscall"
 	"time"
 
-	"aggregator/internal/acquisition"
 	"aggregator/internal/api"
-	"aggregator/internal/audit"
 	"aggregator/internal/avrowire"
-	"aggregator/internal/canonical"
 	"aggregator/internal/clients"
 	"aggregator/internal/config"
 	"aggregator/internal/middleware"
-	"aggregator/internal/ownership"
-	"aggregator/internal/pipeline"
 	"aggregator/internal/poller"
 	"aggregator/internal/publisher"
 	"aggregator/internal/server"
 	"aggregator/internal/store"
-	"aggregator/internal/wildfireprocessor"
 )
 
 func main() {
@@ -54,10 +47,6 @@ func main() {
 		logger.Error("invalid tsunami reader schema", "error", err)
 		os.Exit(1)
 	}
-	if err := clients.SetVolcanicAdapter(platform.Int("PVMBG_ADAPTER_VERSION", clients.VolcanicAdapterV1)); err != nil {
-		logger.Error("invalid PVMBG adapter", "error", err)
-		os.Exit(1)
-	}
 	volcanicReader, err := avrowire.LoadSourceReader(cfg.PVMBGReaderSchema, "VolcanicHistoryPage")
 	if err != nil {
 		logger.Error("invalid volcanic reader schema", "error", err)
@@ -78,12 +67,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
-	if path := os.Getenv("CANONICAL_DURABILITY_CONFIG"); path != "" {
-		if err := st.ConfigureReplication(ctx, path); err != nil {
-			logger.Error("invalid replication configuration", "error", err)
-			os.Exit(1)
-		}
-	}
 
 	deps := &api.Dependencies{}
 	bmkgClient := clients.NewBMKGClient(cfg.BMKGBaseURL, cfg.BMKGAPIKey, logger)
@@ -101,7 +84,6 @@ func main() {
 	status := poller.NewPVMBGStatus()
 
 	p := &poller.Poller{
-		DisableBMKG: platform.Bool("BMKG_RAW_ENABLED", false),
 		DisablePoll: !platform.Bool("AGGREGATOR_POLL_ENABLED", true), DisableReplay: !platform.Bool("AGGREGATOR_REPLAY_ENABLED", true),
 		BMKG:       bmkgClient,
 		PVMBG:      pvmbgClient,
@@ -113,210 +95,13 @@ func main() {
 		MaxBackoff: cfg.MaxBackoff,
 		Logger:     logger,
 	}
-	if cfg.AcquisitionEnabled {
-		authority, err := ownership.NewAcquisition(st.Pool, cfg.AcquisitionTTL, canonical.Deadline)
-		if err != nil {
-			logger.Error("invalid acquisition authority", "error", err)
-			os.Exit(1)
-		}
-		durability, ok := st.Canonical.Durability.(ownership.Durability)
-		if !ok {
-			logger.Error("acquisition requires the replicated durability adapter")
-			os.Exit(1)
-		}
-		authority.Durability = durability
-		coordinator, err := acquisition.New(authority, logger)
-		if err != nil {
-			logger.Error("invalid acquisition coordinator", "error", err)
-			os.Exit(1)
-		}
-		coordinator.Ready = deps.StoreReady
-		st.Acquisition = authority
-		p.Acquisition = coordinator
-		bmkgClient.HTTP, err = acquisition.Client(authority, "BMKG", cfg.BMKGBaseURL, 2*time.Second, 32<<20)
-		if err != nil {
-			logger.Error("invalid BMKG dispatch", "error", err)
-			os.Exit(1)
-		}
-		pvmbgClient.HTTP, err = acquisition.Client(authority, "PVMBG", cfg.PVMBGBaseURL, 2*time.Second, 32<<20)
-		if err != nil {
-			logger.Error("invalid PVMBG dispatch", "error", err)
-			os.Exit(1)
-		}
-		bmkgClient.BeforeFetch = acquisition.RequireRequest
-		pvmbgClient.BeforeFetch = acquisition.RequireRequest
-	}
 
-	var wildfireEngine *wildfireprocessor.Engine
-	if platform.Bool("WILDFIRE_PROCESSOR_ENABLED", false) {
-		wc, configErr := wildfireprocessor.LoadConfig(os.Getenv("WILDFIRE_PROCESSOR_CONFIG"))
-		if configErr == nil {
-			wildfireEngine, configErr = wildfireprocessor.New(st, wc)
-		}
-		if configErr == nil {
-			// Startup checks only inspect schema and immutable configuration.
-			// Allow cold DNS/TLS/SQL connections to initialize independently of
-			// the unchanged two-second budget on live canonical operations.
-			check, cancel := context.WithTimeout(ctx, 15*time.Second)
-			configErr = wildfireEngine.Check(check)
-			cancel()
-		}
-		if configErr != nil || !cfg.CanonicalEnabled {
-			logger.Error("wildfire requires valid explicit configuration and canonical adapter", "error", configErr)
-			os.Exit(1)
-		}
-	}
 	a := api.New(st, status, deps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
-	if url := os.Getenv("COASTAL_STATUS_URL"); url != "" {
-		a.Coastal = &api.CoastalStatus{URL: url, Token: os.Getenv("INGESTION_SERVICE_TOKEN"), Client: platform.Client(time.Second), Interval: platform.Duration("COASTAL_STATUS_INTERVAL", time.Second), MaxAge: platform.Duration("COASTAL_STATUS_MAX_AGE", 10*time.Second)}
-		go a.Coastal.Run(ctx)
-	}
 	router := server.New(logger, a)
-	if cfg.CanonicalEnabled {
-		adapter := canonical.HTTP{Repository: st, Token: cfg.CanonicalToken}
-		if wildfireEngine != nil {
-			adapter.Resolver = wildfireEngine
-			adapter.MaxPreparedBytes = wildfireEngine.Config.PreparedBytes
-		}
-		if cfg.OwnershipEnabled {
-			authority, err := ownership.New(st.Pool, cfg.OwnershipTTL, canonical.Deadline)
-			if err != nil {
-				logger.Error("invalid ownership configuration", "error", err)
-				os.Exit(1)
-			}
-			st.Canonical.Fence = authority
-			if durability, ok := st.Canonical.Durability.(ownership.Durability); ok {
-				authority.Durability = durability
-			}
-			adapter.Ownership = authority
-		}
-		adapter.Register(router)
-	}
-	if platform.Bool("PLATFORM_COORDINATION_ENABLED", false) {
-		token := os.Getenv("PROCESSOR_SERVICE_TOKEN")
-		if token == "" || token == cfg.AdminToken || token == cfg.CanonicalToken || token == cfg.BMKGAPIKey || token == cfg.PVMBGToken || token == os.Getenv("AUDIT_TOKEN") {
-			logger.Error("platform coordination requires a dedicated PROCESSOR_SERVICE_TOKEN")
-			os.Exit(1)
-		}
-		authority, err := ownership.NewProcessor(st.Pool, 15*time.Second)
-		if err != nil {
-			logger.Error("invalid processor authority", "error", err)
-			os.Exit(1)
-		}
-		durability, ok := st.Canonical.Durability.(ownership.Durability)
-		if !ok {
-			logger.Error("platform coordination requires replicated durability")
-			os.Exit(1)
-		}
-		authority.Durability = durability
-		st.Processor = authority
-		processorAPI := canonical.HTTP{Ownership: authority, Token: token}
-		processorAPI.RegisterOwnership(router, "/internal/processor/ownership")
-	}
 	server.RegisterSchemaAdmin(router, volcanicReaders, cfg.AdminToken)
-	stopPipeline, err := pipeline.Start(ctx, st, registry, router, map[string]*avrowire.SourceReader{"seismic-events": seismicReader, "tsunami-warnings": tsunamiReader}, logger, wildfireEngine)
-	if err != nil {
-		logger.Error("invalid raw pipeline configuration", "error", err)
-		os.Exit(1)
-	}
-	defer stopPipeline()
-	analyticsEnabled := platform.Bool("ANALYTICS_ENABLED", false)
-	sessionsEnabled := platform.Bool("AUDIT_SESSIONS_ENABLED", false)
-	if sessionsEnabled && !platform.Bool("AUDIT_ENABLED", false) {
-		logger.Error("audit sessions require AUDIT_ENABLED")
-		os.Exit(1)
-	}
-	if platform.Bool("AUDIT_ENABLED", false) || analyticsEnabled {
-		if err = st.ConfigureLiveReads([]byte(os.Getenv("AUDIT_CURSOR_KEY"))); err != nil {
-			logger.Error("invalid authoritative read configuration", "error", err)
-			os.Exit(1)
-		}
-	}
-	var stopSnapshots func()
-	if sessionsEnabled {
-		stopSnapshots, err = st.ConfigureSnapshots(ctx)
-		if err != nil {
-			logger.Error("invalid snapshot configuration", "error", err)
-			os.Exit(1)
-		}
-		defer stopSnapshots()
-	}
-	if platform.Bool("FIELD_READ_PRIORITY_ENABLED", false) {
-		token := os.Getenv("FIELD_READ_TOKEN")
-		if len(token) < 32 {
-			logger.Error("dedicated FIELD_READ_TOKEN of at least 32 bytes required")
-			os.Exit(1)
-		}
-		for _, key := range []string{"CANONICAL_SERVICE_TOKEN", "PROCESSOR_SERVICE_TOKEN", "INGESTION_SERVICE_TOKEN", "HISTORY_SERVICE_TOKEN", "AUDIT_TOKEN", "AGGREGATOR_ADMIN_TOKEN", "ANALYTICS_SERVICE_TOKEN", "AUTH_INTERNAL_KEY"} {
-			if token == os.Getenv(key) {
-				logger.Error("Field read credential must be distinct")
-				os.Exit(1)
-			}
-		}
-		view, closeView, e := st.NewFieldReadView(ctx)
-		if e != nil {
-			logger.Error("invalid Field read pool configuration", "error", e)
-			os.Exit(1)
-		}
-		defer closeView()
-		fieldDeps := &api.Dependencies{}
-		fieldDeps.SetReadReady(true)
-		fieldDeps.SetStoreReady(true)
-		fieldAPI := api.New(view, status, fieldDeps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
-		fieldAPI.Coastal = a.Coastal
-		server.RegisterFieldReads(router, fieldAPI, token, platform.Int("FIELD_READ_MAX_INFLIGHT", 4))
-		go view.CollectFieldReadMetrics(ctx)
-		go func() {
-			<-ctx.Done()
-			fieldDeps.SetReadReady(false)
-			fieldDeps.SetStoreReady(false)
-			fieldDeps.SetDraining(true)
-		}()
-	}
-	if analyticsEnabled {
-		token := os.Getenv("ANALYTICS_SERVICE_TOKEN")
-		if token == "" {
-			logger.Error("ANALYTICS_SERVICE_TOKEN required")
-			os.Exit(1)
-		}
-		for _, key := range []string{"AUDIT_TOKEN", "CANONICAL_SERVICE_TOKEN", "PROCESSOR_SERVICE_TOKEN", "INGESTION_SERVICE_TOKEN", "HISTORY_SERVICE_TOKEN", "AGGREGATOR_ADMIN_TOKEN", "AUTH_INTERNAL_KEY", "BMKG_API_KEY", "PVMBG_TOKEN"} {
-			if token == os.Getenv(key) {
-				logger.Error("dedicated analytics service credential required")
-				os.Exit(1)
-			}
-		}
-		closeAnalytics, e := st.ConfigureAnalytics(ctx)
-		if e != nil {
-			logger.Error("invalid analytics configuration", "error", e)
-			os.Exit(1)
-		}
-		defer closeAnalytics()
-		analytics.HTTP{Repository: st, Token: token}.Register(router)
-	}
-	if platform.Bool("AUDIT_ENABLED", false) {
-		token := os.Getenv("AUDIT_TOKEN")
-		if token == "" {
-			logger.Error("AUDIT_TOKEN required")
-			os.Exit(1)
-		}
-		for _, key := range []string{"CANONICAL_SERVICE_TOKEN", "PROCESSOR_SERVICE_TOKEN", "INGESTION_SERVICE_TOKEN", "HISTORY_SERVICE_TOKEN", "AGGREGATOR_ADMIN_TOKEN", "BMKG_API_KEY", "PVMBG_TOKEN"} {
-			if token == os.Getenv(key) {
-				logger.Error("dedicated audit credential required")
-				os.Exit(1)
-			}
-		}
-		adapter := audit.HTTP{Repository: st, Token: token, Signer: st.Reads.Signer, IngestionURL: os.Getenv("INGESTION_BASE_URL"), IngestionToken: os.Getenv("INGESTION_SERVICE_TOKEN"), Client: platform.Client(2 * time.Second)}
-		if sessionsEnabled {
-			adapter.Sessions = st
-		}
-		adapter.Register(router)
-		st.RegisterLegacyFailures(router, os.Getenv("INGESTION_SERVICE_TOKEN"))
-		st.RegisterLegacyReplay(router, os.Getenv("INGESTION_SERVICE_TOKEN"))
-	}
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("aggregator", router)}
 	var workers sync.WaitGroup
 	launch := func(fn func()) { workers.Add(1); go func() { defer workers.Done(); fn() }() }
-	launch(func() { <-ctx.Done(); deps.SetDraining(true); deps.SetStoreReady(false) })
 	launch(func() { monitorStore(ctx, st, deps, p, logger) })
 	launch(func() { st.CollectMetrics(ctx) })
 	if platform.Bool("AGGREGATOR_PUBLISH_ENABLED", true) {
@@ -349,30 +134,13 @@ func monitorStore(ctx context.Context, st *store.Store, deps *api.Dependencies, 
 	pollerStarted := false
 	schemaReady := false
 	for {
-		if st.Reads.Inventory != nil {
-			readCtx, stop := context.WithTimeout(ctx, time.Second)
-			deps.SetReadReady(st.CheckReadControl(readCtx) == nil)
-			stop()
-		}
 		checkCtx, cancel := context.WithTimeout(middleware.EnsureCorrelationID(ctx), 5*time.Second)
 		err := st.Ping(checkCtx)
-		if err == nil && schemaReady {
-			err = st.RecoverAttempts(checkCtx)
-		}
 		if err == nil && !schemaReady {
 			err = st.CheckSchema(checkCtx)
 			if err == nil {
-				err = st.RecoverAttempts(checkCtx)
-			}
-			if err == nil {
 				schemaReady = true
 			}
-		}
-		if err == nil {
-			err = st.CheckAcquisition(checkCtx)
-		}
-		if err == nil {
-			err = st.CheckDurability(checkCtx)
 		}
 		cancel()
 		deps.SetStoreReady(err == nil)

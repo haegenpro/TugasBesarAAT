@@ -1,23 +1,24 @@
 package store
 
 import (
-	"aggregator/internal/acquisition"
 	"aggregator/internal/domain"
 	"aggregator/internal/middleware"
+	"aggregator/internal/platform"
 	"context"
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5"
+	"net/http"
 	"time"
 )
 
 func scanStatus(row pgx.Row) (domain.EndpointStatus, error) {
 	var p domain.EndpointStatus
-	err := row.Scan(&p.Endpoint, &p.State, &p.LastSuccess, &p.LastAttempt, &p.StaleSince, &p.NextAttempt, &p.Failures, &p.Revision, &p.DispatchGeneration)
+	err := row.Scan(&p.Endpoint, &p.State, &p.LastSuccess, &p.LastAttempt, &p.StaleSince, &p.NextAttempt, &p.Failures, &p.Revision)
 	return p, err
 }
 
-const statusColumns = `endpoint,state,last_success,last_attempt,stale_since,next_attempt,failures,revision,dispatch_generation`
+const statusColumns = `endpoint,state,last_success,last_attempt,stale_since,next_attempt,failures,revision`
 
 func (s *Store) PollStatus(ctx context.Context, endpoint string) (domain.EndpointStatus, error) {
 	ctx = middleware.EnsureCorrelationID(ctx)
@@ -70,10 +71,7 @@ func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success
 		return err
 	}
 	previous := p.State
-	var now time.Time
-	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
-		return err
-	}
+	now := domain.Now()
 	attemptedAt := now
 	if len(started) > 0 {
 		attemptedAt = started[0].UTC()
@@ -87,16 +85,11 @@ func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success
 	if p.LastAttempt != nil && !p.LastAttempt.After(now) && attemptedAt.Before(*p.LastAttempt) {
 		return tx.Commit(ctx)
 	}
-	snapshotAt := acquisition.RequestStarted(ctx, attemptedAt)
-	if snapshotAt.IsZero() || snapshotAt.After(now) {
-		return errors.New("source snapshot start must be nonzero and not in the future")
-	}
 	p.LastAttempt = &attemptedAt
 	delay := interval
 	if success {
-		p.DispatchGeneration++
 		p.State = "fresh"
-		p.LastSuccess = &snapshotAt
+		p.LastSuccess = &attemptedAt
 		p.StaleSince = nil
 		p.Failures = 0
 	} else {
@@ -121,7 +114,7 @@ func (s *Store) RecordAttempt(ctx context.Context, endpoint, cid string, success
 	if changed {
 		p.Revision++
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO source_poll_state(endpoint,state,last_success,last_attempt,stale_since,next_attempt,failures,revision,dispatch_generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(endpoint) DO UPDATE SET state=excluded.state,last_success=excluded.last_success,last_attempt=excluded.last_attempt,stale_since=excluded.stale_since,next_attempt=excluded.next_attempt,failures=excluded.failures,revision=excluded.revision,dispatch_generation=excluded.dispatch_generation`, p.Endpoint, p.State, p.LastSuccess, p.LastAttempt, p.StaleSince, p.NextAttempt, p.Failures, p.Revision, p.DispatchGeneration)
+	_, err = tx.Exec(ctx, `INSERT INTO source_poll_state(endpoint,state,last_success,last_attempt,stale_since,next_attempt,failures,revision) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(endpoint) DO UPDATE SET state=excluded.state,last_success=excluded.last_success,last_attempt=excluded.last_attempt,stale_since=excluded.stale_since,next_attempt=excluded.next_attempt,failures=excluded.failures,revision=excluded.revision`, p.Endpoint, p.State, p.LastSuccess, p.LastAttempt, p.StaleSince, p.NextAttempt, p.Failures, p.Revision)
 	if err != nil {
 		return err
 	}
@@ -236,11 +229,32 @@ func (s *Store) Notice(ctx context.Context, id string) (domain.Notice, []domain.
 	}
 	return n, out, rows.Err()
 }
-
-// PollNow keeps acquisition polling boundaries on the authority's clock even
-// when worker wall clocks are deliberately skewed for the M2 fault test.
-func (s *Store) PollNow(ctx context.Context) (time.Time, error) {
-	var now time.Time
-	err := s.Pool.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now)
-	return now, err
+func (s *Store) DeliverLifecycle(ctx context.Context, publish func(context.Context, domain.LifecycleEvent) error) (bool, error) {
+	ctx = middleware.EnsureCorrelationID(ctx)
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var id, traceparent, tracestate string
+	var b []byte
+	err = tx.QueryRow(ctx, `SELECT o.event_id::text,e.event_payload,o.traceparent,o.tracestate FROM report_lifecycle_outbox o JOIN report_lifecycle_events e USING(event_id) ORDER BY o.queued_at,o.event_id LIMIT 1 FOR UPDATE OF o SKIP LOCKED`).Scan(&id, &b, &traceparent, &tracestate)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var e domain.LifecycleEvent
+	if err = json.Unmarshal(b, &e); err != nil {
+		return true, err
+	}
+	ctx = middleware.WithCorrelationID(platform.Extract(ctx, http.Header{"Traceparent": []string{traceparent}, "Tracestate": []string{tracestate}}), e.CorrelationID)
+	if err = publish(ctx, e); err != nil {
+		return true, err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM report_lifecycle_outbox WHERE event_id=$1`, id); err != nil {
+		return true, err
+	}
+	return true, tx.Commit(ctx)
 }

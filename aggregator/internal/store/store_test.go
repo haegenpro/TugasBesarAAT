@@ -6,7 +6,6 @@ package store_test
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -65,7 +64,7 @@ func TestSaveDedup_InsertAndRead(t *testing.T) {
 	got, err := s.GetByID(ctx, e.HazardID)
 	require.NoError(t, err)
 	require.Equal(t, e.SourceRefID, got.SourceRefID)
-	require.Equal(t, json.Number("5.5"), got.Attributes["magnitude"])
+	require.Equal(t, 5.5, got.Attributes["magnitude"])
 }
 
 func TestSaveDedup_DuplicateSourceRefID(t *testing.T) {
@@ -111,7 +110,7 @@ func TestJSONB_OldAndNewAttributeShapesCoexist(t *testing.T) {
 
 	got2, err := s.GetByID(ctx, newShape.HazardID)
 	require.NoError(t, err)
-	require.Equal(t, json.Number("0.93"), got2.Attributes["future_metric"])
+	require.Equal(t, 0.93, got2.Attributes["future_metric"])
 }
 
 func TestQuery_Filtering(t *testing.T) {
