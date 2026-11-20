@@ -1,13 +1,13 @@
 # Integrated release preparation
 
 Current host onboarding follows the
-[manual VirtualBox/Wi-Fi guide](../../docs/Platform-VirtualBox-WiFi-Setup.md),
+[manual VirtualBox/Wi-Fi guide](../../docs/m2/Platform-VirtualBox-WiFi-Setup.md),
 with one Ubuntu VM on each of four physical machines and no VPS cluster node.
-For these manually installed guests, use [existing-cluster inventory v3](../../docs/Platform-Existing-Cluster-Deployment.md).
+For these manually installed guests, use [existing-cluster inventory v3](../../docs/m2/Platform-Existing-Cluster-Deployment.md).
 It uses an existing admin kubeconfig and operator-run scripts for root-filesystem
 volumes. Initial release/apply and maintenance have been exercised on the four-VM
 cluster; full source/load/failure acceptance and automated VM replacement remain
-pending. See the [startup repair record](../../docs/Platform-Application-Startup-Repair.md)
+pending. See the [startup repair record](../../docs/m2/Platform-Application-Startup-Repair.md)
 for observed readiness and unresolved data-read failures. V1/v2 retain their
 separate wired provider/SSH/ownership workflows.
 
@@ -15,7 +15,7 @@ The target is four physical hosts, each with one VM. Actual addresses, provider,
 RAM and disk capacity remain operator inputs. Do not use the former single-host
 7 GiB bootstrap allocation as a full release capacity claim.
 
-The [input-driven workflow](../../docs/Platform-Input-Driven-Workflow.md) now
+The [input-driven workflow](../../docs/m2/Platform-Input-Driven-Workflow.md) now
 automates image build/publish/digest capture, external input completion, cluster
 and storage preparation, stopped-writer maintenance, activation and measured
 source/combined game-day validation. Declared machine allocation may remain an
@@ -26,7 +26,7 @@ ingestion PostgreSQL formation, service catalog, owner processing, isolation and
 monitoring and four owned HA service databases into one dependency-ordered bundle. It does not build images, start
 VMs, rotate credentials, migrate databases or apply resources.
 
-Use the [private configuration generator](../../docs/Platform-Private-Configuration.md)
+Use the [private configuration generator](../../docs/m2/Platform-Private-Configuration.md)
 to prepare consistent unused credentials and pending inputs, or copy
 `release.example.json` into a private directory and provide its referenced
 JSON files. `images.json` combines the service/monitoring digest maps with actual
@@ -39,7 +39,7 @@ Use `deployment/aggregator/config.integrated.example.json` and
 The role1 input must explicitly enable analytics and contain the R3 source
 configuration. `wildfire_config` and `province_reference` reference UTF-8 files;
 their exact table hash and satellite namespace/start must match. The configuration
-generator copies the bundled [38-row province reference](../../docs/Province-Reference.md)
+generator copies the bundled [38-row province reference](../../docs/m2/Province-Reference.md)
 by default; manual preparation must copy it alongside the integrated wildfire
 config (as `wildfire.json`). Use the actual
 feed session and course reference inputs. Audit sessions can be enabled in the
@@ -83,7 +83,7 @@ prepare-disks --inventory ... --plan ...` for each of `canonical-plan.json`,
 the auth, registry, dashboard and notifier databases). Then review/apply the
 infrastructure bundle with `platform-deploy.py`. It waits for all storage
 workloads. Use the existing administrator initialization and capture commands in
-[owned databases](../../docs/Platform-Owned-Service-Databases.md) and
+[owned databases](../../docs/m2/Platform-Owned-Service-Databases.md) and
 [storage deployment](../storage/README.md). Bootstrap the Registry using its
 actual pinned application image before restricting its runtime role. Run
 [canonical/ingestion migrations and BMKG cutover](../role1/README.md) with
@@ -107,7 +107,7 @@ Secrets. The bundle handles the three database formations separately, records th
 Secret references and avoids duplicate Aggregator/Namespace resources. Service
 databases are rendered automatically when `owner_databases` is null; an explicit
 artifact path remains available for reviewed alternatives. See
-[owned service databases](../../docs/Platform-Owned-Service-Databases.md) for
+[owned service databases](../../docs/m2/Platform-Owned-Service-Databases.md) for
 per-owner credentials and isolation, administrator initialization and their
 2.1 GiB memory cost (formerly 8.5 GiB as four formations).
 Missing captured PostgreSQL identities, service schema initialization, migration/
@@ -124,7 +124,7 @@ reservations, not measured use; physical disk growth and retained WAL/database
 data need separate accounting. Existing PVCs/data are never implicitly resized.
 Keep raw/critical retention and acknowledgement rules unchanged.
 Prepare the APP/system account Secrets using the
-[broker recovery wiring](../../docs/Platform-Broker-Recovery.md); applications
+[broker recovery wiring](../../docs/m2/Platform-Broker-Recovery.md); applications
 and the separate broker-init Secret receive only the APP URL. Same-name disk
 replacement retains broker membership and rebuilds original stream/consumer
 copies instead of permanently removing the returning server.

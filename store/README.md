@@ -48,7 +48,7 @@ Both rows live in the same table, same column, with no migration between them.
 
 ## Reporting lifecycle
 
-Validated observations, replay cursors, retry schedules, notices, transitions, and lifecycle outbox work are Aggregator-owned PostgreSQL data. Hazard corrections retain the hazard ID and increment a storage revision. See [Reporting Lifecycle](../docs/Reporting%20Lifecycle.md).
+Validated observations, replay cursors, retry schedules, notices, transitions, and lifecycle outbox work are Aggregator-owned PostgreSQL data. Hazard corrections retain the hazard ID and increment a storage revision. See [Reporting Lifecycle](../docs/m1/Reporting%20Lifecycle.md).
 
 `failed_ingestions` preserves original failed source-response bytes (or an explicitly marked bounded prefix for oversized input), identity/digest, reason, retry classification, timestamps and attempts. It is not a complete M2 quarantine/replay API. Both outboxes persist traceparent/tracestate separately from canonical JSON.
 
@@ -59,12 +59,12 @@ canonical authority and deferred commit checks, and `0005_replication_probe.sql`
 adding an administrator-controlled identity and restricted WAL status function
 for the [unverified replicated storage draft](../deployment/storage/README.md).
 Earlier migration files retain
-their checksums. See the [coordination handoff](../docs/Platform-Coordination-Contract.md)
+their checksums. See the [coordination handoff](../docs/m2/Platform-Coordination-Contract.md)
 for HTTP/configuration and the remaining durability/deployment gates. Do not
 modify applied migration files to enable ownership.
 
 Migration `0006_acquisition.sql` adds separate BMKG/PVMBG acquisition scopes.
-The [acquisition draft](../docs/Platform-Acquisition-Implementation.md) wires
+The [acquisition draft](../docs/m2/Platform-Acquisition-Implementation.md) wires
 source-wide election and transactional cursor/status/data fencing into the
 existing pollers. It is opt-in and unverified; the canonical HTTP authority
 cannot issue acquisition leases. Old migration checksums remain unchanged.
@@ -83,7 +83,7 @@ The administrator command holds a migration lock, validates checksums and baseli
 
 `canonical_entities` retains UUID/time/revision/activity/source order, including tombstones without an active payload. `canonical_operations` enforces source-scoped operation identities; `canonical_batches` records retry outcomes. Entity-owned lifecycle events/outboxes are colocated with canonical rows; notices and source-status lifecycle remain in the reporting tables. Visibility generations, fenced attempts and commit markers are small coordinator control state requiring Role 2 durability integration. Outbox delivery checks terminal attempt completion before publishing.
 
-The development-first [frozen-worker cleanup draft](../docs/Platform-Recovery-Implementation.md)
+The development-first [frozen-worker cleanup draft](../docs/m2/Platform-Recovery-Implementation.md)
 adds Aggregator data/control session timeouts and a commit-time admission check.
 Defaults are `DB_IDLE_TRANSACTION_TIMEOUT=15s` and
 `DB_ADMISSION_IDLE_TIMEOUT=30s`; no database-wide configuration or schema

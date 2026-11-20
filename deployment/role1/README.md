@@ -8,13 +8,13 @@ or applies manifests implicitly.
 The root-context `Dockerfile` builds Aggregator, raw-ingestion and the offline
 migration/cutover tools with Go 1.27.1. Build/push and supply actual immutable image
 digests. `Dockerfile.dockerignore` excludes local credentials and evidence.
-It also includes the read-only [satellite contract probe](../../docs/Platform-Satellite-Probe.md)
+It also includes the read-only [satellite contract probe](../../docs/m2/Platform-Satellite-Probe.md)
 for bounded live resume/payload checks during later validation.
 
 The integrated wildfire config uses the adjacent 38-row `provinces.json`, with
 its exact SHA-256 pinned in `wildfire.integrated.example.json`. Private release
 preparation copies this table by default. See the
-[province reference](../../docs/Province-Reference.md) for provenance, mapping
+[province reference](../../docs/m2/Province-Reference.md) for provenance, mapping
 rules and explicit overrides.
 
 Ingestion owns a **separate** PostgreSQL formation, credentials and migration

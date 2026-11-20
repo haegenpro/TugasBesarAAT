@@ -16,7 +16,7 @@ password key and connection limit per owner) and `MAX_CONNECTIONS`;
 `bootstrap.py` creates each database and restricted role, and `entrypoint.py`
 renders a `pg_hba.conf` with one rule per owner pair that ends in `host all all
 all reject`. Single-database formations keep their original bootstrap and
-`pg_hba.conf`. See [owned service databases](../../docs/Platform-Owned-Service-Databases.md).
+`pg_hba.conf`. See [owned service databases](../../docs/m2/Platform-Owned-Service-Databases.md).
 
 Each group uses Patroni 4.1.5 quorum synchronization with one synchronous peer,
 strict mode, timeline checks and rewind. Three separate etcd members use mutual

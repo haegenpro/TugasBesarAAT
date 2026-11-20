@@ -16,7 +16,7 @@ The JVM uses a 64 MiB maximum heap, Serial GC and bounded native-memory settings
 to leave room inside M2's 256 MiB container limit. A SQL-backed container test
 passed initialization, 21 registrations and 20 schema reads at approximately
 212 MiB. This short test is not load acceptance. See
-[the physical-cluster repair record](../docs/Platform-Registry-Bootstrap-Repair.md)
+[the physical-cluster repair record](../docs/m2/Platform-Registry-Bootstrap-Repair.md)
 for deployment paths and maintenance evidence.
 
 The Registry trusts services attached to the backend network. Downstream clients

@@ -76,12 +76,12 @@ existing separate multi-entity protocol gate. `--replicas 2` and `--replicas 5`
 prepare the later load scenarios; no scaling command was executed.
 
 The renderer explicitly enables source acquisition, canonical interfaces and
-replicated durability. [Acquisition details](../../docs/Platform-Acquisition-Implementation.md)
+replicated durability. [Acquisition details](../../docs/m2/Platform-Acquisition-Implementation.md)
 explain election, cancellation and transactional stale-progress rejection.
 Source leases are private to the process; canonical HTTP ownership routes cannot
 issue acquisition tokens. Snapshot/processor authority, service isolation and
 dependency deployment drafts are linked in the
-[integration handoff](../../docs/Platform-Integration-Handoff.md).
+[integration handoff](../../docs/m2/Platform-Integration-Handoff.md).
 Owner integration and full load/recovery evidence remain deferred.
 
 Deferred checks cover manifest resource/placement constraints, source

@@ -1,0 +1,60 @@
+# Runs scripts/m1/load-test.js with k6 in Docker. Reads the Field client credentials from auth-service/.env.
+# Usage: scripts/m1/load-test.ps1 -Mode sustained|mixed -Vus 60 -Duration 70s -BaseUrl http://host.docker.internal:18080
+# For -Mode mixed, first set PVMBG's delay to 3 s. The mock reads its delay from pvmbg-mock/.env
+# (Compose env_file), not from your shell, so $env:PVMBG_MIN_DELAY_MS=... has no effect. Instead:
+#   1. In pvmbg-mock/.env set PVMBG_MIN_DELAY_MS=3000 and PVMBG_MAX_DELAY_MS=3000
+#   2. docker compose up -d --force-recreate pvmbg-mock
+# (README, Demo D). Restore the original values and recreate the container afterwards.
+# Linux/macOS: use scripts/m1/load-test.sh instead.
+param(
+    [ValidateSet('sustained','mixed')][string]$Mode,
+    [int]$Vus,
+    [string]$Duration,
+    [string]$BaseUrl,
+    [ValidateSet('milestone','isolation','overload')][string]$Purpose = 'milestone',
+    [ValidatePattern('^[A-Za-z0-9._-]+$')][string]$EvidenceName = 'load-test'
+)
+$ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($Mode)) { throw '-Mode is required' }
+if ($Vus -lt 1) { throw '-Vus must be a positive integer' }
+if ([string]::IsNullOrWhiteSpace($Duration)) { throw '-Duration is required' }
+if ([string]::IsNullOrWhiteSpace($BaseUrl)) { throw '-BaseUrl is required' }
+$root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$evidenceDir = Join-Path $root 'evidence'
+New-Item -ItemType Directory -Force $evidenceDir | Out-Null
+function Read-Env($p) {
+    $h = @{}
+    foreach ($l in Get-Content $p) {
+        if ($l -match '^\s*([A-Z_]+)\s*=\s*(.*?)\s*$' -and -not $l.TrimStart().StartsWith('#')) { $h[$Matches[1]] = $Matches[2].Trim("'",'"') }
+    }
+    $h
+}
+$env_ = Read-Env (Join-Path $root 'auth-service/.env')
+if ([string]::IsNullOrWhiteSpace($env_['FIELD_CLIENT_ID']) -or [string]::IsNullOrWhiteSpace($env_['FIELD_CLIENT_SECRET'])) {
+    throw 'FIELD_CLIENT_ID and FIELD_CLIENT_SECRET are required in auth-service/.env'
+}
+if ($Mode -eq 'mixed') {
+    $pv = Read-Env (Join-Path $root 'pvmbg-mock/.env')
+    if ($pv['PVMBG_MIN_DELAY_MS'] -ne '3000' -or $pv['PVMBG_MAX_DELAY_MS'] -ne '3000') {
+        throw "Mixed milestone run requires PVMBG_MIN_DELAY_MS=3000 and PVMBG_MAX_DELAY_MS=3000; verify live source timing using runbook 6.0."
+    }
+}
+# Windows PowerShell treats redirected native stderr as error records. Docker
+# writes normal image-pull progress there, so let its exit code decide success.
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    docker run --rm -i `
+    -v "${PSScriptRoot}:/scripts:ro" `
+    -v "${evidenceDir}:/evidence" `
+    --add-host=host.docker.internal:host-gateway `
+    -e BASE_URL=$BaseUrl -e MODE=$Mode -e VUS=$Vus -e DURATION=$Duration -e PURPOSE=$Purpose `
+    -e SUMMARY_PATH=/evidence/$EvidenceName.json `
+    -e CLIENT_ID=$($env_['FIELD_CLIENT_ID']) -e CLIENT_SECRET=$($env_['FIELD_CLIENT_SECRET']) `
+    grafana/k6 run /scripts/load-test.js
+    $dockerExitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+Write-Output "k6 exit code: $dockerExitCode; JSON evidence: evidence/$EvidenceName.json"
+exit $dockerExitCode

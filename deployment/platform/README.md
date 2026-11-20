@@ -1,9 +1,9 @@
 # Four-node platform bootstrap
 
 For the current four-machine **Wi-Fi** setup, start with the
-[manual VirtualBox/Ubuntu guide](../../docs/Platform-VirtualBox-WiFi-Setup.md).
+[manual VirtualBox/Ubuntu guide](../../docs/m2/Platform-VirtualBox-WiFi-Setup.md).
 It uses VirtualBox on Mint and Windows, with the VPS outside the cluster.
-After publishing images, use [existing-cluster inventory v3](../../docs/Platform-Existing-Cluster-Deployment.md)
+After publishing images, use [existing-cluster inventory v3](../../docs/m2/Platform-Existing-Cluster-Deployment.md)
 for initial database/application deployment and maintenance on these guests.
 The commands below describe the existing automated providers, not that manual
 setup: v1 is local libvirt/NAT; v2 requires wired Ethernet, Linux/libvirt and
@@ -17,7 +17,7 @@ deploy the Citus/Patroni formation or the application stack.
 The original workflow below is inventory **version 1**, using local libvirt/NAT.
 For a fresh Linux/KVM + Windows/VirtualBox formation on wired Ethernet, use
 [inventory v2](inventory.multihost.example.json) and the
-[two-host operator/evidence guide](../../docs/Platform-Multihost-and-Bonus.md).
+[two-host operator/evidence guide](../../docs/m2/Platform-Multihost-and-Bonus.md).
 The v2 example has placeholder LAN/SSH/adapter values and requires independent
 capacity checks. It does not modify the old formation or establish the physical-host
 bonus until real-network/application/demo evidence is collected.
