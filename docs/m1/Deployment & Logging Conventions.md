@@ -4,7 +4,7 @@ Verified against the implemented stack on 2026-10-09.
 
 ## Deployment topology
 
-[docker-compose.yml](../docker-compose.yml) is the executable deployment
+[docker-compose.yml](../../docker-compose.yml) is the executable deployment
 definition. Listener and host ports are supplied through root `.env`.
 The table shows template values; all internal ports remain configurable.
 
@@ -33,7 +33,7 @@ Root `.env` owns shared deployment ports. Gitignored service env files hold
 credentials and service settings. Compose injects matching listener ports,
 dependency URLs and probes. The application programs use `os.Getenv` and do not
 load env files themselves during native execution. Use the complete
-[.env.example](../.env.example), [README](../README.md) and
+[.env.example](../../.env.example), [README](../../README.md) and
 [port configuration](Port%20Configuration.md) for configuration.
 
 ## Health and independent startup
@@ -49,7 +49,7 @@ PVMBG's simulated outage returns 503 from data/history endpoints while
 consumer can stay healthy while `/ready` returns 503. Registry's supervisor
 retries initialization if its database is absent; its API/readiness listener can
 remain unreachable until initialization succeeds. Native infrastructure has
-its own readiness checks. See [Registry](../registry/README.md).
+its own readiness checks. See [Registry](../../registry/README.md).
 
 ## Correlation IDs
 
@@ -118,7 +118,7 @@ Monitoring availability does not gate application processing.
 
 Only Grafana, Prometheus and Loki require monitoring env files. Root ports and
 Compose supply Alloy/Exporter settings. The launcher validates configuration
-before starting each upstream program. See [monitoring](../monitoring/README.md)
+before starting each upstream program. See [monitoring](../../monitoring/README.md)
 and [Test Runbook](Test%20Runbook.md) for retention, permissions and evidence.
 
 The runbook covers independent restart, live schema evolution, authentication,

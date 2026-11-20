@@ -9,7 +9,7 @@ consumers now own separate PostgreSQL instances; the two source history archives
 remain SQLite. This checkout starts from fresh volumes: no existing-data migration
 is provided. Sharding, replication, leader election/fencing, Kubernetes, additional
 M2 sources and the M2 Audit API remain future work. See the
-[preparation verification report](docs/Preparation%20Verification.md) for measured
+[preparation verification report](docs/m1/Preparation%20Verification.md) for measured
 results and limitations.
 
 ## Services
@@ -37,7 +37,7 @@ and runs on `alpine:3.24`. All Go modules require Go 1.27.1.
 ## Broker choice: NATS JetStream
 
 We went with **NATS JetStream**, and the reasoning is in
-[Technical stacks](docs/Technical%20Stacks.md) and [Contracts](docs/Contracts.md).
+[Technical stacks](docs/m1/Technical%20Stacks.md) and [Contracts](docs/m1/Contracts.md).
 
 Here is how the broker is set up:
 
@@ -113,7 +113,7 @@ docs/             # Team contract docs (wire format, stack, deployment)
 
 ## Quick start: Docker Compose
 
-Untuk persiapan presentasi, lihat [Panduan Demo M1](docs/Panduan%20Demo%20M1.md)
+Untuk persiapan presentasi, lihat [Panduan Demo M1](docs/m1/Panduan%20Demo%20M1.md)
 yang memuat urutan demo, kriteria P1–P5, pembagian waktu, dan alat bantu operator.
 Jalankan `node scripts/m1-demo.mjs --help` untuk daftar perintah. Pada checkout
 tanpa konfigurasi, `python3 scripts/setup-env.py` membuat `.env` lokal dengan
@@ -230,7 +230,7 @@ A few things are worth knowing about startup:
 - The Registry container keeps retrying if its database is absent. Its API
   and readiness probe remain unavailable until initialization succeeds.
   Set `REGISTRY_RETRY_DELAY_SEC` explicitly in `registry/.env` (example `5`).
-  See the [startup and independent restart procedure](docs/Test%20Runbook.md).
+  See the [startup and independent restart procedure](docs/m1/Test%20Runbook.md).
 
 For host-side commands below, load the configured host URLs once in each terminal.
 Bash (requires Python 3, like the demo scripts):
@@ -746,7 +746,7 @@ projections, pagination, errors, role restrictions, metrics and stored traces.
 `--read-only` skips restarts but still logs in and sends verification requests.
 Start the `monitoring` profile and allow ingestion/trace export first. This check
 does not erase volumes. Results from the completed preparation run are recorded
-in the [verification report](docs/Preparation%20Verification.md); the full M1
+in the [verification report](docs/m1/Preparation%20Verification.md); the full M1
 ten-to-twenty-minute outage remains a separate demonstration.
 
 For manual module-by-module execution, each Go directory is a separate module;
@@ -796,7 +796,7 @@ cd aggregator && TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5433/
 
 ## Acceptance test scenario index
 
-After fresh setup, follow [Test Runbook](docs/Test%20Runbook.md) phases 0 through
+After fresh setup, follow [Test Runbook](docs/m1/Test%20Runbook.md) phases 0 through
 7 in order. Phase 0 defines the Bash/PowerShell helpers and evidence capture;
 the numbered steps contain the exact triggers, expected results, and restoration
 commands. Run load tests last because they change source delay configuration.
@@ -1214,7 +1214,7 @@ The Aggregator compiles and caches those rules with each writer schema ID.
 Avro checks structure and types; the custom validator checks inclusive numeric
 bounds and typed scalar `allowedValues` lists. Rules also work on nested scalar
 schemas, including array items and map values. See
-[Schema validation](docs/Schema%20Validation.md) for supported types and failure policy.
+[Schema validation](docs/m1/Schema%20Validation.md) for supported types and failure policy.
 Both live polling and `/history` replay request Avro when the registry is configured;
 a JSON response is rejected rather than silently bypassing validation. JSON source
 reads remain available to operators. Archive storage remains JSON in source-owned
@@ -1500,7 +1500,7 @@ FIELD_CLIENT_SECRET=$(demo_env_value "$DEMO_ROOT/auth-service/.env" FIELD_CLIENT
 ```
 
 For PowerShell helpers and every M1 criterion's detailed procedure, use
-[Test Runbook](docs/Test%20Runbook.md). `node scripts/m1-demo.mjs preflight`
+[Test Runbook](docs/m1/Test%20Runbook.md). `node scripts/m1-demo.mjs preflight`
 checks the current project, and its `fanout`/`third-consumer` commands capture
 asserted evidence without hand-comparing moving record counts.
 

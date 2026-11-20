@@ -1,7 +1,7 @@
 # Implemented technology stack — IF4031 M1
 
 Verified against repository code and Dockerfiles on 2026-10-09. The assignment
-requirements remain in [M1](IF4031%20-%20Tugas%20Besar%20-%20M1.md); this document
+requirements remain in [M1](../IF4031%20-%20Tugas%20Besar%20-%20M1.md); this document
 describes the implementation.
 
 ## Application services
@@ -93,7 +93,7 @@ Go programs read process environment using the standard library. Compose
 injects root deployment ports and matching URLs; gitignored per-service env files
 hold credentials and service settings. Native Go execution requires explicitly
 exported environment variables. The combined template is
-[.env.example](../.env.example). See [port configuration](Port%20Configuration.md).
+[.env.example](../../.env.example). See [port configuration](Port%20Configuration.md).
 
 ## Monitoring and logs
 
@@ -112,7 +112,7 @@ and pings, plus NATS connection, stream lookup/info and publication. SQL traces
 record a fingerprint and safe error category/SQLSTATE; SQL text, arguments and
 DSNs are excluded. Native upstream infrastructure logs retain their own formats.
 See [deployment and logging](Deployment%20%26%20Logging%20Conventions.md) and
-[monitoring](../monitoring/README.md).
+[monitoring](../../monitoring/README.md).
 
 ## Verification tools
 
@@ -128,7 +128,7 @@ state. Summaries report throughput, p50/p95/p99, successful reads, controlled
 `scripts/evidence-probes.mjs` exercise the remaining P1–P5 scenarios.
 
 Run commands and evidence requirements are in the
-[root README](../README.md) and [Test Runbook](Test%20Runbook.md).
+[root README](../../README.md) and [Test Runbook](Test%20Runbook.md).
 
 ## Preparation observability and deployment
 

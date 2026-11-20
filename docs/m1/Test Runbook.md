@@ -71,7 +71,7 @@ preserves a complete existing set and rejects partial sets. For a checkout with
 old configuration whose persisted data will be reset, run
 `python3 scripts/setup-env.py --fresh`: old files move into the gitignored
 `.local-config-backup/<timestamp>/` directory. Generate first, then paste helpers
-so they read the active credentials. [README configuration tables](../README.md#configuration-variables)
+so they read the active credentials. [README configuration tables](../../README.md#configuration-variables)
 describe manual setup and ownership. Do not regenerate database passwords for
 volumes you need to retain; no old-data conversion is supplied.
 
@@ -399,8 +399,8 @@ For supplemental screenshots, save `evidence/1.2-health.png`,
 visible time window, service/durable labels, and correlation ID where relevant.
 Avoid credentials or tokens. Record the scenario times in the corresponding step
 transcript. Screenshots do not replace Appendix C's exact record and response
-checks. See [Monitoring](../monitoring/README.md) and
-[Monitoring verification](../monitoring/VERIFICATION.md) for collector-loss and
+checks. See [Monitoring](../../monitoring/README.md) and
+[Monitoring verification](../../monitoring/VERIFICATION.md) for collector-loss and
 DLQ-specific checks. A retained DLQ count is an archive count; a decrease does not
 prove successful recovery.
 
@@ -1687,7 +1687,7 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 
 ## Reporting lifecycle verification
 
-See the [README preliminary reporting section](../README.md#preliminary-reporting-and-delayed-recovery) and configuration tables for the current lifecycle setup.
+See the [README preliminary reporting section](../../README.md#preliminary-reporting-and-delayed-recovery) and configuration tables for the current lifecycle setup.
 Run the Go suites in each affected service. Store integration tests need a
 **dedicated** `TEST_DATABASE_URL` with `store/init.sql` initialized; do not point
 these tests at a live demo database because tests advance replay cursors.

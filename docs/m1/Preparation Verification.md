@@ -50,9 +50,9 @@ These are local development measurements, not M2's 10,000-VU scaling evidence. T
 
 ## Evidence and reproduction
 
-Local, gitignored artifacts are under `evidence/preparation-*`, including [k6 output](../evidence/preparation-load.log), [race tests](../evidence/preparation-go-race.log), [infrastructure tests](../evidence/preparation-infrastructure.log), [end-to-end checks](../evidence/preparation-end-to-end.log), and [outage recovery](../evidence/preparation-outage.log). The load thresholds passed and the text summary was captured; k6 could not write its optional JSON summary because its container user lacked permission on the evidence mount.
+Local, gitignored artifacts are under `evidence/preparation-*`, including [k6 output](../../evidence/preparation-load.log), [race tests](../../evidence/preparation-go-race.log), [infrastructure tests](../../evidence/preparation-infrastructure.log), [end-to-end checks](../../evidence/preparation-end-to-end.log), and [outage recovery](../../evidence/preparation-outage.log). The load thresholds passed and the text summary was captured; k6 could not write its optional JSON summary because its container user lacked permission on the evidence mount.
 
-Use the [README](../README.md) and [runbook](Test%20Runbook.md) to reproduce. `scripts/test-services.py` accepts `--race` and `--vet`. Integration tests require the documented dedicated test URLs. `scripts/verify-preparation.py --project <project>` checks a running disposable stack and intentionally restarts Auth/consumers; `--read-only` skips those restarts.
+Use the [README](../../README.md) and [runbook](Test%20Runbook.md) to reproduce. `scripts/test-services.py` accepts `--race` and `--vet`. Integration tests require the documented dedicated test URLs. `scripts/verify-preparation.py --project <project>` checks a running disposable stack and intentionally restarts Auth/consumers; `--read-only` skips those restarts.
 
 Race suites were run separately from Docker image compilation. A contended run hit an intentional halt-write deadline; the final suites pass without concurrent compilation, and advisory locks are scoped by schema to isolate unrelated test schemas.
 

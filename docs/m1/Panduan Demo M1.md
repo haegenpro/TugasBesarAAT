@@ -1,6 +1,6 @@
 # Panduan pelaksanaan demo M1
 
-Panduan operator untuk [spesifikasi M1](IF4031%20-%20Tugas%20Besar%20-%20M1.md), berdasarkan implementasi di repositori ini. Jalankan perintah dari root repositori. Contoh utama menggunakan Linux/Bash; perintah Node dan Docker juga dapat digunakan di Windows. Versi PowerShell untuk pengujian terperinci tersedia di [Test Runbook](Test%20Runbook.md).
+Panduan operator untuk [spesifikasi M1](../IF4031%20-%20Tugas%20Besar%20-%20M1.md), berdasarkan implementasi di repositori ini. Jalankan perintah dari root repositori. Contoh utama menggunakan Linux/Bash; perintah Node dan Docker juga dapat digunakan di Windows. Versi PowerShell untuk pengujian terperinci tersedia di [Test Runbook](Test%20Runbook.md).
 
 ## 1. Apa yang wajib disiapkan
 
@@ -70,7 +70,7 @@ python3 scripts/setup-env.py
 docker compose config --quiet
 ```
 
-Jika konfigurasi baru sebagian, lengkapi berdasarkan [tabel README](../README.md#per-service-environment-files). Jangan menimpa secret layanan yang DB-nya sudah berisi data: kredensial DB lama harus tetap cocok dengan volume tersebut. File `.env` root mengatur port deployment, sedangkan `.env` per service mengatur kredensial/perilaku. `setup-env.py` tidak mengubah password dalam DB yang sudah ada.
+Jika konfigurasi baru sebagian, lengkapi berdasarkan [tabel README](../../README.md#per-service-environment-files). Jangan menimpa secret layanan yang DB-nya sudah berisi data: kredensial DB lama harus tetap cocok dengan volume tersebut. File `.env` root mengatur port deployment, sedangkan `.env` per service mengatur kredensial/perilaku. `setup-env.py` tidak mengubah password dalam DB yang sudah ada.
 
 Untuk setiap latihan penuh, gunakan **nama project baru** agar storage, durable dan schema mula-mula bersih tanpa menghapus data latihan lain. Satu stack pada port host yang sama saja yang boleh aktif. Jika stack lama aktif, hentikan project tersebut terlebih dahulu, lalu:
 
@@ -84,7 +84,7 @@ docker compose --profile demo build client-tui
 docker pull grafana/k6
 ```
 
-Siapkan image dan uji build **sebelum** sesi agar unduhan tidak menghabiskan waktu demo. `fanout --rebuild` tetap menjalankan build saat sesi sebagai bukti P4, biasanya memakai cache. Jika memakai Grafana, build/start profil `monitoring` juga sebelum sesi dan gunakan dashboard dari [monitoring/README.md](../monitoring/README.md).
+Siapkan image dan uji build **sebelum** sesi agar unduhan tidak menghabiskan waktu demo. `fanout --rebuild` tetap menjalankan build saat sesi sebagai bukti P4, biasanya memakai cache. Jika memakai Grafana, build/start profil `monitoring` juga sebelum sesi dan gunakan dashboard dari [monitoring/README.md](../../monitoring/README.md).
 
 ### 4.2 Helper terminal dan perekaman
 
@@ -328,4 +328,4 @@ Sebelum mengakhiri sesi, pastikan semua P1–P5 sudah mempunyai bukti aktual dan
 
 Pada 22 Oktober 2026, **22 pengujian skrip lulus**. Stack uji dengan port/volume terpisah dan image lokal berhasil menjalankan preflight, inspeksi DB, isolasi store, penolakan raw Media, fan-out/replay notifier, subscriber ketiga, mapping, schema evolution, storage, kontrol delay/outage, dan restore delay. Source PVMBG setelah pengaturan 3000 ms terukur **3075,58 ms** pada satu request.
 
-Bukti lokal tersimpan di [evidence/tool-validation-2026-10-22](../evidence/tool-validation-2026-10-22/README.txt), yang diabaikan Git. Verifikasi ini memakai image yang sudah tersedia, tanpa build ulang seluruh aplikasi. Sustained load, token expiry alami, serta outage 10 menit belum dijalankan ulang dalam verifikasi ini; lakukan saat latihan. Angka satu request source tersebut bukan p95 atau bukti kelulusan P2.1. Stack uji sementara dibersihkan setelah pengujian.
+Bukti lokal tersimpan di [evidence/tool-validation-2026-10-22](../../evidence/tool-validation-2026-10-22/README.txt), yang diabaikan Git. Verifikasi ini memakai image yang sudah tersedia, tanpa build ulang seluruh aplikasi. Sustained load, token expiry alami, serta outage 10 menit belum dijalankan ulang dalam verifikasi ini; lakukan saat latihan. Angka satu request source tersebut bukan p95 atau bukti kelulusan P2.1. Stack uji sementara dibersihkan setelah pengujian.

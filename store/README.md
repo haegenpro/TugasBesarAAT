@@ -48,6 +48,6 @@ Both rows live in the same table, same column, with no migration between them.
 
 ## Reporting lifecycle
 
-Validated observations, replay cursors, retry schedules, notices, transitions, and lifecycle outbox work are Aggregator-owned PostgreSQL data. Hazard corrections retain the hazard ID and increment a storage revision. See [Reporting Lifecycle](../docs/Reporting%20Lifecycle.md).
+Validated observations, replay cursors, retry schedules, notices, transitions, and lifecycle outbox work are Aggregator-owned PostgreSQL data. Hazard corrections retain the hazard ID and increment a storage revision. See [Reporting Lifecycle](../docs/m1/Reporting%20Lifecycle.md).
 
 `failed_ingestions` preserves original failed source-response bytes (or an explicitly marked bounded prefix for oversized input), identity/digest, reason, retry classification, timestamps and attempts. It is not a complete M2 quarantine/replay API. Both outboxes persist traceparent/tracestate separately from canonical JSON.

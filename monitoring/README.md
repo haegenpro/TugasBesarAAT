@@ -20,7 +20,7 @@ it into each official image. Application services now use OpenTelemetry and expo
 ## Required configuration
 
 Configure the monitoring HTTP ports, `GRAFANA_BIND_ADDRESS`, and
-`GRAFANA_HOST_PORT` in root `.env`; see [Port configuration](../docs/Port%20Configuration.md). Select an
+`GRAFANA_HOST_PORT` in root `.env`; see [Port configuration](../docs/m1/Port%20Configuration.md). Select an
 explicit IP address: `127.0.0.1` restricts access to this host; `0.0.0.0` exposes
 the selected port on all host IPv4 interfaces. Other machines use the host's
 actual address, not `0.0.0.0`, to open Grafana. IPv6 bind addresses must use
@@ -192,7 +192,7 @@ Business-record checks may suppress duplicate effects; replaying changed payload
 under an existing hazard ID may instead halt an incompatible consumer. Lifecycle
 events retain their own event-ID/revision rules. A halted consumer may additionally
 need the local operator resume command described in
-[Consumer recovery](../docs/consumer-recovery.md) after fixing the cause.
+[Consumer recovery](../docs/m1/consumer-recovery.md) after fixing the cause.
 
 Republishing neither removes the DLQ record nor adds a recovery status. Records
 expire according to explicitly configured `NATS_DLQ_MAX_AGE` (168h in the example).
