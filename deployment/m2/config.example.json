@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "profile": "minikube",
+  "context": "aat-m2",
+  "namespace": "sistem-informasi-kebencanaan-bnpb",
+  "nodes": {"a": "aat-m2", "b": "aat-m2-m02"},
+  "storage_root": "/var/lib/aat-m2",
+  "image_prefix": "aat",
+  "image_tag": "m2",
+  "network": {"pod_cidr": "10.244.0.0/16", "service_cidr": "10.96.0.0/12"},
+  "features": {"monitoring": true, "ai": false},
+  "satellite": {"url": "https://satellite.naufarrel.dev", "namespace": "satellite-practice", "initial_offset": 0, "lateness_seconds": 1800},
+  "coastal": {"profile": "practice", "speed": 60},
+  "limits": {"broker_volume_gib": 2, "broker_message_mib": 1024, "postgres_volume_gib": 2, "quarantine_mib": 256},
+  "external": {"satellite_token": "", "audit_token": "", "openrouter_api_key": "", "summary_model": ""}
+}

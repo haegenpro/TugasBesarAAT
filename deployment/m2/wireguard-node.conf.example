@@ -1,0 +1,11 @@
+# Ubuntu VM A. On B use a distinct key and address 10.77.0.3/24.
+# Install as /etc/wireguard/wg0.conf, mode 0600; enable wg-quick@wg0.
+[Interface]
+Address = 10.77.0.2/24
+PrivateKey = REPLACE_WITH_NODE_PRIVATE_KEY
+
+[Peer]
+PublicKey = REPLACE_WITH_HUB_PUBLIC_KEY
+Endpoint = 103.16.132.242:51820
+AllowedIPs = 10.77.0.0/24
+PersistentKeepalive = 25

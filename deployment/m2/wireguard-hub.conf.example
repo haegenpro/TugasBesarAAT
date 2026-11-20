@@ -1,0 +1,16 @@
+# VPS: /etc/wireguard/wg0.conf, mode 0600. Example addresses; avoid CIDR overlap.
+# Enable IPv4 forwarding on the VPS. Restrict its firewall to the required VPN port.
+[Interface]
+Address = 10.77.0.1/24
+ListenPort = 51820
+PrivateKey = REPLACE_WITH_HUB_PRIVATE_KEY
+
+[Peer]
+PublicKey = REPLACE_WITH_A_PUBLIC_KEY
+AllowedIPs = 10.77.0.2/32
+
+[Peer]
+PublicKey = REPLACE_WITH_B_PUBLIC_KEY
+AllowedIPs = 10.77.0.3/32
+
+# Optional operator/load-machine peer: give it a separate key and /32 address.

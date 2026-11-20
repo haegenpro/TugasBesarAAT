@@ -1,0 +1,5 @@
+**
+!deployment
+!deployment/m2
+!deployment/m2/storage
+!deployment/m2/storage/**

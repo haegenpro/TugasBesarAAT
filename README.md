@@ -1,5 +1,8 @@
 # TugasBesarAAT, IF4031 M1
 
+Milestone 2 implementation and two-node deployment instructions are maintained
+in [the M2 guide](docs/m2/README.md). The M1 workflow below remains available.
+
 This repository holds everything for Milestone 1, which includes the BMKG and PVMBG mocks,
 the BNPB Aggregator and its Canonical Store, the Client API, the Auth Service,
 an interactive downstream client, and two durable broker consumers.
