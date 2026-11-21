@@ -96,6 +96,10 @@ Passwords are in the private secrets file (`internal`, `grafana`); do not put th
 in command arguments or screenshots. Demo client IDs are `media-demo`,
 `field-demo`, and `internal-demo`, with their corresponding private secrets.
 
+For the controlled incompatible-source and retained-input replay video, follow
+[Replay-Demo.md](Replay-Demo.md). `scripts/m2/mock_schema.py` selects the required
+PVMBG breaking mode without putting admin credentials in command arguments.
+
 The Client API also has a NodePort for direct access from the VPN/load machine.
 Discover its assigned port with the selected context's `get service client-api`.
 Use direct NodePort access for load tests: a kubectl port-forward can become a

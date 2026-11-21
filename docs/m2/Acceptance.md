@@ -109,6 +109,59 @@ latency, or official reference comparison has passed. Evidence is private under
 The demo cluster is stopped after evidence capture to bound disk use. Data and
 cursors persist; starting the same profile resumes the token-enabled deployment.
 
+## Retraction rule and deployed Ops replay (2026-11-21)
+
+The owner approved treating updates as attribute changes that preserve an inactive
+detection's retraction. A later detection event may explicitly restore it.
+Both the fixture oracle and durable worker implement this rule. Race tests and
+replicated-ingestion regressions passed, including patch/full updates after
+retraction, a replacement worker after lease expiry, repeated delivery, and
+preserving inactive state during an older retained-input replay. This supersedes
+the earlier local active-target assumption; agreement with the assistants'
+reference remains a separate gate.
+
+The PVMBG mock now accepts JSON `mode` values `v1`, `compatible`, and `breaking`
+on `POST /admin/schema-version`. Breaking mode renames `alert_level` to `level`,
+changes the eruption count to text, and omits ash height. The original empty-body
+M1 toggle remains available. See [the video walkthrough](Replay-Demo.md).
+
+Release `m2-20261121-replay1` was deployed with acquisition disabled for the bounded
+rehearsal. The actual Client API Ops flow passed: Internal Ops downloaded a
+541-byte retained incompatible PVMBG payload with verified SHA-256; Media/Field
+inspection and replay attempts returned 403; reader version 2 was activated;
+the replay request selected one input; an immediate duplicate request selected
+zero; the selected failure resolved; and exactly one canonical event existed for
+the demo source report. The mock returned to v1. The reader was left on version
+2, which also accepts v1. Canonical fencing/replay integration tests also passed.
+Private evidence is `.m2-local/evidence-pvmbg-ops-replay-002/result.json`.
+
+Older retryable HTTP-503 records were preserved as separate operational history;
+the check did not erase them or claim the whole failures list was empty. Their
+resolution/status presentation needs review. Browser assets and the UI's API
+endpoints were exercised; an actual browser-click/video rehearsal is not recorded.
+
+The two old satellite inputs were requested through the Client API after the fix,
+but still await replay behind the retained raw-stream backlog. Completion of those
+two live replays is not claimed. New satellite acquisition remains disabled in
+the rehearsal deployment to bound storage use; the normal private configuration
+still contains the token. Use normal `manage.py up` to restore that configuration.
+
+### Remaining acceptance gates
+
+| Area | Still unconfirmed |
+| --- | --- |
+| Real deployment | Ubuntu/K3s on separate physical hosts; WireGuard/LAN behavior and restart; actual 4 CPU/8 GB/32 GB fit |
+| P1 recovery | Empty-B replica rebuild, timed failover, full acknowledged-input zero-loss comparison, final replica/failback evidence with the official catalog |
+| P2 ownership | SIGSTOP/unfreeze, clock skew, <=60-second takeover and upstream overlap evidence during actual failure/scaling |
+| P2 load | 10,000 VUs for >=120 seconds with 3 -> 5 -> 2, <1% unexpected errors, 3-vs-1 >=2x throughput, M1 latency target, and rolling requests without failures |
+| P3 full rehearsal | Browser recording, broader live malformed-input/oversize cases, retry-history state cleanup, Field-pod crash after 202 with acknowledged-report reconciliation |
+| P4 satellite | The two queued historical replays; full clean interrupted/uninterrupted comparison; official reference/province agreement; 60x catch-up <=60 seconds and processing p95 |
+| P5 coastal | Live independent endpoint failures, stale reads, critical delivery with canonical storage blocked, complete receipt reconciliation and <=5-second p95 |
+| P5 priority | Media overload while Field login and report submission continue through reserved capacity |
+| Observability/resources | Browser metrics/logs/traces incident walkthrough and resource caps under sustained load, rollout and recovery |
+| Reset | Full destructive application/observability reset on the cluster; only guards/filesystem tests and dry runs have been exercised |
+| External artifacts/AI | Official catalog/Audit/evaluation artifacts when supplied; optional OpenRouter integration with actual credentials and model |
+
 ## P1: partitioning and recovery
 
 - Import the authoritative earthquake catalog through the canonical service owner;

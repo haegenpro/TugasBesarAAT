@@ -54,3 +54,15 @@ is valid; the intentional failure is incompatibility with the selected reader.
 This page demonstrates the M2 source-input quarantine. JetStream consumer DLQs
 also retain delivery failures, but arbitrary corrupt bytes cannot become valid
 events merely by requesting replay. Resolve the failure's cause first.
+
+The deployed Client API flow was exercised on 2026-11-21: a 541-byte incompatible
+PVMBG history payload was parked, its download matched the advertised SHA-256,
+Media/Field identities received 403 for inspection and replay, and reader 2
+resolved it. The first replay request selected one input; an immediate duplicate
+request selected zero. The emitted demo report had exactly one canonical event.
+Source v1 was restored afterward. This exercised the browser's HTTP endpoints
+and served UI assets; recording and browser-click rehearsal are still separate.
+
+Satellite replay shares the existing raw stream and can wait behind a large
+backlog. For a short video use the controlled PVMBG scenario above. Queueing a
+satellite replay does not prove it has completed.
