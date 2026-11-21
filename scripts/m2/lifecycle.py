@@ -39,7 +39,8 @@ def stop_writers(cfg):
 def wait_writers(cfg):
     def pending():
         return [p['metadata']['name'] for p in objects(cfg, 'pods')
-                if p['metadata'].get('labels', {}).get('app') not in PASSIVE
+                if p['metadata'].get('labels', {}).get(
+                    'instance', p['metadata'].get('labels', {}).get('app')) not in PASSIVE
                 and any(o['kind'] == 'ReplicaSet' for o in p['metadata'].get('ownerReferences', []))
                 and p['status']['phase'] not in ('Succeeded', 'Failed')]
     wait_for('Writers stopped', pending, 180)
