@@ -37,3 +37,4 @@ ALTER TABLE failed_ingestions ADD COLUMN IF NOT EXISTS original_identity text NO
 ALTER TABLE failed_ingestions DROP CONSTRAINT IF EXISTS failed_ingestions_source_entity_digest_key;
 CREATE UNIQUE INDEX IF NOT EXISTS failed_original_identity ON failed_ingestions(source,entity,original_identity,digest);
 CREATE TABLE IF NOT EXISTS canonical_visibility(txid text PRIMARY KEY,published boolean NOT NULL DEFAULT false,created_at timestamptz NOT NULL DEFAULT clock_timestamp(),published_at timestamptz);
+CREATE INDEX IF NOT EXISTS canonical_visibility_pending ON canonical_visibility(txid) WHERE NOT published;
