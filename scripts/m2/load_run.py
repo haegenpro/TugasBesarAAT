@@ -100,8 +100,8 @@ def run(args):
             if item['name'] in safe_keys and 'value' in item
         }
     if args.vus>=10000:
-        for name in ('wildfire-processor','coastal-processor','field-report-processor'):
-            if report['controllers_before'][name]['replicas']<1:
+        for processor in ('wildfire-processor','coastal-processor','field-report-processor'):
+            if report['controllers_before'][processor]['replicas']<1:
                 raise ValueError('restore processors before the 10,000-VU acceptance run')
         for o in controllers:
             env=o['spec']['template']['spec']['containers'][0].get('env',[])
