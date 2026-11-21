@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/linkedin/goavro/v2"
@@ -22,12 +23,21 @@ func (h *Handler) encodeVolcanic(ctx context.Context, reports []domain.VolcanicR
 	if showConfidence {
 		schemaText = volcanicV2()
 	}
-	schema, err := h.Registry.Register(ctx, volcanicSubject, schemaText)
+	subject := volcanicSubject
+	if h.breakingSchema {
+		schemaText = volcanicBreaking
+		subject = volcanicBreakingSubject
+	}
+	schema, err := h.Registry.Register(ctx, subject, schemaText)
 	if err != nil {
 		return nil, err
 	}
 	native := make([]any, 0, len(reports))
 	for _, r := range reports {
+		if h.breakingSchema {
+			native = append(native, map[string]any{"report_id": r.ReportID, "volcano_id": r.VolcanoID, "level": string(r.AlertLevel), "eruption_count_24h": strconv.Itoa(r.EruptionCount24h), "reported_at": r.ReportedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z")})
+			continue
+		}
 		item := map[string]any{"report_id": r.ReportID, "volcano_id": r.VolcanoID, "alert_level": string(r.AlertLevel), "eruption_count_24h": int32(r.EruptionCount24h), "ash_column_height_m": r.AshColumnHeightM, "reported_at": r.ReportedAt.Time.UTC().Format("2006-01-02T15:04:05.000Z")}
 		if showConfidence {
 			item["confidence_level"] = goavro.Union("null", nil)

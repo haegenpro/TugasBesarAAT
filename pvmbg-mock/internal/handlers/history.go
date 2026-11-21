@@ -74,7 +74,7 @@ func (h *Handler) History(c *gin.Context) {
 			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "archive invalid")})
 			return
 		}
-		b, _ := json.Marshal(r.WireCopy(h.Toggles.ShowConfidence()))
+		b, _ := json.Marshal(h.wireReport(r, h.Toggles.ShowConfidence()))
 		page.Data[i].Payload = b
 	}
 	if strings.Contains(c.GetHeader("Accept"), avrowire.MediaType) {
@@ -83,11 +83,16 @@ func (h *Handler) History(c *gin.Context) {
 			return
 		}
 		text, err := volcanicHistorySchema(h.Toggles.ShowConfidence())
+		subject := volcanicHistorySubject
+		if h.breakingSchema {
+			text, err = avrowire.HistorySchema(volcanicBreaking, "VolcanicHistoryPage")
+			subject = volcanicBreakingHistorySubject
+		}
 		if err != nil {
 			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "history schema invalid")})
 			return
 		}
-		schema, err := h.Registry.Register(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), volcanicHistorySubject, text)
+		schema, err := h.Registry.Register(avrowire.WithCorrelationID(c.Request.Context(), middleware.GetCorrelationID(c)), subject, text)
 		if err != nil {
 			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "history schema unavailable")})
 			return

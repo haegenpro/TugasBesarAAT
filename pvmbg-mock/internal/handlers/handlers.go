@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"net/http"
@@ -24,18 +27,19 @@ import (
 )
 
 type Handler struct {
-	Logger      *slog.Logger
-	Archive     *history.Archive
-	Reports     []domain.VolcanicReport
-	Toggles     *state.Toggles
-	MinDelayMs  int
-	MaxDelayMs  int
-	rngMu       sync.Mutex // guards rng: requests run concurrently and *rand.Rand is not goroutine-safe
-	rng         *rand.Rand
-	Registry    *avrowire.Client
-	schemaMu    sync.RWMutex // guards Reports, activations, liveIDs
-	activations int
-	liveIDs     []string
+	Logger         *slog.Logger
+	Archive        *history.Archive
+	Reports        []domain.VolcanicReport
+	Toggles        *state.Toggles
+	MinDelayMs     int
+	MaxDelayMs     int
+	rngMu          sync.Mutex // guards rng: requests run concurrently and *rand.Rand is not goroutine-safe
+	rng            *rand.Rand
+	Registry       *avrowire.Client
+	schemaMu       sync.RWMutex // guards Reports, activations, liveIDs
+	activations    int
+	liveIDs        []string
+	breakingSchema bool // guarded by schemaMu
 }
 
 func New(reports []domain.VolcanicReport, toggles *state.Toggles, minDelayMs, maxDelayMs int) *Handler {
@@ -178,7 +182,11 @@ func (h *Handler) VolcanicReports(c *gin.Context) {
 		c.Data(http.StatusOK, avrowire.MediaType, data)
 		return
 	}
-	c.JSON(http.StatusOK, out)
+	wire := make([]any, 0, len(out))
+	for _, report := range out {
+		wire = append(wire, h.wireReport(report, showConfidence))
+	}
+	c.JSON(http.StatusOK, wire)
 }
 
 func Health(c *gin.Context) {
@@ -193,6 +201,24 @@ type schemaVersionResponse struct {
 func (h *Handler) AdminSchemaVersion(c *gin.Context) {
 	h.schemaMu.Lock()
 	defer h.schemaMu.Unlock()
+	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4096))
+	if err != nil {
+		c.Status(http.StatusRequestEntityTooLarge)
+		return
+	}
+	if len(bytes.TrimSpace(body)) > 0 {
+		var request struct {
+			Mode string `json:"mode"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(body))
+		decoder.DisallowUnknownFields()
+		if decoder.Decode(&request) != nil || decoder.Decode(new(any)) != io.EOF {
+			c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "expected a schema mode")})
+			return
+		}
+		h.setSchemaMode(c, request.Mode)
+		return
+	}
 	if h.Registry != nil {
 		// Register v1 first so the registry checks v2 against it. A failed
 		// registration leaves the source's visible schema unchanged.
@@ -242,6 +268,7 @@ func (h *Handler) AdminSchemaVersion(c *gin.Context) {
 		h.Reports = append(h.Reports, *added)
 		h.activations++
 	}
+	h.breakingSchema = false
 	h.Toggles.ToggleSchema()
 	c.JSON(http.StatusOK, schemaVersionResponse{SchemaVersion: version, ConfidenceLevelVisible: visible})
 }
