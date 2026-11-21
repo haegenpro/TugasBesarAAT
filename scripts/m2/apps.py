@@ -159,8 +159,10 @@ def applications(cfg,credentials):
 
 def broker_job(cfg,credentials):
     name='broker-initialize'
+    job_revision=hashlib.sha256((ROOT/'broker/cmd/m2-init/main.go').read_bytes()+
+                                b'\0'+image(cfg,'broker').encode()).hexdigest()[:10]
     result = [secret(name,{'NATS_URL':'nats://application:'+quote(credentials['nats'],safe='')+'@broker:4222'}),
-        resource('Job',name+'-'+hashlib.sha256((ROOT/'broker/cmd/m2-init/main.go').read_bytes()).hexdigest()[:10],spec={'backoffLimit':6,'ttlSecondsAfterFinished':86400,'template':{'metadata':{'labels':labels(name,'other')},'spec':{
+        resource('Job',name+'-'+job_revision,spec={'backoffLimit':6,'ttlSecondsAfterFinished':86400,'template':{'metadata':{'labels':labels(name,'other')},'spec':{
             'restartPolicy':'OnFailure','nodeSelector':{'kubernetes.io/hostname':cfg['nodes']['a']},'automountServiceAccountToken':False,
             'containers':[{'name':name,'image':image(cfg,'broker'),'command':['/usr/local/bin/m2-init'],
                            'envFrom':[{'secretRef':{'name':name}}],'resources':resources('other')}]}}})]
