@@ -1,0 +1,108 @@
+{
+  "type": "record",
+  "name": "CoastalWarning",
+  "namespace": "bnpb.m2",
+  "fields": [
+    {
+      "name": "warning_version",
+      "type": "int",
+      "default": 1
+    },
+    {
+      "name": "notification_id",
+      "type": "string"
+    },
+    {
+      "name": "recipient",
+      "type": "string"
+    },
+    {
+      "name": "source",
+      "type": "string"
+    },
+    {
+      "name": "source_namespace",
+      "type": "string"
+    },
+    {
+      "name": "observation_id",
+      "type": "string"
+    },
+    {
+      "name": "operation_id",
+      "type": "string"
+    },
+    {
+      "name": "operation_position",
+      "type": "long"
+    },
+    {
+      "name": "operation",
+      "type": "string"
+    },
+    {
+      "name": "observed_at",
+      "type": "string"
+    },
+    {
+      "name": "first_received_at",
+      "type": "string"
+    },
+    {
+      "name": "critical",
+      "type": "boolean"
+    },
+    {
+      "name": "station_id",
+      "type": "string"
+    },
+    {
+      "name": "province",
+      "type": "string"
+    },
+    {
+      "name": "latitude",
+      "type": "double"
+    },
+    {
+      "name": "longitude",
+      "type": "double"
+    },
+    {
+      "name": "sea_level_anomaly_m",
+      "type": "double"
+    },
+    {
+      "name": "wave_height_m",
+      "type": "double"
+    },
+    {
+      "name": "quality",
+      "type": "string"
+    },
+    {
+      "name": "payload_sha256",
+      "type": "string"
+    },
+    {
+      "name": "correlation_id",
+      "type": "string"
+    },
+    {
+      "name": "traceparent",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null
+    },
+    {
+      "name": "hazard_id",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null
+    }
+  ]
+}

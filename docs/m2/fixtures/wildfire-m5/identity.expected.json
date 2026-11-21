@@ -1,0 +1,34 @@
+[
+  {
+    "tuple": [
+      "fixture-satellite-session",
+      "N20|2026-11-12|0000|0|0",
+      2
+    ],
+    "expected": "fire-v1:9556f0c47d0542a72f1e0c2f3c75703519460eda1f130dda9de84e9106590f95"
+  },
+  {
+    "tuple": [
+      "雪<&> ",
+      "N20|2026-11-12|243|-0.00|0.0010",
+      17
+    ],
+    "expected": "fire-v1:635d87fb0eabed8949f4ceb0c37e7a843858b61f19e44731b9da04cfb4fa248e"
+  },
+  {
+    "tuple": [
+      "é",
+      "N20|2026-11-12|0000|0|0",
+      2
+    ],
+    "expected": "fire-v1:4ee2b5825e7b8f3ee6920d87dc7e7ff7350e8b17af6bfdb5802e953249444be7"
+  },
+  {
+    "tuple": [
+      "é",
+      "N20|2026-11-12|0000|0|0",
+      2
+    ],
+    "expected": "fire-v1:09e3fad7b03b5d6b570d1065c39ae0f49bb8f5bc626796e2ea3b009d4f97f0ab"
+  }
+]

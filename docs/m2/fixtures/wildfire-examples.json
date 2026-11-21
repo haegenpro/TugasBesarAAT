@@ -1,0 +1,314 @@
+{
+  "wildfire_examples": {
+    "namespace": "fixture-satellite-session",
+    "province_reference": [
+      {
+        "name": "Fixture Province",
+        "latitude": 0,
+        "longitude": 0
+      }
+    ],
+    "operations": [
+      {
+        "offset": 1,
+        "operation": "detection",
+        "key": "N20|2026-11-12|0000|0|0",
+        "event_time": "2026-11-12T00:00:00Z",
+        "latitude": 0,
+        "longitude": 0,
+        "confidence": "h",
+        "frp_mw": 10
+      },
+      {
+        "offset": 2,
+        "operation": "detection",
+        "key": "N21|2026-11-12|0001|0|0.001",
+        "event_time": "2026-11-12T00:01:00Z",
+        "latitude": 0,
+        "longitude": 0.001,
+        "confidence": "n",
+        "frp_mw": 10
+      }
+    ],
+    "after_offset_1": {
+      "active_fire_count": 0,
+      "singletons": 1
+    },
+    "after_offset_2": {
+      "active_fire_count": 1,
+      "singletons": 0,
+      "detection_keys": [
+        "N20|2026-11-12|0000|0|0",
+        "N21|2026-11-12|0001|0|0.001"
+      ],
+      "detection_count": 2,
+      "satellites": [
+        "N20",
+        "N21"
+      ],
+      "max_confidence": "h",
+      "total_frp_mw": 20,
+      "severity": "WASPADA",
+      "latitude": 0,
+      "longitude": 0.0005,
+      "occurred_at": "2026-11-12T00:00:00Z",
+      "source_ref_id": "fire-v1:9556f0c47d0542a72f1e0c2f3c75703519460eda1f130dda9de84e9106590f95"
+    },
+    "duplicate_offset_2": {
+      "new_observations": 0,
+      "new_canonical_revisions": 0
+    },
+    "retract_offset_3": {
+      "operation": "retract",
+      "target_key": "N21|2026-11-12|0001|0|0.001",
+      "active_fire_count": 0,
+      "singletons": 1,
+      "retain_tombstone": true
+    },
+    "restart_after_prepared_offset_2": {
+      "prepared_through": 2,
+      "raw_replay_after": 2,
+      "expected_active_fire_count_after_pending_outputs_drain": 1,
+      "same_retained_uuid": true
+    },
+    "late_input": {
+      "watermark": "2026-11-12T01:00:00Z",
+      "input_event_time": "2026-11-12T00:00:00Z",
+      "expected_retained": true,
+      "expected_late_count_increment": 1,
+      "expected_correction_queued": true
+    },
+    "run_config": {
+      "allowed_lateness_seconds": 1800,
+      "note": "synthetic test configuration, not a measured production allowance"
+    }
+  },
+  "wildfire_lifecycle_cases": [
+    {
+      "name": "bridge_merge_then_retract",
+      "nodes": [
+        {
+          "key": "A",
+          "longitude": 0,
+          "minute": 0
+        },
+        {
+          "key": "B",
+          "longitude": 0.002,
+          "minute": 1
+        },
+        {
+          "key": "C",
+          "longitude": 0.018,
+          "minute": 2
+        },
+        {
+          "key": "D",
+          "longitude": 0.02,
+          "minute": 3
+        },
+        {
+          "key": "E",
+          "longitude": 0.01,
+          "minute": 4
+        }
+      ],
+      "shared_latitude": 0,
+      "operations": [
+        {
+          "offset": 1,
+          "insert": "A"
+        },
+        {
+          "offset": 2,
+          "insert": "B"
+        },
+        {
+          "offset": 3,
+          "insert": "C"
+        },
+        {
+          "offset": 4,
+          "insert": "D"
+        },
+        {
+          "offset": 5,
+          "insert": "E"
+        },
+        {
+          "offset": 6,
+          "retract": "E"
+        }
+      ],
+      "expected_before_bridge": {
+        "AB": "identity-AB",
+        "CD": "identity-CD"
+      },
+      "expected_after_bridge": {
+        "ABCDE": "identity-AB",
+        "inactive": [
+          "identity-CD"
+        ]
+      },
+      "expected_after_retract": {
+        "AB": "identity-AB",
+        "CD": "identity-CD",
+        "extra_active_parent": false
+      },
+      "identity_registry": "Persisted fixture identities; real source IDs use the derivation rule."
+    },
+    {
+      "name": "restoration_overrides_ordinary_survivor",
+      "before": {
+        "active_parent": "X",
+        "membership": [
+          "A",
+          "B",
+          "C",
+          "D"
+        ],
+        "earliest_key": "A",
+        "inactive_history": [
+          {
+            "identity": "H",
+            "membership": [
+              "A",
+              "B"
+            ],
+            "deactivated_position": 5
+          }
+        ]
+      },
+      "split_children": [
+        [
+          "A",
+          "B"
+        ],
+        [
+          "C",
+          "D"
+        ]
+      ],
+      "expected": {
+        "AB": "H",
+        "CD": "X"
+      },
+      "rule": "Restore H first, then the earliest unmatched qualifying child retains X."
+    },
+    {
+      "name": "all_children_historically_restored",
+      "before": {
+        "active_parent": "X",
+        "inactive_history": [
+          {
+            "identity": "H",
+            "membership": [
+              "A",
+              "B"
+            ],
+            "deactivated_position": 5
+          },
+          {
+            "identity": "J",
+            "membership": [
+              "C",
+              "D"
+            ],
+            "deactivated_position": 6
+          }
+        ]
+      },
+      "split_children": [
+        [
+          "A",
+          "B"
+        ],
+        [
+          "C",
+          "D"
+        ]
+      ],
+      "expected": {
+        "AB": "H",
+        "CD": "J",
+        "inactive": [
+          "X"
+        ]
+      }
+    },
+    {
+      "name": "multiple_exact_historical_matches",
+      "inactive_history": [
+        {
+          "identity": "H1",
+          "membership": [
+            "A",
+            "B"
+          ],
+          "deactivated_position": 5,
+          "birth_offset": 2
+        },
+        {
+          "identity": "H2",
+          "membership": [
+            "A",
+            "B"
+          ],
+          "deactivated_position": 7,
+          "birth_offset": 4
+        }
+      ],
+      "restored_membership": [
+        "A",
+        "B"
+      ],
+      "expected_identity": "H2"
+    },
+    {
+      "name": "singleton_does_not_keep_active_identity",
+      "split_children": [
+        [
+          "A"
+        ],
+        [
+          "C",
+          "D"
+        ]
+      ],
+      "historical_matches": [],
+      "expected": {
+        "CD": "current-parent",
+        "singletons": 1,
+        "active_fire_count": 1
+      }
+    }
+  ],
+  "canonical_wildfire_example": {
+    "hazard_id": "00000000-0000-4000-8000-000000000201",
+    "source": "SATELIT",
+    "source_ref_id": "fire-v1:9556f0c47d0542a72f1e0c2f3c75703519460eda1f130dda9de84e9106590f95",
+    "hazard_type": "WILDFIRE",
+    "severity": "WASPADA",
+    "area_name": "Fixture Province",
+    "latitude": 0,
+    "longitude": 0.0005,
+    "occurred_at": "2026-11-12T00:00:00Z",
+    "ingested_at": "2026-11-12T00:01:01.000Z",
+    "attributes": {
+      "detection_count": 2,
+      "satellites": [
+        "N20",
+        "N21"
+      ],
+      "max_confidence": "h",
+      "total_frp_mw": 20,
+      "detection_keys": [
+        "N20|2026-11-12|0000|0|0",
+        "N21|2026-11-12|0001|0|0.001"
+      ]
+    }
+  },
+  "notes": [
+    "Synthetic wildfire oracle fixtures only; not the HTTP, storage, or delivery contract."
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "version": 2,
+  "notice": "Synthetic, hand-specified memberships, counts, sums, revisions and analytical centers. Identity digests calculated independently with Python hashlib. Not evaluator data.",
+  "offset": 8,
+  "fires": [
+    {
+      "source_ref_id": "fire-v1:9556f0c47d0542a72f1e0c2f3c75703519460eda1f130dda9de84e9106590f95",
+      "labels": [
+        "A",
+        "B"
+      ],
+      "birth_offset": 2,
+      "logical_revision": 5,
+      "detection_count": 2,
+      "total_frp_mw": 20,
+      "severity": "WASPADA",
+      "latitude": 0,
+      "longitude": 0.001
+    },
+    {
+      "source_ref_id": "fire-v1:912e6bda6c64b1cfa53db449b15346bae49c30b4cd3963313aea87a471eb1408",
+      "labels": [
+        "C",
+        "D",
+        "E",
+        "F",
+        "G"
+      ],
+      "birth_offset": 7,
+      "logical_revision": 2,
+      "detection_count": 5,
+      "total_frp_mw": 50,
+      "severity": "SIAGA",
+      "latitude": 0,
+      "longitude": 0.028
+    }
+  ],
+  "retired_predecessors": []
+}

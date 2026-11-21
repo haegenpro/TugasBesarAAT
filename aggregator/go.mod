@@ -58,6 +58,7 @@ require (
 	github.com/jackc/pgx/v5 v5.6.0
 	github.com/linkedin/goavro/v2 v2.15.0
 	github.com/nats-io/nats.go v1.36.0
+	github.com/pymaxion/geographiclib-go/v2 v2.1.2
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/otel v1.38.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.38.0
