@@ -21,6 +21,27 @@ class LoadRunnerTests(unittest.TestCase):
         self.assertNotIn('node-a', inspected)
         self.assertNotIn('node-b', inspected)
 
+    def test_k6_api_falls_back_to_docker_exec_when_the_host_cannot_reach_it(self):
+        payload = json.dumps({'data': {'attributes': {'sample': {'value': 42}}}})
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, payload, '')
+        with patch.object(load_run.urllib.request, 'urlopen', side_effect=OSError('unreachable')), \
+                patch.object(load_run.subprocess, 'run', side_effect=fake_run):
+            answer = load_run.request_json(1234, '/v1/metrics/vus', 'generator')
+        self.assertEqual(answer['data']['attributes']['sample']['value'], 42)
+        self.assertEqual(calls[0][:5], ['docker', 'exec', 'generator', 'wget', '-qO-'])
+        with patch.object(load_run.urllib.request, 'urlopen', side_effect=OSError('unreachable')):
+            with self.assertRaises(OSError):
+                load_run.request_json(1234, '/v1/metrics/vus')
+        failing = subprocess.CompletedProcess([], 1, '', 'boom')
+        with patch.object(load_run.urllib.request, 'urlopen', side_effect=OSError('unreachable')), \
+                patch.object(load_run.subprocess, 'run', return_value=failing):
+            with self.assertRaises(OSError):
+                load_run.request_json(1234, '/v1/metrics/vus', 'generator')
+
     def check_memory_guard(self, profile):
         inspected = []
         with tempfile.TemporaryDirectory() as directory:

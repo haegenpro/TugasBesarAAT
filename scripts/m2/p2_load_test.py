@@ -86,9 +86,24 @@ def audit_duplicates(cfg):
     return {'duplicate_ids': ids, 'duplicate_refs': refs}
 
 
-def request_json(port, path):
-    with urllib.request.urlopen(f'http://127.0.0.1:{port}'+path, timeout=5) as response:
-        return json.load(response)
+def request_json(port, path, container=None):
+    """Read a k6 REST API answer; fall back to `docker exec` when the host cannot reach it.
+
+    Docker Desktop runs --network=host containers in the Docker VM's network namespace, so the
+    API bound to 127.0.0.1 inside the container is unreachable from a WSL distro. Without the
+    fallback no VU observation is possible and the scale/rollout actions never start.
+    """
+    try:
+        with urllib.request.urlopen(f'http://127.0.0.1:{port}'+path, timeout=5) as response:
+            return json.load(response)
+    except OSError:
+        if not container:
+            raise
+        result = subprocess.run(['docker', 'exec', container, 'wget', '-qO-', f'http://127.0.0.1:{port}{path}'],
+                                capture_output=True, text=True, timeout=8)
+        if result.returncode:
+            raise OSError('k6 REST API unreachable, even through docker exec')
+        return json.loads(result.stdout)
 
 
 def run(args):
@@ -207,13 +222,13 @@ def run(args):
                 elapsed = time.monotonic()-started
                 sample = {'elapsed_seconds': elapsed, 'host_available_bytes': available_memory()}
                 try:
-                    sample['vus'] = request_json(api_port, '/v1/metrics/vus')['data']['attributes']['sample']['value']
-                except (OSError, ValueError, KeyError):
+                    sample['vus'] = request_json(api_port, '/v1/metrics/vus', name)['data']['attributes']['sample']['value']
+                except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
                     sample['vus'] = None
                 sample['metrics']={}
                 for metric in ('m2_unexpected_errors','m2_admission_rejections','m2_successful_hazard_reads'):
-                    try:sample['metrics'][metric]=request_json(api_port,'/v1/metrics/'+metric)['data']['attributes']['sample']
-                    except (OSError,ValueError,KeyError):pass
+                    try:sample['metrics'][metric]=request_json(api_port,'/v1/metrics/'+metric,name)['data']['attributes']['sample']
+                    except (OSError,ValueError,KeyError,subprocess.TimeoutExpired):pass
                 if sample['vus'] is not None and sample['vus'] >= args.vus:
                     if high_since is None:
                         high_since = elapsed
