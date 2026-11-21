@@ -51,7 +51,8 @@ def main():
         raise ValueError('ingestion primary unavailable')
     script = '''import json,os,psycopg2
 namespace=NAMESPACE
-rows=json.loads(ROWS)+c=psycopg2.connect(host='127.0.0.1',dbname='ingestion',user='ingestion_app',password=os.environ['INGESTION_PASSWORD'])
+rows=json.loads(ROWS)
+c=psycopg2.connect(host='127.0.0.1',dbname='ingestion',user='ingestion_app',password=os.environ['INGESTION_PASSWORD'])
 with c.cursor() as cur:
  cur.execute('SELECT id,payload FROM provinces WHERE namespace=%s ORDER BY id',(namespace,))
  existing={identity:payload for identity,payload in cur.fetchall()}

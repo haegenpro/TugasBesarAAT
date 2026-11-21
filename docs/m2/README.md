@@ -115,8 +115,10 @@ an old namespace after a feed reset or change initial offsets against retained
 state. The example 1800-second lateness remains a development assumption until
 course-feed evidence establishes a suitable value.
 
-The production wildfire processor refuses to invent province coordinates. Obtain
-the authoritative reference, normalize it to a JSON array containing exactly
+The production wildfire processor refuses to invent province coordinates. The
+owner-approved practice table and its checksum are documented in
+[Province-Reference.md](Province-Reference.md). For another authoritative
+reference, normalize it to a JSON array containing exactly
 `id`, `name`, `latitude`, `longitude`, and record the approved file's SHA-256.
 The synthetic fixtures under `docs/m2/fixtures` are only for tests.
 
