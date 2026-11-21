@@ -60,7 +60,16 @@ func (s *Store) QueryPage(ctx context.Context, f Filters, p PageRequest) (Page, 
 		f.BeforeID = c.ID
 	}
 	f.Limit = p.Limit + 1
-	events, metadata, err := s.QueryWithMetadata(ctx, f)
+	var events []domain.HazardEvent
+	var metadata map[string]domain.RecordMetadata
+	var err error
+	if s.Distributed {
+		partial, readErr := s.distributedQuery(ctx, f)
+		events, metadata, err = partial.Events, partial.Metadata, readErr
+		out.Partial, out.UnavailableUnits = partial.Partial, partial.UnavailableUnits
+	} else {
+		events, metadata, err = s.QueryWithMetadata(ctx, f)
+	}
 	if err != nil {
 		return out, err
 	}
@@ -69,7 +78,9 @@ func (s *Store) QueryPage(ctx context.Context, f Filters, p PageRequest) (Page, 
 		last := events[len(events)-1]
 		b, _ := json.Marshal(cursor{last.OccurredAt.Time, last.HazardID, scope})
 		next := base64.RawURLEncoding.EncodeToString(b)
-		out.NextCursor = &next
+		if !out.Partial {
+			out.NextCursor = &next
+		}
 	}
 	out.Events = events
 	out.Metadata = make(map[string]domain.RecordMetadata, len(events))

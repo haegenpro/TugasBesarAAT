@@ -11,6 +11,7 @@ import (
 	"aggregator/internal/domain"
 	"aggregator/internal/mapping"
 	"aggregator/internal/middleware"
+	"aggregator/internal/ownership"
 	"aggregator/internal/platform"
 	"aggregator/internal/timeutil"
 	"github.com/google/uuid"
@@ -40,6 +41,14 @@ func queueLifecycle(ctx context.Context, tx pgx.Tx, e domain.LifecycleEvent) err
 }
 
 func (s *Store) saveHazardTx(ctx context.Context, tx pgx.Tx, e domain.HazardEvent, cid string, live bool) (domain.HazardEvent, bool, error) {
+	if s.Distributed {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, visibilityLock); err != nil {
+			return e, false, err
+		}
+		if err := markVisibility(ctx, tx); err != nil {
+			return e, false, err
+		}
+	}
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(e.Source)+":"+e.SourceRefID); err != nil {
 		return e, false, err
 	}
@@ -63,6 +72,13 @@ func (s *Store) saveHazardTx(ctx context.Context, tx pgx.Tx, e domain.HazardEven
 		json.Unmarshal(a, &av)
 		json.Unmarshal(b, &bv)
 		changed = !reflect.DeepEqual(av, bv)
+		if s.Distributed {
+			var active bool
+			if err = tx.QueryRow(ctx, `SELECT active FROM hazard_events WHERE source=$1 AND source_ref_id=$2`, e.Source, e.SourceRefID).Scan(&active); err != nil {
+				return e, false, err
+			}
+			changed = changed || !active
+		}
 		if changed {
 			revision++
 		}
@@ -82,7 +98,11 @@ func (s *Store) saveHazardTx(ctx context.Context, tx pgx.Tx, e domain.HazardEven
 		return e, false, err
 	}
 	// A deferred mapping inherits the last real live observation time, never the replay time.
-	if _, err = tx.Exec(ctx, `UPDATE hazard_events h SET last_seen_at=GREATEST(h.last_seen_at,o.last_seen_at) FROM source_observations o WHERE h.hazard_id=$1 AND o.source=h.source AND o.record_id=h.source_ref_id AND o.entity=CASE WHEN h.source='BMKG' THEN 'seismic-events' ELSE 'volcanic-reports' END`, e.HazardID); err != nil {
+	var observed *time.Time
+	if err = tx.QueryRow(ctx, `SELECT max(last_seen_at) FROM source_observations WHERE source=$1 AND record_id=$2 AND entity=CASE WHEN source='BMKG' THEN 'seismic-events' ELSE 'volcanic-reports' END`, e.Source, e.SourceRefID).Scan(&observed); err != nil {
+		return e, false, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE hazard_events SET last_seen_at=GREATEST(last_seen_at,$3) WHERE source=$1 AND source_ref_id=$2`, e.Source, e.SourceRefID, observed); err != nil {
 		return e, false, err
 	}
 	if inserted {
@@ -128,9 +148,35 @@ func observation(ctx context.Context, tx pgx.Tx, source, entity, id string, payl
 	return err
 }
 func (s *Store) sourceTx(ctx context.Context, source string) (pgx.Tx, error) {
-	tx, err := s.Pool.Begin(ctx)
+	tx, err := s.beginCanonicalTx(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if s.Distributed {
+		if err = ownership.Guard(ctx, tx); err != nil {
+			tx.Rollback(ctx)
+			return nil, err
+		}
+		if volcanicScope(ownership.Scope(ctx)) {
+			var version int
+			if err = tx.QueryRow(ctx, `SELECT version FROM source_policy WHERE source='PVMBG' FOR SHARE`).Scan(&version); err != nil || version != clients.VolcanicAdapter() {
+				tx.Rollback(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return nil, errors.New("PVMBG reader policy changed; retry with the current policy")
+			}
+			if source == "PVMBG" && ownership.Scope(ctx) != "replay:volcanic" {
+				var blocked bool
+				if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM failed_ingestions WHERE source='PVMBG' AND status='parked')`).Scan(&blocked); err != nil || blocked {
+					tx.Rollback(ctx)
+					if err != nil {
+						return nil, err
+					}
+					return nil, errors.New("earlier PVMBG input remains parked")
+				}
+			}
+		}
 	}
 	// Serialize source commits, keeping network calls outside transactions.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,1))`, source); err != nil {

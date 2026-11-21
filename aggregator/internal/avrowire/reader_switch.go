@@ -111,3 +111,32 @@ func (s *ReaderSwitch) Toggle(ctx context.Context) (string, error) {
 	s.active = 1 - s.active
 	return fmt.Sprintf("v%d", s.active+1), nil
 }
+
+// Install is explicit deployment policy for M2. Unlike discovery, it may adopt
+// a new major writer contract. The callback and reader change share the drain
+// gate, so an in-flight old-reader attempt cannot use a new semantic adapter.
+func (s *ReaderSwitch) Install(ctx context.Context, reader *SourceReader, activate func() error) error {
+	if reader == nil || reader.Live == nil || reader.History == nil {
+		return fmt.Errorf("complete reader required")
+	}
+	if err := s.gate.Acquire(ctx, readerSlots); err != nil {
+		return err
+	}
+	defer s.gate.Release(readerSlots)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := activate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readers = [2]*SourceReader{reader, nil}
+	s.active = 0
+	key, err := schemaKey(reader.Live.codec.Schema())
+	if err != nil {
+		return err
+	}
+	s.keys = [2]string{key, ""}
+	return nil
+}

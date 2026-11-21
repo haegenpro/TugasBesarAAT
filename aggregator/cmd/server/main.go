@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -15,7 +16,9 @@ import (
 	"aggregator/internal/avrowire"
 	"aggregator/internal/clients"
 	"aggregator/internal/config"
+	"aggregator/internal/m2api"
 	"aggregator/internal/middleware"
+	"aggregator/internal/ownership"
 	"aggregator/internal/poller"
 	"aggregator/internal/publisher"
 	"aggregator/internal/server"
@@ -75,6 +78,9 @@ func main() {
 	pvmbgClient.CaptureFailure = st.RecordFailure
 	registry := avrowire.NewClient(cfg.SchemaRegistryURL)
 	registry.ConfigureLogging(logger, "aggregator")
+	if st.Distributed {
+		registry.SetCache(st.SchemaCache())
+	}
 	bmkgClient.Registry = registry
 	bmkgClient.Readers = map[string]*avrowire.SourceReader{"/seismic-events": seismicReader, "/tsunami-warnings": tsunamiReader}
 	pvmbgClient.Registry = registry
@@ -95,15 +101,53 @@ func main() {
 		MaxBackoff: cfg.MaxBackoff,
 		Logger:     logger,
 	}
+	if st.Distributed {
+		p.Leases = ownership.New(st.Pool)
+		p.BeforeAttempt = func(c context.Context, endpoint string) error {
+			if endpoint != "PVMBG" && !strings.Contains(endpoint, "volcanic") {
+				return nil
+			}
+			if err := st.SyncPolicy(c, volcanicReaders, cfg.PVMBGReaderSchema); err != nil {
+				return err
+			}
+			if endpoint != "replay:volcanic" {
+				return st.BlockParkedVolcanic(c, "PVMBG")
+			}
+			return nil
+		}
+	}
 
 	a := api.New(st, status, deps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
+	if st.Distributed {
+		a.ExtraSources = &api.SourceCache{}
+	}
 	router := server.New(logger, a)
-	server.RegisterSchemaAdmin(router, volcanicReaders, cfg.AdminToken)
+	if st.Distributed {
+		fieldStore, err := st.ReadPool(ctx, 4)
+		if err != nil {
+			logger.Error("Field read pool configuration failed")
+			os.Exit(1)
+		}
+		defer fieldStore.Close()
+		fieldAPI := api.New(fieldStore, status, deps, cfg.BMKGFreshness, cfg.PVMBGFreshness)
+		fieldAPI.ExtraSources = a.ExtraSources
+		server.RegisterFieldReads(router, fieldAPI, os.Getenv("FIELD_READ_TOKEN"))
+	}
+	if !st.Distributed {
+		server.RegisterSchemaAdmin(router, volcanicReaders, cfg.AdminToken)
+	}
+	if st.Distributed {
+		m2api.Register(router, st, m2api.Config{AuditToken: os.Getenv("AUDIT_API_TOKEN"), CanonicalToken: os.Getenv("CANONICAL_SERVICE_TOKEN"), AnalyticsToken: os.Getenv("ANALYTICS_SERVICE_TOKEN"), AdminToken: cfg.AdminToken, NodeA: os.Getenv("M2_NODE_A"), NodeB: os.Getenv("M2_NODE_B"), IngestionURL: os.Getenv("INGESTION_BASE_URL"), IngestionToken: os.Getenv("INGESTION_SERVICE_TOKEN")})
+	}
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: platform.Handler("aggregator", router)}
 	var workers sync.WaitGroup
 	launch := func(fn func()) { workers.Add(1); go func() { defer workers.Done(); fn() }() }
 	launch(func() { monitorStore(ctx, st, deps, p, logger) })
 	launch(func() { st.CollectMetrics(ctx) })
+	if st.Distributed {
+		launch(func() { st.RunVisibilityRecovery(ctx) })
+		launch(func() { a.ExtraSources.Run(ctx, os.Getenv("INGESTION_BASE_URL"), os.Getenv("INGESTION_SERVICE_TOKEN")) })
+	}
 	if platform.Bool("AGGREGATOR_PUBLISH_ENABLED", true) {
 		launch(func() { dispatchOutbox(ctx, st, cfg, deps, registry, logger) })
 		launch(func() { dispatchLifecycle(ctx, st, cfg, deps, registry, logger) })

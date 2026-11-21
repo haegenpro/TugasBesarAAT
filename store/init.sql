@@ -104,3 +104,14 @@ CREATE TABLE failed_ingestions (
  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(), attempts BIGINT NOT NULL DEFAULT 1,
  UNIQUE(source,entity,digest)
 );
+-- Whole oversized source responses are streamed into bounded chunks instead of
+-- retaining only a prefix. M2 adds ownership/replay policy in its own migration.
+CREATE TABLE failed_ingestion_payloads (
+ payload_id UUID PRIMARY KEY, size BIGINT NOT NULL DEFAULT 0,
+ sha256 TEXT NOT NULL DEFAULT '', content_type TEXT NOT NULL
+);
+CREATE TABLE failed_ingestion_payload_chunks (
+ payload_id UUID NOT NULL REFERENCES failed_ingestion_payloads(payload_id) ON DELETE CASCADE,
+ ordinal INTEGER NOT NULL, data BYTEA NOT NULL, PRIMARY KEY(payload_id,ordinal)
+);
+ALTER TABLE failed_ingestions ADD COLUMN payload_id UUID REFERENCES failed_ingestion_payloads(payload_id);

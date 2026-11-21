@@ -75,13 +75,13 @@ func Init(service string) func(context.Context) error {
 	if v := os.Getenv("INSTANCE_ID"); v != "" {
 		host = v
 	}
-	opts := []sdktrace.TracerProviderOption{sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", service), attribute.String("service.instance.id", host))), sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.AlwaysSample()))}
+	opts := []sdktrace.TracerProviderOption{sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", service), attribute.String("service.instance.id", host))), sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(traceSampleRatio())))}
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" || os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != "" {
 		exp, err := otlptracehttp.New(context.Background(), otlptracehttp.WithTimeout(2*time.Second))
 		if err != nil {
 			panic("invalid trace exporter configuration")
 		}
-		opts = append(opts, sdktrace.WithBatcher(exp, sdktrace.WithMaxQueueSize(1024), sdktrace.WithMaxExportBatchSize(256), sdktrace.WithExportTimeout(2*time.Second)))
+		opts = append(opts, sdktrace.WithBatcher(exp, sdktrace.WithMaxQueueSize(128), sdktrace.WithMaxExportBatchSize(32), sdktrace.WithExportTimeout(2*time.Second)))
 	}
 	tp := sdktrace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(tp)
@@ -210,10 +210,29 @@ type sample struct {
 var mu sync.Mutex
 var requests = map[string]*sample{}
 var gauges = map[string]float64{}
+var observations = map[string]*sample{}
 var bounds = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 5}
 
 func Gauge(name string, value float64) { mu.Lock(); defer mu.Unlock(); gauges[name] = value }
 func Add(name string, value float64)   { mu.Lock(); defer mu.Unlock(); gauges[name] += value }
+
+// Observe uses constant metric names and bounded histogram buckets.
+func Observe(name string, value float64) {
+	mu.Lock()
+	defer mu.Unlock()
+	s := observations[name]
+	if s == nil {
+		s = &sample{}
+		observations[name] = s
+	}
+	s.Count++
+	s.Sum += value
+	for i, b := range bounds {
+		if value <= b {
+			s.Buckets[i]++
+		}
+	}
+}
 func Metrics(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -228,6 +247,14 @@ func Metrics(w http.ResponseWriter, r *http.Request) {
 	for n, v := range gauges {
 		fmt.Fprintf(w, "app_%s %g\n", n, v)
 	}
+	for name, s := range observations {
+		fmt.Fprintf(w, "app_%s_sum %g\napp_%s_count %d\n", name, s.Sum, name, s.Count)
+		for i, b := range bounds {
+			fmt.Fprintf(w, "app_%s_bucket{le=%q} %d\n", name, strconv.FormatFloat(b, 'g', -1, 64), s.Buckets[i])
+		}
+		fmt.Fprintf(w, "app_%s_bucket{le=\"+Inf\"} %d\n", name, s.Count)
+	}
+
 }
 
 type response struct {
@@ -377,4 +404,17 @@ func Serve(ctx context.Context, srv *http.Server) error {
 		return nil
 	}
 	return err
+}
+
+// Parent spans retain their sampling decision across the request chain.
+func traceSampleRatio() float64 {
+	raw := os.Getenv("OTEL_TRACES_SAMPLER_ARG")
+	if raw == "" {
+		return 0.05
+	}
+	ratio, err := strconv.ParseFloat(raw, 64)
+	if err != nil || ratio != ratio || ratio < 0 || ratio > 1 {
+		panic("OTEL_TRACES_SAMPLER_ARG must be between 0 and 1")
+	}
+	return ratio
 }

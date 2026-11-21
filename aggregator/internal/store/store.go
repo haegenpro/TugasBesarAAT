@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -17,16 +18,18 @@ import (
 
 	"aggregator/internal/domain"
 	"aggregator/internal/middleware"
+	"aggregator/internal/ownership"
 	"aggregator/internal/platform"
 	"aggregator/internal/timeutil"
 )
 
 type Store struct {
-	Pool   *pgxpool.Pool
-	logger *slog.Logger
+	Distributed bool
+	Pool        *pgxpool.Pool
+	logger      *slog.Logger
 }
 
-func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, error) {
+func New(ctx context.Context, databaseURL string, logger *slog.Logger, options ...func(*pgxpool.Config)) (*Store, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -39,15 +42,31 @@ func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, 
 	cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(platform.Duration("DB_STATEMENT_TIMEOUT", 5*time.Second).Milliseconds(), 10)
 	cfg.ConnConfig.RuntimeParams["lock_timeout"] = strconv.FormatInt(platform.Duration("DB_LOCK_TIMEOUT", 2*time.Second).Milliseconds(), 10)
 	cfg.ConnConfig.Tracer = &sqlTracer{logger: logger}
+	for _, configure := range options {
+		configure(cfg)
+	}
 	pool, err := pgxpool.NewWithConfig(middleware.EnsureCorrelationID(ctx), cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{Pool: pool, logger: logger}, nil
+	return &Store{Pool: pool, logger: logger, Distributed: platform.Bool("M2_ENABLED", false)}, nil
 }
 
 func (s *Store) Close() {
 	s.Pool.Close()
+}
+
+// ReadPool reserves connection capacity in the same canonical formation.
+// It uses the identical repository and read consistency policy.
+func (s *Store) ReadPool(ctx context.Context, max int32) (*Store, error) {
+	cfg := s.Pool.Config()
+	cfg.MaxConns = max
+	cfg.MinConns = 0
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{Pool: pool, logger: s.logger, Distributed: s.Distributed}, nil
 }
 
 func (s *Store) Ping(ctx context.Context) error {
@@ -82,11 +101,16 @@ func (s *Store) CheckSchema(ctx context.Context) error {
 // remain revision 1 in the original outbox.
 func (s *Store) SaveDedup(ctx context.Context, e domain.HazardEvent, correlationID string) (inserted bool, err error) {
 	ctx = middleware.WithCorrelationID(ctx, correlationID)
-	tx, err := s.Pool.Begin(ctx)
+	tx, err := s.beginCanonicalTx(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
+	if s.Distributed {
+		if err = ownership.Guard(ctx, tx); err != nil {
+			return false, err
+		}
+	}
 	_, inserted, err = s.saveHazardTx(ctx, tx, e, correlationID, true)
 	if err != nil {
 		return false, err
@@ -192,7 +216,26 @@ func (s *Store) GetByID(ctx context.Context, hazardID string) (domain.HazardEven
 // GetByIDWithMetadata reads the canonical record and its revision metadata from the same row.
 func (s *Store) GetByIDWithMetadata(ctx context.Context, hazardID string) (domain.HazardEvent, domain.RecordMetadata, error) {
 	ctx = middleware.EnsureCorrelationID(ctx)
+	if s.Distributed {
+		tx, err := s.readBarrier(ctx)
+		if err != nil {
+			return domain.HazardEvent{}, domain.RecordMetadata{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		}
+		defer tx.Rollback(ctx)
+		var metadata domain.RecordMetadata
+		event, err := scanHazard(tx.QueryRow(ctx, `SELECT `+selectColumnsWithMetadata+` FROM hazard_events WHERE hazard_id=$1 AND active`, hazardID), &metadata)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return event, metadata, ErrNotFound
+		}
+		if err != nil {
+			return event, metadata, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		}
+		return event, metadata, nil
+	}
 	row := s.Pool.QueryRow(ctx, `SELECT `+selectColumnsWithMetadata+` FROM hazard_events WHERE hazard_id = $1`, hazardID)
+	if s.Distributed {
+		row = s.Pool.QueryRow(ctx, `SELECT `+selectColumnsWithMetadata+` FROM hazard_events WHERE hazard_id=$1 AND active`, hazardID)
+	}
 	var metadata domain.RecordMetadata
 	e, err := scanHazard(row, &metadata)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -220,7 +263,17 @@ func (s *Store) Query(ctx context.Context, f Filters) ([]domain.HazardEvent, err
 // QueryWithMetadata preserves the list filters and ordering while reading metadata in the same query.
 func (s *Store) QueryWithMetadata(ctx context.Context, f Filters) ([]domain.HazardEvent, map[string]domain.RecordMetadata, error) {
 	ctx = middleware.EnsureCorrelationID(ctx)
+	if s.Distributed {
+		page, err := s.distributedQuery(ctx, f)
+		if page.Partial && err == nil {
+			err = ErrUnavailable
+		}
+		return page.Events, page.Metadata, err
+	}
 	sql := `SELECT ` + selectColumnsWithMetadata + ` FROM hazard_events WHERE 1=1`
+	if s.Distributed {
+		sql += ` AND active`
+	}
 	args := []interface{}{}
 	n := 0
 	next := func() string { n++; return "$" + strconv.Itoa(n) }

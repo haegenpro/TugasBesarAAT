@@ -6,6 +6,7 @@ import (
 	"aggregator/internal/domain"
 	"aggregator/internal/mapping"
 	"aggregator/internal/middleware"
+	"aggregator/internal/ownership"
 	"aggregator/internal/platform"
 	"aggregator/internal/volcano"
 	"context"
@@ -31,6 +32,8 @@ type RecoveryStore interface {
 type pollFunc func(context.Context, string, time.Time) error
 
 type Poller struct {
+	BeforeAttempt func(context.Context, string) error
+	Leases        *ownership.Authority
 	metricsMu     sync.Mutex
 	heads         map[string]int64
 	cursors       map[string]int64
@@ -64,6 +67,11 @@ func (p *Poller) Run(ctx context.Context) {
 		}
 	}
 	if !p.DisableReplay {
+		if p.Leases != nil {
+			if st, ok := p.Store.(LegacyReplayStore); ok {
+				launch("replay:volcanic", func(c context.Context, id string, _ time.Time) error { return p.replayParkedVolcanic(c, st, id) })
+			}
+		}
 		if _, ok := p.Store.(RecoveryStore); ok {
 			for _, entity := range []string{"seismic-events", "tsunami-warnings", "volcanic-reports"} {
 				entity := entity
@@ -137,6 +145,17 @@ func (p *Poller) since(endpoint string, lastSuccess *time.Time, started time.Tim
 }
 
 func (p *Poller) attempt(ctx context.Context, endpoint, cid string, status domain.EndpointStatus, fn pollFunc) error {
+	if p.Leases != nil {
+		return p.Leases.Run(ctx, endpoint, func(owned context.Context) error { return p.attemptOwned(owned, endpoint, cid, status, fn) })
+	}
+	return p.attemptOwned(ctx, endpoint, cid, status, fn)
+}
+func (p *Poller) attemptOwned(ctx context.Context, endpoint, cid string, status domain.EndpointStatus, fn pollFunc) error {
+	if p.BeforeAttempt != nil {
+		if err := p.BeforeAttempt(ctx, endpoint); err != nil {
+			return err
+		}
+	}
 	ctx, span := platform.Start(ctx, "ingest "+endpoint)
 	defer span.End()
 	started := domain.Now()

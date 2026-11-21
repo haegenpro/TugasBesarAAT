@@ -30,6 +30,11 @@ func (a *API) statuses(ctx context.Context) (map[string]sourceStatus, error) {
 		ss := statusAt(p, now, ttl)
 		out[key] = ss
 	}
+	if a.ExtraSources != nil {
+		for key, value := range a.ExtraSources.Statuses(now) {
+			out[key] = value
+		}
+	}
 	return out, nil
 }
 func (a *API) recordMetadata(events []domain.HazardEvent, status map[string]sourceStatus, out map[string]domain.RecordMetadata) map[string]domain.RecordMetadata {

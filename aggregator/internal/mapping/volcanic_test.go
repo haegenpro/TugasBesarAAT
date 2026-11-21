@@ -23,12 +23,14 @@ func (f fakeLookup) Get(ctx context.Context, volcanoID string) (volcano.Referenc
 	return f.ref, f.found, nil
 }
 
+func ash(v float64) *float64 { return &v }
+
 func TestVolcanicToHazard_Mapping(t *testing.T) {
 	lookup := fakeLookup{ref: volcano.Reference{AreaName: "Gunung Merapi", Latitude: -7.54, Longitude: 110.44}, found: true}
 	reportedAt := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	report := clients.VolcanicReport{
 		ReportID: "rep-1", VolcanoID: "merapi", AlertLevel: "Siaga",
-		EruptionCount24h: 2, AshColumnHeightM: 1500, ReportedAt: reportedAt,
+		EruptionCount24h: 2, AshColumnHeightM: ash(1500), ReportedAt: reportedAt,
 	}
 
 	hazard, err := mapping.VolcanicToHazard(context.Background(), lookup, report)
@@ -63,7 +65,7 @@ func TestVolcanicToHazard_ContainsOnlyMappedAttributes(t *testing.T) {
 	lookup := fakeLookup{found: true}
 	report := clients.VolcanicReport{
 		ReportID: "rep-2", VolcanoID: "merapi", AlertLevel: "Awas",
-		EruptionCount24h: 3, AshColumnHeightM: 1200,
+		EruptionCount24h: 3, AshColumnHeightM: ash(1200),
 	}
 	hazard, err := mapping.VolcanicToHazard(context.Background(), lookup, report)
 	require.NoError(t, err)
@@ -74,7 +76,7 @@ func TestVolcanicToHazard_MapsConfidenceWhenPresent(t *testing.T) {
 	lookup := fakeLookup{found: true}
 	report := clients.VolcanicReport{
 		ReportID: "rep-3", VolcanoID: "merapi", AlertLevel: "Awas",
-		EruptionCount24h: 3, AshColumnHeightM: 1200,
+		EruptionCount24h: 3, AshColumnHeightM: ash(1200),
 		Attributes: map[string]any{"confidence_level": 0.93},
 	}
 	hazard, err := mapping.VolcanicToHazard(context.Background(), lookup, report)

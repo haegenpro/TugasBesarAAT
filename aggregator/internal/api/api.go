@@ -34,6 +34,7 @@ type API struct {
 	Deps           *Dependencies
 	BMKGFreshness  time.Duration
 	PVMBGFreshness time.Duration
+	ExtraSources   *SourceCache
 }
 
 func New(s Repository, status *poller.PVMBGStatus, deps *Dependencies, bmkgFreshness, pvmbgFreshness time.Duration) *API {
@@ -52,10 +53,13 @@ type listResponse struct {
 }
 
 type sourceStatus struct {
-	State       string     `json:"state"`
-	LastSuccess *time.Time `json:"last_success,omitempty"`
-	LastAttempt *time.Time `json:"last_attempt,omitempty"`
-	StaleSince  string     `json:"stale_since,omitempty"`
+	State           string     `json:"state"`
+	LastSuccess     *time.Time `json:"last_success,omitempty"`
+	LastAttempt     *time.Time `json:"last_attempt,omitempty"`
+	StaleSince      string     `json:"stale_since,omitempty"`
+	LastNew         *time.Time `json:"last_new,omitempty"`
+	LatestObserved  *time.Time `json:"latest_observed,omitempty"`
+	SourceGenerated *time.Time `json:"source_generated,omitempty"`
 }
 
 func (a *API) ListHazards(c *gin.Context) {
@@ -129,6 +133,10 @@ func (a *API) GetHazard(c *gin.Context) {
 	}
 	event, storedMetadata, err := a.Store.GetByIDWithMetadata(c.Request.Context(), id)
 	if err != nil {
+		if errors.Is(err, store.ErrUnavailable) {
+			c.JSON(200, gin.H{"data": nil, "partial": true, "unavailable_units": []string{"canonical-visibility"}, "source_status": gin.H{}, "as_of": timeutil.New(domain.Now())})
+			return
+		}
 		if errors.Is(err, store.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": platform.ProblemStatus(http.StatusNotFound, "hazard not found")})
 			return

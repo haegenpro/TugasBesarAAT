@@ -1,0 +1,56 @@
+{
+  "type": "array",
+  "items": {
+    "type": "record",
+    "name": "VolcanicReport",
+    "namespace": "id.go.pvmbg",
+    "fields": [
+      {
+        "name": "report_id",
+        "type": "string"
+      },
+      {
+        "name": "volcano_id",
+        "type": "string"
+      },
+      {
+        "name": "alert_level",
+        "type": "string",
+        "aliases": [
+          "level"
+        ]
+      },
+      {
+        "name": "eruption_count_24h",
+        "type": [
+          "int",
+          "string"
+        ]
+      },
+      {
+        "name": "ash_column_height_m",
+        "type": [
+          "null",
+          "double"
+        ],
+        "default": null
+      },
+      {
+        "name": "reported_at",
+        "type": "string"
+      },
+      {
+        "name": "confidence_level",
+        "type": [
+          "null",
+          "double"
+        ],
+        "default": null,
+        "x-validation": {
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    ]
+  }
+}
