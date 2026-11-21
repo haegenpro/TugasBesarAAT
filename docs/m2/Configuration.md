@@ -82,6 +82,8 @@ Database settings are per process, not a cluster-wide connection budget:
 | `services.<name>.lock_timeout_ms` | `500` for Aggregator/Auth/consumers; `2000` for ingestion/processors |
 | `ingestion_idle_transaction_timeout_ms` | `10000`; ingestion and its three processor types |
 | `aggregator_field_read_connections` | `3`; additional pool in each Aggregator |
+| `aggregator_read_strategy` | `coordinator`; optional `workers` reads current shard primaries directly |
+| `aggregator_worker_read_connections` | `2`; allowed `1` or `2`, reserved from the general pool budget when worker reads are enabled |
 | `registry_max_open` | `4`; registry JDBC pool |
 
 Ingestion previously ignored the shared `DB_STATEMENT_TIMEOUT=1500ms` setting
@@ -89,6 +91,16 @@ and used a literal five seconds. Its new explicit default is five seconds,
 preserving effective behavior while honoring overrides. Its lock timeout keeps
 the owning PostgreSQL formation's existing two-second default. Account for all
 replicas, Field reservations, and Citus connections when increasing pool sizes.
+
+Worker reads retain the coordinator publication barrier and read current shard
+placement before querying the two worker groups. Field reserves one worker
+connection from its existing pool budget. With default budgets, six Aggregators
+during a rollout use at most 54 application connections per member. General
+capacity must leave at least one coordinator connection; Field needs at least
+two total connections. Unreachable groups produce explicitly partial pages
+without a continuation cursor. This option does not change the write path.
+The canonical verification helper follows the configured strategy; set
+`M2_TEST_WORKER_READS=true` or `false` to exercise the other strategy explicitly.
 
 The registry pool uses `APICURIO_DATASOURCE_JDBC_MAX_SIZE`, with initial/minimum
 sizes zero. Apicurio 3.3.3 maps these settings to its named PostgreSQL datasource;

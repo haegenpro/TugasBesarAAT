@@ -53,6 +53,17 @@ class TuningTests(unittest.TestCase):
         self.assertEqual(effective['DATABASE_URL'], legacy['DATABASE_URL'])
         self.assertNotIn('DATABASE_URL', configured)
 
+    def test_worker_read_selection_reserves_existing_pool_budget(self):
+        self.assertEqual(settings(self.cfg)['database']['aggregator_read_strategy'], 'coordinator')
+        cfg = copy.deepcopy(self.cfg)
+        cfg['database'] = {'aggregator_read_strategy': 'workers', 'aggregator_worker_read_connections': 1}
+        objects = self.objects(self.load(cfg))
+        env = objects[('ConfigMap', 'aggregator-config')]['data']
+        self.assertEqual(env['M2_WORKER_READS'], 'true')
+        self.assertEqual(env['AGGREGATOR_WORKER_READ_CONNS'], '1')
+        self.assertEqual(env['DB_MAX_OPEN_CONNS'], '6')
+        self.assertEqual(env['AGGREGATOR_FIELD_DB_CONNS'], '3')
+
     def test_partial_overrides_reach_owners_and_rollout_hashes(self):
         before = self.objects(self.cfg)
         cfg = copy.deepcopy(self.cfg)
@@ -155,6 +166,11 @@ class TuningTests(unittest.TestCase):
             ('database', {'services': {'ingeston': {'max_open': 4}}}),
             ('database', {'services': {'auth-service': {'max_open': 3}}}),
             ('database', {'services': {'ingestion': {'statement_timeout_ms': 0}}}),
+            ('database', {'aggregator_read_strategy': 'unknown'}),
+            ('database', {'aggregator_read_strategy': True}),
+            ('database', {'aggregator_worker_read_connections': 3}),
+            ('database', {'aggregator_read_strategy': 'workers', 'services': {'aggregator': {'max_open': 2}}}),
+            ('database', {'aggregator_read_strategy': 'workers', 'aggregator_field_read_connections': 1}),
             ('admission', {'client_max_inflight': 16, 'client_field_reserved': 16}),
             ('admission', {'client_auth_field_reserved': 32}),
             ('admission', {'client_per_client': 65}),

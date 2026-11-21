@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -25,6 +26,10 @@ import (
 
 type Store struct {
 	Distributed bool
+	WorkerReads bool
+	workerLimit int32
+	workerMu    sync.Mutex
+	workerPools map[string]*pgxpool.Pool
 	Pool        *pgxpool.Pool
 	logger      *slog.Logger
 }
@@ -45,15 +50,33 @@ func New(ctx context.Context, databaseURL string, logger *slog.Logger, options .
 	for _, configure := range options {
 		configure(cfg)
 	}
+	workerReads := platform.Bool("M2_WORKER_READS", false)
+	workerLimit := platform.Int("AGGREGATOR_WORKER_READ_CONNS", 2)
+	if workerLimit < 1 || workerLimit > 2 {
+		return nil, errors.New("AGGREGATOR_WORKER_READ_CONNS must be 1 or 2")
+	}
+	if workerReads {
+		// Keep each member's worst-case budget unchanged: coordinator cached
+		// Citus connections plus direct worker connections fit the old pool cap.
+		if cfg.MaxConns <= int32(workerLimit) {
+			return nil, errors.New("worker reads require a coordinator connection in addition to worker connections")
+		}
+		cfg.MaxConns -= int32(workerLimit)
+	}
 	pool, err := pgxpool.NewWithConfig(middleware.EnsureCorrelationID(ctx), cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{Pool: pool, logger: logger, Distributed: platform.Bool("M2_ENABLED", false)}, nil
+	return &Store{Pool: pool, logger: logger, Distributed: platform.Bool("M2_ENABLED", false), WorkerReads: workerReads, workerLimit: int32(workerLimit)}, nil
 }
 
 func (s *Store) Close() {
 	s.Pool.Close()
+	s.workerMu.Lock()
+	defer s.workerMu.Unlock()
+	for _, pool := range s.workerPools {
+		pool.Close()
+	}
 }
 
 // ReadPool reserves connection capacity in the same canonical formation.
@@ -62,11 +85,17 @@ func (s *Store) ReadPool(ctx context.Context, max int32) (*Store, error) {
 	cfg := s.Pool.Config()
 	cfg.MaxConns = max
 	cfg.MinConns = 0
+	if s.WorkerReads {
+		if max < 2 {
+			return nil, errors.New("Field worker reads require at least two database connections")
+		}
+		cfg.MaxConns-- // One reserved worker connection per member for Field reads.
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{Pool: pool, logger: s.logger, Distributed: s.Distributed}, nil
+	return &Store{Pool: pool, logger: s.logger, Distributed: s.Distributed, WorkerReads: s.WorkerReads, workerLimit: 1}, nil
 }
 
 func (s *Store) Ping(ctx context.Context) error {
@@ -245,13 +274,15 @@ func (s *Store) GetByIDWithMetadata(ctx context.Context, hazardID string) (domai
 }
 
 type Filters struct {
-	BeforeTime *time.Time
-	BeforeID   string
-	Limit      int
-	Since      time.Time
-	HazardType string
-	Severity   string
-	AreaName   string
+	// SummaryOnly changes the projection, not the matching rows or cursor order.
+	SummaryOnly bool
+	BeforeTime  *time.Time
+	BeforeID    string
+	Limit       int
+	Since       time.Time
+	HazardType  string
+	Severity    string
+	AreaName    string
 }
 
 // Query performs all filtering in SQL, not in memory.

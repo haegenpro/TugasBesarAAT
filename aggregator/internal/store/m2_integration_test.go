@@ -25,6 +25,7 @@ import (
 	urlpkg "net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -38,9 +39,16 @@ func m2Store(t *testing.T) *store.Store {
 	ctx := context.Background()
 	admin, e := pgx.Connect(ctx, url)
 	require.NoError(t, e)
+	t.Cleanup(func() { admin.Close(context.Background()) })
 	schema := "canonical_test_" + uuid.NewString()[:8]
 	_, e = admin.Exec(ctx, `CREATE SCHEMA `+pgx.Identifier{schema}.Sanitize())
 	require.NoError(t, e)
+	t.Cleanup(func() {
+		_, e := admin.Exec(context.Background(), `DROP SCHEMA `+pgx.Identifier{schema}.Sanitize()+` CASCADE`)
+		if e != nil {
+			t.Error(e)
+		}
+	})
 	parsed, e := urlpkg.Parse(url)
 	require.NoError(t, e)
 	query := parsed.Query()
@@ -65,8 +73,11 @@ func m2Store(t *testing.T) *store.Store {
 			return dialer.DialContext(ctx, network, address)
 		}
 	}
+	workerReads := os.Getenv("M2_TEST_WORKER_READS") == "true"
+	t.Setenv("M2_WORKER_READS", strconv.FormatBool(workerReads))
 	s, e := store.New(ctx, parsed.String(), slog.New(slog.NewJSONHandler(io.Discard, nil)), configure)
 	require.NoError(t, e)
+	t.Cleanup(s.Close)
 	for _, name := range []string{"init.sql", "m2.sql"} {
 		raw, e := os.ReadFile(filepath.Join("..", "..", "..", "store", name))
 		require.NoError(t, e)
@@ -74,14 +85,8 @@ func m2Store(t *testing.T) *store.Store {
 		require.NoError(t, e)
 	}
 	s.Distributed = true
-	t.Cleanup(func() {
-		s.Close()
-		_, e := admin.Exec(context.Background(), `DROP SCHEMA `+pgx.Identifier{schema}.Sanitize()+` CASCADE`)
-		if e != nil {
-			t.Error(e)
-		}
-		admin.Close(context.Background())
-	})
+	s.WorkerReads = workerReads
+
 	return s
 }
 func TestM2CitusFencedDedup(t *testing.T) {

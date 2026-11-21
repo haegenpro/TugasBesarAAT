@@ -9,6 +9,7 @@ import subprocess
 import time
 from urllib.parse import quote
 from common import LOCAL, NAMESPACE, ROOT, read_config, runtime_secrets
+from tuning import settings
 
 
 @contextmanager
@@ -56,6 +57,8 @@ def main():
                     addresses[host]=f'127.0.0.1:{local}'
             env=os.environ.copy();env['M2_TEST_DATABASE_URL']=dsn('canonical',port,'hazards')
             env['M2_TEST_WORKER_ADDRESSES']=json.dumps(addresses)
+            env['M2_TEST_WORKER_READS']=os.environ.get('M2_TEST_WORKER_READS',
+                str(settings(cfg)['database']['aggregator_read_strategy']=='workers').lower())
             run('aggregator',env,'./internal/store','-run','TestM2')
     if args.suite in ('ingestion','all'):
         with forward(cfg,'ingestion-db') as port:

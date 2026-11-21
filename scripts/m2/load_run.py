@@ -62,6 +62,7 @@ def run(args):
               'k6_image': K6_IMAGE, 'requested_vus': args.vus, 'ramp_seconds': args.ramp_seconds,
               'hold_seconds': args.hold_seconds, 'think_seconds': args.think_seconds,
               'generator_memory_mib': args.memory_mib, 'generator_cpus': args.cpus,
+              'generator_container_name': name,
               'report_every': args.report_every, 'samples': [], 'actions': [], 'host_memory_guard': False}
     report['tuning']=settings(cfg)
     report['source_configuration'] = {

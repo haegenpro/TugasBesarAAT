@@ -22,6 +22,7 @@ DEFAULTS = {
         },
         'ingestion_idle_transaction_timeout_ms': 10000,
         'aggregator_field_read_connections': 3, 'registry_max_open': 4,
+        'aggregator_read_strategy': 'coordinator', 'aggregator_worker_read_connections': 2,
     },
     'admission': {
         'client_max_inflight': 64, 'client_per_client': 16, 'client_field_reserved': 16,
@@ -67,6 +68,10 @@ def _merge(default, override, path):
             if type(value) not in (int, float) or not 0 <= value <= 1:
                 raise ValueError(f'{name} must be a finite number between 0 and 1')
             result[key] = value
+        elif key == 'aggregator_read_strategy':
+            if value not in ('coordinator', 'workers'):
+                raise ValueError(f'{name} must be coordinator or workers')
+            result[key] = value
         else:
             # Bounds prevent overflow in SDK millisecond durations and counts.
             minimum = 0 if name == 'ai.chat_calls_per_day' else 1
@@ -90,6 +95,13 @@ def settings(cfg):
         raise ValueError('client_per_client must not exceed client_max_inflight')
     if admission['auth_db_field_reserved'] >= db['services']['auth-service']['max_open']:
         raise ValueError('auth_db_field_reserved must be below the Auth database pool size')
+    if db['aggregator_worker_read_connections'] not in (1, 2):
+        raise ValueError('aggregator_worker_read_connections must be 1 or 2')
+    if db['aggregator_read_strategy'] == 'workers':
+        if db['services']['aggregator']['max_open'] <= db['aggregator_worker_read_connections']:
+            raise ValueError('worker reads need coordinator connections in the general budget')
+        if db['aggregator_field_read_connections'] < 2:
+            raise ValueError('worker reads need coordinator and worker capacity in the Field budget')
     if sources['coastal_breaker_cooldown_ms'] > sources['coastal_breaker_max_cooldown_ms']:
         raise ValueError('coastal breaker cooldown must not exceed its maximum')
     for key, cap in [('application_memory_mib', 256), ('aggregator_memory_mib', 512),
@@ -132,6 +144,8 @@ def application_env(cfg, name):
     if name in INGESTION_SERVICES:
         env['DB_IDLE_TRANSACTION_TIMEOUT'] = f"{db['ingestion_idle_transaction_timeout_ms']}ms"
     if name == 'aggregator':
+        env['M2_WORKER_READS'] = str(db['aggregator_read_strategy'] == 'workers').lower()
+        env['AGGREGATOR_WORKER_READ_CONNS'] = str(db['aggregator_worker_read_connections'])
         env['AGGREGATOR_FIELD_DB_CONNS'] = str(db['aggregator_field_read_connections'])
     if name == 'schema-registry':
         # Apicurio 3 configures a named PostgreSQL datasource through its own

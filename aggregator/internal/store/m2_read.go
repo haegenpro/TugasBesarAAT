@@ -17,7 +17,15 @@ const visibilityLock int64 = 4031002
 var ErrUnavailable = errors.New("canonical visibility incomplete")
 
 func hazardQuery(f Filters, table string, active bool) (string, []any) {
-	query := `SELECT ` + selectColumnsWithMetadata + ` FROM ` + table + ` WHERE true`
+	columns := selectColumnsWithMetadata
+	if f.SummaryOnly {
+		// Freshness metadata still needs potential_tsunami, but the summary
+		// path never needs precise coordinates, source IDs or raw attributes.
+		columns = `hazard_id,source,''::text AS source_ref_id,hazard_type,severity,area_name,
+		0::double precision AS latitude,0::double precision AS longitude,occurred_at,ingested_at,
+		jsonb_build_object('potential_tsunami',attributes->'potential_tsunami') AS attributes,revision,last_seen_at`
+	}
+	query := `SELECT ` + columns + ` FROM ` + table + ` WHERE true`
 	if active {
 		query += ` AND active`
 	}
@@ -60,12 +68,14 @@ func collectHazards(rows pgx.Rows) ([]domain.HazardEvent, map[string]domain.Reco
 	return events, metadata, rows.Err()
 }
 func (s *Store) readBarrier(ctx context.Context) (pgx.Tx, error) {
-	tx, e := s.Pool.Begin(ctx)
+	// Execute BEGIN and the shared lock as separate SQL statements in one
+	// round trip. The publication check below MUST remain a later statement:
+	// its READ COMMITTED snapshot must be taken after any lock wait completes.
+	// Combining lock acquisition and that check into one SELECT could use a
+	// snapshot from before the writer committed.
+	tx, e := s.Pool.BeginTx(ctx, pgx.TxOptions{BeginQuery: fmt.Sprintf(
+		"BEGIN; SELECT pg_advisory_xact_lock_shared(%d)", visibilityLock)})
 	if e != nil {
-		return nil, e
-	}
-	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared($1)`, visibilityLock); e != nil {
-		tx.Rollback(ctx)
 		return nil, fmt.Errorf("%w: visibility lock: %v", ErrUnavailable, e)
 	}
 	deadline := time.Now().Add(200 * time.Millisecond)
@@ -100,6 +110,10 @@ func (s *Store) distributedQuery(ctx context.Context, f Filters) (Page, error) {
 		out.UnavailableUnits = []string{"canonical-visibility"}
 		return out, nil
 	}
+	if s.WorkerReads {
+		defer tx.Rollback(ctx)
+		return s.queryWorkerGroups(ctx, tx, f, false)
+	}
 	query, args := hazardQuery(f, "hazard_events", true)
 	rows, e := tx.Query(ctx, query, args...)
 	if e == nil {
@@ -119,6 +133,12 @@ func (s *Store) distributedQuery(ctx context.Context, f Filters) (Page, error) {
 		return out, nil
 	}
 	defer tx.Rollback(ctx)
+	return s.queryWorkerGroups(ctx, tx, f, true)
+}
+
+func (s *Store) queryWorkerGroups(ctx context.Context, tx pgx.Tx, f Filters, fallback bool) (Page, error) {
+	out := Page{Events: []domain.HazardEvent{}, Metadata: map[string]domain.RecordMetadata{}, UnavailableUnits: []string{}}
+	var e error
 	type group struct {
 		member storageMember
 		shards []int64
@@ -156,41 +176,43 @@ func (s *Store) distributedQuery(ctx context.Context, f Filters) (Page, error) {
 	for _, g := range groups {
 		go func(g *group) {
 			r := result{metadata: map[string]domain.RecordMetadata{}}
-			connection, e := s.memberConnection(ctx, g.member)
+			connection, e := s.workerConnection(ctx, g.member)
 			if e != nil {
 				r.unavailable = unit(g.member)
 				results <- r
 				return
 			}
-			defer connection.Close(ctx)
-			for _, shard := range g.shards {
-				table := pgx.Identifier{fmt.Sprintf("hazard_events_%d", shard)}.Sanitize()
-				query, args := hazardQuery(f, table, true)
-				rows, e := connection.Query(ctx, query, args...)
-				if e != nil {
-					r.unavailable = unit(g.member)
-					r.events = nil
-					r.metadata = map[string]domain.RecordMetadata{}
-					break
-				}
-				events, metadata, e := collectHazards(rows)
-				if e != nil {
-					r.unavailable = unit(g.member)
-					r.events = nil
-					r.metadata = map[string]domain.RecordMetadata{}
-					break
-				}
-				r.events = append(r.events, events...)
-				for k, v := range metadata {
-					r.metadata[k] = v
-				}
+			defer connection.Release()
+			var recovery bool
+			if e = connection.QueryRow(ctx, `SELECT pg_is_in_recovery()`).Scan(&recovery); e != nil || recovery {
+				r.unavailable = unit(g.member)
+				results <- r
+				return
+			}
+			query, args := groupHazardQuery(f, g.shards)
+			rows, e := connection.Query(ctx, query, args...)
+			if e == nil {
+				r.events, r.metadata, e = collectHazards(rows)
+			}
+			if e != nil {
+				r.unavailable = unit(g.member)
+				r.events = nil
+				r.metadata = map[string]domain.RecordMetadata{}
 			}
 			results <- r
 		}(g)
 	}
 	out.Events = []domain.HazardEvent{}
 	out.Metadata = map[string]domain.RecordMetadata{}
-	out.Partial = true
+	out.Partial = fallback
+	shards := 0
+	for _, g := range groups {
+		shards += len(g.shards)
+	}
+	if shards != 8 || len(groups) != 2 {
+		out.Partial = true
+		out.UnavailableUnits = append(out.UnavailableUnits, "canonical-catalog")
+	}
 	for range groups {
 		r := <-results
 		out.Events = append(out.Events, r.events...)
@@ -198,10 +220,11 @@ func (s *Store) distributedQuery(ctx context.Context, f Filters) (Page, error) {
 			out.Metadata[k] = v
 		}
 		if r.unavailable != "" {
+			out.Partial = true
 			out.UnavailableUnits = append(out.UnavailableUnits, r.unavailable)
 		}
 	}
-	if len(out.UnavailableUnits) == 0 {
+	if out.Partial && len(out.UnavailableUnits) == 0 {
 		out.UnavailableUnits = []string{"canonical-query"}
 	}
 	sort.Slice(out.Events, func(i, j int) bool {

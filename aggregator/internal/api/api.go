@@ -67,10 +67,16 @@ func (a *API) ListHazards(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "store unavailable")})
 		return
 	}
+	view := c.DefaultQuery("view", "raw")
+	if view != "raw" && view != "summary" {
+		c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid hazard view")})
+		return
+	}
 	f := store.Filters{
-		HazardType: c.Query("hazard_type"),
-		Severity:   c.Query("severity"),
-		AreaName:   c.Query("area_name"),
+		SummaryOnly: view == "summary",
+		HazardType:  c.Query("hazard_type"),
+		Severity:    c.Query("severity"),
+		AreaName:    c.Query("area_name"),
 	}
 	if raw := c.Query("since"); raw != "" {
 		if t, err := timeutil.ParseISO(raw); err == nil {
@@ -111,6 +117,18 @@ func (a *API) ListHazards(c *gin.Context) {
 	}
 	metadata = a.recordMetadata(events, status, metadata)
 
+	if view == "summary" {
+		summaries := make([]summaryHazard, len(events))
+		for i, event := range events {
+			summaries[i] = summaryHazard{event.HazardID, event.Source, event.HazardType,
+				event.Severity, event.AreaName, event.OccurredAt, event.IngestedAt}
+		}
+		c.JSON(http.StatusOK, gin.H{"data": summaries, "count": len(summaries), "as_of": timeutil.New(domain.Now()),
+			"next_cursor": page.NextCursor, "partial": page.Partial, "unavailable_units": page.UnavailableUnits,
+			"source_status": status, "metadata": metadata})
+		return
+	}
+
 	c.JSON(http.StatusOK, listResponse{
 		Data:       events,
 		NextCursor: page.NextCursor, Partial: page.Partial, UnavailableUnits: page.UnavailableUnits,
@@ -119,6 +137,17 @@ func (a *API) ListHazards(c *gin.Context) {
 		SourceStatus: status,
 		Metadata:     metadata,
 	})
+}
+
+// Explicit fields prevent raw data from entering the summary wire contract.
+type summaryHazard struct {
+	HazardID   string            `json:"hazard_id"`
+	Source     domain.Source     `json:"source"`
+	HazardType domain.HazardType `json:"hazard_type"`
+	Severity   domain.Severity   `json:"severity"`
+	AreaName   string            `json:"area_name"`
+	OccurredAt timeutil.Time     `json:"occurred_at"`
+	IngestedAt timeutil.Time     `json:"ingested_at"`
 }
 
 func (a *API) GetHazard(c *gin.Context) {

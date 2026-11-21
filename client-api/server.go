@@ -298,11 +298,19 @@ func (a *api) listHazards(c *gin.Context) {
 		return
 	}
 	endpoint := joinURL(a.cfg.AggregatorURL, "/internal/hazards")
+	if view == "summary" {
+		query.Set("view", "summary")
+	}
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
 	var list aggregatorList
-	status, err := a.call(c, "aggregator", http.MethodGet, endpoint, nil, false, &list)
+	var summary aggregatorSummaryList
+	var output any = &list
+	if view == "summary" {
+		output = &summary
+	}
+	status, err := a.call(c, "aggregator", http.MethodGet, endpoint, nil, false, output)
 	if err == nil && status == http.StatusBadRequest {
 		c.JSON(400, gin.H{"error": platform.ProblemStatus(400, "invalid pagination cursor")})
 		return
@@ -315,11 +323,7 @@ func (a *api) listHazards(c *gin.Context) {
 		list.Data = []hazard{}
 	}
 	if view == "summary" {
-		summaries := make([]summaryHazard, 0, len(list.Data))
-		for _, item := range list.Data {
-			summaries = append(summaries, item.summary())
-		}
-		c.JSON(http.StatusOK, gin.H{"data": summaries, "count": len(summaries), "as_of": list.AsOf, "next_cursor": list.NextCursor, "partial": list.Partial, "unavailable_units": list.UnavailableUnits, "source_status": list.SourceStatus, "metadata": list.Metadata})
+		c.JSON(http.StatusOK, gin.H{"data": summary.Data, "count": summary.Count, "as_of": summary.AsOf, "next_cursor": summary.NextCursor, "partial": summary.Partial, "unavailable_units": summary.UnavailableUnits, "source_status": summary.SourceStatus, "metadata": summary.Metadata})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": list.Data, "count": len(list.Data), "as_of": list.AsOf, "next_cursor": list.NextCursor, "partial": list.Partial, "unavailable_units": list.UnavailableUnits, "source_status": list.SourceStatus, "metadata": list.Metadata})

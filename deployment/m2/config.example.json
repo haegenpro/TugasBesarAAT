@@ -97,7 +97,9 @@
     },
     "ingestion_idle_transaction_timeout_ms": 10000,
     "aggregator_field_read_connections": 3,
-    "registry_max_open": 4
+    "registry_max_open": 4,
+    "aggregator_read_strategy": "coordinator",
+    "aggregator_worker_read_connections": 2
   },
   "admission": {
     "client_max_inflight": 64,
