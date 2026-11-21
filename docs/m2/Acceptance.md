@@ -70,6 +70,143 @@ the <=60-second takeover target was not timed. Synthetic input continued during
 the run, so Audit counts/checksums changed; these snapshots do not establish a
 strict before/after zero-loss comparison of acknowledged source records.
 
+## Sustained-load and physical-shard follow-up (2026-11-21)
+
+This follow-up supersedes the earlier statement that no local k6 run was
+available. The dedicated real-NATS integration phase and all other integration
+suites passed on `m2-20261121-local-acceptance2`. The physical P1 fixture placed
+256 colocated events in all eight shards, verified all 16 physical copies and
+primary roles on both nodes, and checked global pagination and analytics/Audit
+counts. This is a synthetic distribution check; official catalog skew and an
+empty-B recovery ledger still require their own evidence.
+
+The local 10,000-VU run completed its configured 135-second hold with source
+acquisition/processors active (satellite disabled), performing 3 -> 5 -> 2 and an
+actual Aggregator image update. Of 718005 operations, 655022 were controlled 429s,
+62732 succeeded and 267 were unexpected. Unexpected errors were 0.0372% of all
+operations or 0.4238% when controlled rejections are also excluded from the
+denominator. There were no transport failures. HTTP-200 hazard reads averaged
+158.4/s, with p95 about 2.1 seconds. Those bodies were not retained, so complete
+versus explicit partial pages cannot be reconstructed from that capture. Later
+runs use body checks and separate complete/partial counters. Sampled VUs spanned 134.5 seconds at target, but
+one missed observation breaks the continuous sampled interval. This does not
+prove failure-free rolling requests or P2 ownership criteria during the run.
+
+Controlled rejection was about 91%; M2 specifies no maximum percentage for it.
+This is overload evidence, not proof of useful 10,000-user operating capacity.
+Field outcomes and successful throughput must be assessed separately. A fixed
+153691-row comparison measured 367 vs 453 successful reads/s with 1 vs 3 Aggregators:
+1.2345x, below the required 2x. That requirement remains unmet.
+
+Larger HTTP pools did not solve the issue: the subsequent full-load experiment
+had 1.4315% unexpected errors after excluding controlled rejections, 407 transport
+failures, and only 69.6 successful reads/s. It is a failed experiment. Holding Auth
+admission slots until downstream completion also failed a same-data comparison:
+no meaningful throughput gain and substantially more Field rejection. Both
+changes were rejected and the original defaults/slot lifetime restored.
+
+Kubelet resource samples showed no pod OOM or restart changes during either
+full-load run. Grafana approached 241 MiB of its 256 MiB limit. The local nodes use
+6 GiB (A) and about 2.15 GiB (B), with no Docker CPU quota; the generator was capped
+at 2 CPU/4 GiB and frequently reached its CPU ceiling. These are not the planned
+real-VM resource-fit results. Private evidence resides under
+`.m2-local/load-10000-scaling-001`, `load-10000-capacity-001`,
+`throughput-comparison.json`, and `admission-comparison.json`.
+
+Use the [local load runner](Load-Testing.md) to reproduce measurements. The
+remaining-gates table below still applies, with the attempted load/scaling checks
+recorded here rather than counted as fully accepted.
+
+The repeated fixed-data comparison with body checks confirmed all pages were
+complete: Citus served 448.6 -> 532.2 pages/s with one -> three Aggregators
+(1.1866x). An optional worker-read prototype served 468.7 -> 756.3 pages/s
+(1.6137x), about 42% more with three instances, with no partial/invalid responses
+or unexpected errors. This prototype remains experimental and below the 2x
+criterion; the normal path is not changed by these results. Its real Citus tests
+also compare both strategies' full pagination and verify that losing one worker
+connection returns the surviving group explicitly marked partial.
+
+### Capacity findings at reassessment
+
+The latest measured throughput using the normal coordinator read path and
+default limits is **448.6 complete hazard pages/s with one Aggregator and
+532.2 with three**, a **1.1866x** gain. The best comparable scaling result,
+**1.7596x**, requires experimental worker-read code and configuration changes;
+it is not the throughput of the accepted implementation. No measured pair
+establishes the required 2x gain.
+
+| Read path and configuration | One Aggregator: reads/s | Three Aggregators: reads/s | Gain | Response validation |
+| --- | ---: | ---: | ---: | --- |
+| Normal Citus path, two Client APIs, default limits | 448.6 | 532.2 | 1.1866x | Complete pages checked |
+| Normal Citus path, four Client APIs, per-client limit 64 | 575.8 | 648.4 | 1.1261x | HTTP 200 only |
+| Experimental worker reads, two Client APIs, original comparison | 468.7 | 756.3 | 1.6137x | Complete pages checked |
+| Experimental worker reads, two Client APIs, tuned limits | 465.9 | 819.7 | 1.7596x | Complete pages checked |
+| Experimental worker reads, four Client APIs, tuned limits | 556.8 | 891.7 | 1.6015x | Complete pages checked |
+
+These are dedicated **200-VU** read benchmarks: 10-second ramp, 60-second hold,
+15-second ramp-down and 0.01-second think time, with report submission disabled.
+Rates cover the whole measured run. Acquisition/processors were paused to keep
+each pair's dataset fixed, then restored. Each one-versus-three pair held the
+other settings and dataset constant; datasets differ between experiments, so
+rows are not a controlled comparison of every setting. All listed pairs had
+zero unexpected errors; body-checked pairs had zero partial or invalid pages.
+These results do not replace the mixed 10,000-VU acceptance run.
+
+The first and third rows used the same image and 174099-row dataset, switching
+the experimental read strategy off/on. The configuration-only row used 170030
+rows; the tuned two-API and four-API worker comparisons used 180044 and 182827
+rows respectively. Worker reads query the Citus shard-holding PostgreSQL
+servers directly and merge pages in the Aggregator, while still consulting the
+coordinator for publication/topology metadata. This remains an uncommitted,
+disabled prototype. Its later connection-budget checks and partial-page tests
+do not establish full fault/recovery acceptance.
+
+Private evidence: `read-strategy-comparison.json`,
+`throughput-front-tier-client64-comparison.json`,
+`worker-tuned-front-comparison.json` and `worker-api4-tuned-comparison.json` under
+`.m2-local/`. Raw captures and private configuration are not committed.
+
+A completed diagnostic profiling run showed substantial syscall, allocation/GC
+and JSON work in both Aggregator and Client API, plus logging contention in mutex
+profiles. These identify investigation candidates, not a single proven
+bottleneck or an accepted optimization. Temporary profiling source overlays and
+deployment images were removed/restored; no further optimization was adopted.
+Private evidence: `profiles-capacity-001/`.
+
+### Ownership and startup follow-up
+
+A runtime PVMBG polling-owner freeze check passed on the normal deployment. The
+process was stopped for 25.84 seconds; a different holder committed under a newer
+lease within 25.72 seconds. The same container resumed, no duplicate canonical
+source identities were found, and upstream intervals showed peak concurrency one
+on both `/volcanic-reports` and `/history`. A stale in-flight commit attempt was
+not observed; explicit late-commit rejection remains integration-test evidence,
+not a claim about this runtime sample. Evidence: `freeze-pvmbg-evidence.json`.
+Physical clock-skew testing remains a separate gate.
+
+The registry pool configuration was corrected and verified: all 240 burst reads
+returned 200 and the named PostgreSQL datasource held four sessions rather than
+twenty. This fixes a connection-budget discrepancy, without claiming a P2 scaling
+pass. See [configuration details](Configuration.md).
+
+A fresh startup reproduced `too many open files` on A's kube-proxy and a fsnotify
+watcher failure in controller-manager, with the shared host's inotify instance
+limit at 128. Temporarily increasing it to 1024 and restarting the failed A-side
+services restored cluster networking. This identifies a concrete cause for this
+startup incident; it does not prove the earlier B incident had the same cause.
+The temporary host change was restored to 128 when the test cluster stopped.
+Evidence: `acceptance-startup-incident.json`.
+
+### Stopped checkpoint
+
+Testing stopped at the owner's request for reassessment. Before shutdown, the
+deployment was restored to three Aggregators and two Client APIs on
+`m2-20261121-capacity1`, with normal defaults and no experimental overrides.
+Both Minikube nodes are stopped, no load generators remain, and volumes/data
+were retained. The worker-read prototype and other unfinished code changes
+remain outside this findings commit. No further testing is implied by recording
+these results. Private evidence: `reassessment-checkpoint.json`.
+
 ## Live satellite practice trial (2026-11-21)
 
 The owner configured the token privately and approved reuse of the 38-province
@@ -185,7 +322,7 @@ the normal private configuration retains the token for the next normal startup.
 | --- | --- |
 | Real deployment | Ubuntu/K3s on separate physical hosts; WireGuard/LAN behavior and restart; actual 4 CPU/8 GB/32 GB fit |
 | P1 recovery | Empty-B replica rebuild, timed failover, full acknowledged-input zero-loss comparison, final replica/failback evidence with the official catalog |
-| P2 ownership | SIGSTOP/unfreeze, clock skew, <=60-second takeover and upstream overlap evidence during actual failure/scaling |
+| P2 ownership | Runtime freeze/takeover observed; stale in-flight resume, physical clock skew and upstream evidence during scaling still need their full checks |
 | P2 load | 10,000 VUs for >=120 seconds with 3 -> 5 -> 2, <1% unexpected errors, 3-vs-1 >=2x throughput, M1 latency target, and rolling requests without failures |
 | P3 full rehearsal | Browser recording, broader live malformed-input/oversize cases, retry-history state cleanup, Field-pod crash after 202 with acknowledged-report reconciliation |
 | P4 satellite | Full clean interrupted/uninterrupted comparison; official reference/province agreement; 60x catch-up <=60 seconds and processing p95 |
