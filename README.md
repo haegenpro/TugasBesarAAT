@@ -1,17 +1,18 @@
-# TugasBesarAAT, IF4031 M1
+# TugasBesarAAT, IF4031
 
 Milestone 2 implementation and two-node deployment instructions are maintained
 in [the M2 guide](docs/m2/README.md). The M1 workflow below remains available.
 
-This repository holds everything for Milestone 1, which includes the BMKG and PVMBG mocks,
+The M1 workflow includes the BMKG and PVMBG mocks,
 the BNPB Aggregator and its Canonical Store, the Client API, the Auth Service,
 an interactive downstream client, and two durable broker consumers.
 
 The M1 preparation refactor preserves these service boundaries. Auth and both
 consumers now own separate PostgreSQL instances; the two source history archives
 remain SQLite. This checkout starts from fresh volumes: no existing-data migration
-is provided. Sharding, replication, leader election/fencing, Kubernetes, additional
-M2 sources and the M2 Audit API remain future work. See the
+is provided for existing M1 volumes. The separate M2 workflow adds Citus,
+replication, database-clock fencing, Kubernetes, satellite/coastal processing,
+Audit and browser operations. See the
 [preparation verification report](docs/m1/Preparation%20Verification.md) for measured
 results and limitations.
 
