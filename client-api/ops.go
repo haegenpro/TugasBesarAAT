@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 //go:embed ops-web/*
@@ -114,6 +115,7 @@ func (a *api) opsProgress(c *gin.Context) {
 	a.opsForward(c, "/internal/ingestion/progress", false)
 }
 func (a *api) opsPayload(c *gin.Context) {
+	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(2 * time.Minute))
 	id := c.Param("id")
 	if _, e := uuid.Parse(id); e != nil {
 		c.Status(400)
@@ -130,7 +132,10 @@ func (a *api) opsPayload(c *gin.Context) {
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-Correlation-ID", c.GetString("correlation_id"))
-	response, e := a.client.Do(req)
+	downloadClient := *a.client
+	downloadClient.Timeout = 2 * time.Minute
+	downloadClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, e := downloadClient.Do(req)
 	if e != nil {
 		c.Status(503)
 		return

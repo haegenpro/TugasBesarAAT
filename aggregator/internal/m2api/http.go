@@ -51,6 +51,7 @@ func source(c *gin.Context) (string, bool) {
 }
 func Register(r *gin.Engine, s *store.Store, cfg Config) {
 	registerAdmin(r, s, cfg)
+	registerCatalog(r, s, cfg)
 	audit := r.Group("/internal/audit", auth(cfg.AuditToken))
 	audit.GET("/events", func(c *gin.Context) {
 		if !parameters(c, "source", "since", "limit", "cursor") {

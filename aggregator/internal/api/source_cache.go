@@ -23,7 +23,7 @@ type SourceCache struct {
 func (s *SourceCache) Statuses(now time.Time) map[string]sourceStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := map[string]sourceStatus{"SENSOR_PANTAI": {State: "unavailable"}, "SENSOR_PANTAI_STATIONS": {State: "unavailable"}}
+	out := map[string]sourceStatus{"SATELIT": {State: "unavailable"}, "SENSOR_PANTAI": {State: "unavailable"}, "SENSOR_PANTAI_STATIONS": {State: "unavailable"}}
 	for key, value := range s.states {
 		if now.Sub(s.checked) > 10*time.Second {
 			value.State = "unavailable"
@@ -73,6 +73,8 @@ func (s *SourceCache) Refresh(ctx context.Context, client *http.Client, base, to
 		if item.Endpoint == "coastal:stations" {
 			key = "SENSOR_PANTAI_STATIONS"
 			ttl = 60 * time.Second
+		} else if item.Endpoint == "satellite" {
+			key = "SATELIT"
 		} else if item.Endpoint != "coastal:observations" {
 			continue
 		}

@@ -141,6 +141,11 @@ func (s *Store) Append(ctx context.Context, i Input, initial int64, subject stri
 	if _, e = tx.Exec(ctx, `UPDATE source_progress SET received=$3 WHERE source=$1 AND namespace=$2`, i.Source, i.Namespace, i.Position); e != nil {
 		return e
 	}
+	if i.Source == "SATELIT" {
+		if e = resolveResponse(ctx, tx, i.Source, i.Namespace, "stream:"+stringPosition(i.Position)); e != nil {
+			return e
+		}
+	}
 	return tx.Commit(ctx)
 }
 func stringPosition(pos int64) string { return fmt.Sprintf("%d", pos) }

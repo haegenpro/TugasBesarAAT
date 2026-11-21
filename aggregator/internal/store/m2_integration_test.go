@@ -4,6 +4,7 @@ import (
 	"aggregator/internal/avrowire"
 	"aggregator/internal/clients"
 	"aggregator/internal/domain"
+	"aggregator/internal/m2api"
 	"aggregator/internal/ownership"
 	"aggregator/internal/store"
 	"bytes"
@@ -11,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,6 +20,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	urlpkg "net/url"
 	"os"
 	"path/filepath"
@@ -283,4 +287,36 @@ func TestM2SharedPolicyAndParkedReplayFence(t *testing.T) {
 		return s.FinishLegacyReplay(c, id, nil)
 	}))
 	require.NoError(t, s.BlockParkedVolcanic(ctx, "PVMBG"))
+}
+
+func TestM2CatalogUsesOwnerAndStableSourceIdentity(t *testing.T) {
+	s := m2Store(t)
+	router := gin.New()
+	m2api.Register(router, s, m2api.Config{AdminToken: "private-import-owner"})
+	server := httptest.NewServer(router)
+	defer server.Close()
+	event := sampleEvent(domain.SourceBMKG, "catalog-original-ref")
+	body, e := json.Marshal(map[string]any{"events": []domain.HazardEvent{event}})
+	require.NoError(t, e)
+	for _, authenticated := range []bool{false, true, true} {
+		req, e := http.NewRequest("POST", server.URL+"/internal/ops/catalog", bytes.NewReader(body))
+		require.NoError(t, e)
+		req.Header.Set("Content-Type", "application/json")
+		if authenticated {
+			req.Header.Set("Authorization", "Bearer private-import-owner")
+		}
+		response, e := server.Client().Do(req)
+		require.NoError(t, e)
+		response.Body.Close()
+		if authenticated {
+			require.Equal(t, 200, response.StatusCode)
+		} else {
+			require.Equal(t, 401, response.StatusCode)
+		}
+	}
+	page, e := s.AuditEvents(context.Background(), store.AuditQuery{Source: "BMKG", Limit: 100})
+	require.NoError(t, e)
+	require.Len(t, page.Items, 1)
+	require.Equal(t, "catalog-original-ref", page.Items[0].SourceRefID)
+	require.Equal(t, uuid.NewSHA1(uuid.NameSpaceOID, []byte("BMKG\x00catalog-original-ref")).String(), page.Items[0].HazardID)
 }

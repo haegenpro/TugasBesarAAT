@@ -4,10 +4,13 @@ import (
 	"aggregator/internal/platform"
 	"aggregator/internal/satellite"
 	"aggregator/internal/wildfire"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/google/uuid"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,7 +25,13 @@ type SatelliteConfig struct {
 
 func (s *Store) RunSatellite(ctx context.Context, cfg SatelliteConfig) {
 	for ctx.Err() == nil {
-		e := s.Leases.Run(ctx, "acquire:SATELIT:"+cfg.Namespace, func(c context.Context) error { return s.satelliteSession(c, cfg) })
+		e := s.Leases.Run(ctx, "acquire:SATELIT:"+cfg.Namespace, func(c context.Context) error {
+			err := s.satelliteSession(c, cfg)
+			if err != nil {
+				s.RecordSourceHealth(c, "satellite", false, "feed disconnected; resuming original offsets")
+			}
+			return err
+		})
 		if e != nil {
 			platform.Add("satellite_reconnects_total", 1)
 		}
@@ -30,6 +39,8 @@ func (s *Store) RunSatellite(ctx context.Context, cfg SatelliteConfig) {
 	}
 }
 func (s *Store) satelliteSession(ctx context.Context, cfg SatelliteConfig) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	received, _, _, e := s.Progress(ctx, "SATELIT", cfg.Namespace, cfg.Initial)
 	if e != nil {
 		return e
@@ -54,16 +65,32 @@ func (s *Store) satelliteSession(ctx context.Context, cfg SatelliteConfig) error
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("satellite stream returned %d", resp.StatusCode)
 	}
-	stream := satellite.NewStream(resp.Body, 1<<20)
+	idle := time.AfterFunc(20*time.Second, cancel)
+	defer idle.Stop()
+	stream := satellite.NewStream(&streamActivity{Reader: resp.Body, timer: idle}, platform.Int("MAX_PAYLOAD_BYTES", 4<<20))
+	var lastHealth time.Time
 	for ctx.Err() == nil {
 		event, e := stream.Next()
 		if e != nil {
+			var rejected *satellite.RejectedFrame
+			if errors.As(e, &rejected) {
+				if retained := s.RetainResponse(ctx, "SATELIT", cfg.Namespace, "stream:"+strconv.FormatInt(received+1, 10), rejected.Reader, e.Error()); retained != nil {
+					return retained
+				}
+			}
 			return e
+		}
+		if time.Since(lastHealth) > time.Second {
+			s.RecordSourceHealth(ctx, "satellite", true, "")
+			lastHealth = time.Now()
 		}
 		n, normErr := satellite.Normalize(cfg.Namespace, event)
 		if n.Offset < 0 {
 			if event.Type == "heartbeat" {
 				continue
+			}
+			if retained := s.RetainResponse(ctx, "SATELIT", cfg.Namespace, "stream:"+strconv.FormatInt(received+1, 10), bytes.NewReader(event.Data), fmt.Sprint(normErr)); retained != nil {
+				return retained
 			}
 			return normErr
 		}
@@ -71,6 +98,9 @@ func (s *Store) satelliteSession(ctx context.Context, cfg SatelliteConfig) error
 			continue
 		}
 		if n.Offset != received+1 {
+			if retained := s.RetainResponse(ctx, "SATELIT", cfg.Namespace, "stream:"+strconv.FormatInt(received+1, 10), bytes.NewReader(event.Data), ErrGap.Error()); retained != nil {
+				return retained
+			}
 			return ErrGap
 		}
 		metadata := map[string]any{"event_id": event.ID, "event_type": event.Type}
@@ -79,8 +109,6 @@ func (s *Store) satelliteSession(ctx context.Context, cfg SatelliteConfig) error
 		}
 		if normErr != nil {
 			metadata["rejection"] = normErr.Error()
-		} else {
-			metadata["operation"] = json.RawMessage(n.Operation)
 		}
 		entity := ""
 		if normErr == nil {
@@ -100,4 +128,17 @@ func (s *Store) satelliteSession(ctx context.Context, cfg SatelliteConfig) error
 		platform.Gauge("satellite_received_position", float64(received))
 	}
 	return ctx.Err()
+}
+
+type streamActivity struct {
+	io.Reader
+	timer *time.Timer
+}
+
+func (r *streamActivity) Read(p []byte) (int, error) {
+	n, e := r.Reader.Read(p)
+	if n > 0 {
+		r.timer.Reset(20 * time.Second)
+	}
+	return n, e
 }

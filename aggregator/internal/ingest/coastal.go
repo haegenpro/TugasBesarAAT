@@ -36,20 +36,22 @@ type coastalClient struct {
 	s                      *Store
 }
 
-func (c *coastalClient) get(ctx context.Context, path string, b *coastal.Breaker, out any) error {
+func (c *coastalClient) get(ctx context.Context, path string, b *coastal.Breaker, out any) ([]byte, error) {
 	if e := b.Allow(); e != nil {
-		return e
+		return nil, e
 	}
 	if e := c.limiter.Wait(ctx); e != nil {
 		b.Release()
-		return e
+		return nil, e
 	}
-	call, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
+	call, cancel := context.WithCancel(ctx)
 	defer cancel()
+	deadline := time.AfterFunc(1200*time.Millisecond, cancel)
+	defer deadline.Stop()
 	req, e := http.NewRequestWithContext(call, "GET", c.cfg.URL+path, nil)
 	if e != nil {
 		b.Release()
-		return e
+		return nil, e
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.Token)
 	started := time.Now()
@@ -58,33 +60,58 @@ func (c *coastalClient) get(ctx context.Context, path string, b *coastal.Breaker
 	if e != nil {
 		b.Failure()
 		c.health(ctx, b.Name, false, "upstream request failed")
-		return e
+		return nil, e
 	}
 	defer resp.Body.Close()
 	body, e := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
+	if e != nil {
+		b.Failure()
+		c.health(ctx, b.Name, false, "incomplete source response; retrying unchanged cursor")
+		return nil, e
+	}
 	if e == nil && resp.StatusCode == 200 && len(body) <= 4<<20 {
 		e = platform.ValidateJSON(body)
 		if e == nil {
 			e = json.Unmarshal(body, out)
+		}
+		if e == nil {
+			var envelope struct {
+				Items json.RawMessage `json:"items"`
+			}
+			if json.Unmarshal(body, &envelope) != nil || len(envelope.Items) == 0 || envelope.Items[0] != '[' {
+				e = errors.New("source response requires an items array")
+			}
 		}
 	} else if e == nil {
 		e = fmt.Errorf("sensor HTTP %d or oversized body", resp.StatusCode)
 	}
 	if e != nil {
 		b.Failure()
+		deadline.Stop()
+		// Normal source calls keep the short deadline. After a rejected prefix
+		// is identified, allow bounded time to stream its tail into quarantine;
+		// database writes must not consume the remaining network-read allowance.
+		captureDeadline := time.AfterFunc(8*time.Second, cancel)
+		defer captureDeadline.Stop()
 		c.health(ctx, b.Name, false, e.Error())
-		return e
+		if retained := c.s.RetainResponse(call, "SENSOR_PANTAI", c.cfg.Namespace, path, io.MultiReader(bytes.NewReader(body), resp.Body), e.Error()); retained != nil {
+			return nil, retained
+		}
+		return nil, e
 	}
 	b.Success()
 	c.health(ctx, b.Name, true, "")
-	return nil
+	return body, nil
 }
 func (c *coastalClient) health(ctx context.Context, endpoint string, success bool, reason string) {
+	c.s.RecordSourceHealth(ctx, "coastal:"+endpoint, success, reason)
+}
+func (s *Store) RecordSourceHealth(ctx context.Context, endpoint string, success bool, reason string) {
 	state := "stale"
 	if success {
 		state = "fresh"
 	}
-	tx, e := c.s.Pool.Begin(ctx)
+	tx, e := s.Pool.Begin(ctx)
 	if e != nil {
 		return
 	}
@@ -92,7 +119,7 @@ func (c *coastalClient) health(ctx context.Context, endpoint string, success boo
 	if e = ownership.Guard(ctx, tx); e != nil {
 		return
 	}
-	if _, e = tx.Exec(ctx, `INSERT INTO source_health(endpoint,state,last_success,reason) VALUES($1,$2,CASE WHEN $3 THEN clock_timestamp() ELSE NULL END,$4) ON CONFLICT(endpoint) DO UPDATE SET state=excluded.state,last_success=coalesce(excluded.last_success,source_health.last_success),last_attempt=clock_timestamp(),reason=excluded.reason`, "coastal:"+endpoint, state, success, reason); e == nil {
+	if _, e = tx.Exec(ctx, `INSERT INTO source_health(endpoint,state,last_success,reason) VALUES($1,$2,CASE WHEN $3 THEN clock_timestamp() ELSE NULL END,$4) ON CONFLICT(endpoint) DO UPDATE SET state=excluded.state,last_success=coalesce(excluded.last_success,source_health.last_success),last_attempt=clock_timestamp(),reason=excluded.reason`, endpoint, state, success, reason); e == nil {
 		_ = tx.Commit(ctx)
 	}
 }
@@ -100,7 +127,7 @@ func (s *Store) RunCoastal(ctx context.Context, cfg CoastalConfig) {
 	if cfg.Rate <= 0 {
 		cfg.Rate = 4
 	}
-	c := &coastalClient{cfg: cfg, http: platform.Client(2 * time.Second), limiter: coastal.Limiter{Rate: cfg.Rate, Burst: 1}, observations: coastal.Breaker{Name: "observations", Threshold: 3, Cooldown: 2 * time.Second, MaxCooldown: 15 * time.Second}, stations: coastal.Breaker{Name: "stations", Threshold: 3, Cooldown: 2 * time.Second, MaxCooldown: 15 * time.Second}, s: s}
+	c := &coastalClient{cfg: cfg, http: platform.Client(0), limiter: coastal.Limiter{Rate: cfg.Rate, Burst: 1}, observations: coastal.Breaker{Name: "observations", Threshold: 3, Cooldown: 2 * time.Second, MaxCooldown: 15 * time.Second}, stations: coastal.Breaker{Name: "stations", Threshold: 3, Cooldown: 2 * time.Second, MaxCooldown: 15 * time.Second}, s: s}
 	c.http.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	// One owner covers both endpoints, so the shared limiter remains a source-wide
 	// bound rather than multiplying upstream traffic by the replica count.
@@ -131,7 +158,8 @@ func (c *coastalClient) refreshStations(ctx context.Context) {
 	var page struct {
 		Items []Station `json:"items"`
 	}
-	if c.get(ctx, "/v1/stations", &c.stations, &page) != nil || page.Items == nil {
+	body, err := c.get(ctx, "/v1/stations", &c.stations, &page)
+	if err != nil || page.Items == nil {
 		return
 	}
 	tx, e := c.s.Pool.Begin(ctx)
@@ -144,12 +172,18 @@ func (c *coastalClient) refreshStations(ctx context.Context) {
 	}
 	for _, station := range page.Items {
 		if station.ID == "" || station.Province == "" || station.Latitude < -90 || station.Latitude > 90 || station.Longitude < -180 || station.Longitude > 180 {
+			_ = tx.Rollback(ctx)
+			c.health(ctx, "stations", false, "invalid station metadata")
+			_ = c.s.RetainResponse(ctx, "SENSOR_PANTAI", c.cfg.Namespace, "/v1/stations", bytes.NewReader(body), "invalid station metadata")
 			return
 		}
 		b, _ := json.Marshal(station)
 		if _, e = tx.Exec(ctx, `INSERT INTO coastal_stations(station_id,payload) VALUES($1,$2) ON CONFLICT(station_id) DO UPDATE SET payload=excluded.payload,refreshed_at=clock_timestamp()`, station.ID, b); e != nil {
 			return
 		}
+	}
+	if e = resolveResponse(ctx, tx, "SENSOR_PANTAI", c.cfg.Namespace, "/v1/stations"); e != nil {
+		return
 	}
 	_ = tx.Commit(ctx)
 }
@@ -168,7 +202,8 @@ func (c *coastalClient) acquire(ctx context.Context) error {
 		Items     []json.RawMessage `json:"items"`
 		Next      *string           `json:"next_cursor"`
 	}
-	if e = c.get(ctx, "/v1/observations?"+q.Encode(), &c.observations, &page); e != nil {
+	path := "/v1/observations?" + q.Encode()
+	if _, e = c.get(ctx, path, &c.observations, &page); e != nil {
 		return e
 	}
 	if page.Items == nil {
@@ -232,6 +267,9 @@ func (c *coastalClient) acquire(ctx context.Context) error {
 		return e
 	}
 	if _, e = tx.Exec(ctx, `INSERT INTO source_cursors(source,namespace,value) VALUES('SENSOR_PANTAI',$1,$2) ON CONFLICT(source,namespace) DO UPDATE SET value=excluded.value`, c.cfg.Namespace, cursor); e != nil {
+		return e
+	}
+	if e = resolveResponse(ctx, tx, "SENSOR_PANTAI", c.cfg.Namespace, path); e != nil {
 		return e
 	}
 	return tx.Commit(ctx)

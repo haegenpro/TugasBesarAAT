@@ -16,7 +16,10 @@ import (
 	"time"
 )
 
-const RawSchema = `{"type":"record","name":"AcquiredInput","namespace":"id.go.bnpb.m2","fields":[{"name":"message_id","type":"string"},{"name":"source","type":"string"},{"name":"namespace","type":"string"},{"name":"position","type":"long"},{"name":"entity_key","type":"string"},{"name":"received_at","type":"string"},{"name":"correlation_id","type":"string"},{"name":"metadata","type":"bytes"},{"name":"payload","type":"bytes"}]}`
+// Original bytes are already durable in this owner's database. Broker messages
+// carry an Avro reference; workers reload that immutable record before acting.
+// This also prevents a large retained source body from wedging the NATS lane.
+const RawSchema = `{"type":"record","name":"AcquiredInput","namespace":"id.go.bnpb.m2","fields":[{"name":"message_id","type":"string"},{"name":"source","type":"string"},{"name":"namespace","type":"string"},{"name":"position","type":"long"},{"name":"received_at","type":"string"},{"name":"correlation_id","type":"string"}]}`
 
 func scanInput(row pgx.Row) (Input, error) {
 	var i Input
@@ -57,12 +60,11 @@ func (s *Store) PublishOne(ctx context.Context, js jetstream.JetStream, registry
 	}
 	ctx, span := inputSpan(ctx, i, "raw input publication")
 	defer span.End()
-	schema, e := registry.Register(ctx, "acquired-input-value", RawSchema)
+	schema, e := registry.Register(ctx, "acquired-input-reference-value", RawSchema)
 	if e != nil {
 		return false, e
 	}
-	metadata, _ := json.Marshal(i.Metadata)
-	payload := map[string]any{"message_id": i.ID, "source": i.Source, "namespace": i.Namespace, "position": i.Position, "entity_key": i.Entity, "received_at": i.ReceivedAt.UTC().Format(time.RFC3339Nano), "correlation_id": i.CorrelationID, "metadata": metadata, "payload": i.Payload}
+	payload := referenceValue(i)
 	frame, e := avrowire.Encode(schema, payload)
 	if e != nil {
 		return false, e
@@ -147,18 +149,17 @@ func decodeInput(ctx context.Context, registry *avrowire.Client, raw []byte) (In
 		Source    string    `json:"source"`
 		Namespace string    `json:"namespace"`
 		Position  int64     `json:"position"`
-		Entity    string    `json:"entity_key"`
 		At        time.Time `json:"received_at"`
 		CID       string    `json:"correlation_id"`
-		Metadata  []byte    `json:"metadata"`
-		Payload   []byte    `json:"payload"`
 	}
 	if e = json.Unmarshal(body, &wire); e != nil {
 		return Input{}, e
 	}
-	i := Input{wire.ID, wire.Source, wire.Namespace, wire.Position, wire.Entity, wire.Payload, nil, wire.CID, wire.At}
-	e = decodeMetadata(wire.Metadata, &i.Metadata)
-	return i, e
+	return Input{ID: wire.ID, Source: wire.Source, Namespace: wire.Namespace, Position: wire.Position, CorrelationID: wire.CID, ReceivedAt: wire.At}, nil
+}
+
+func referenceValue(i Input) map[string]any {
+	return map[string]any{"message_id": i.ID, "source": i.Source, "namespace": i.Namespace, "position": i.Position, "received_at": i.ReceivedAt.UTC().Format(time.RFC3339Nano), "correlation_id": i.CorrelationID}
 }
 
 func decodeMetadata(raw []byte, out *map[string]any) error {

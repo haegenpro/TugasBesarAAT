@@ -1,18 +1,24 @@
 package ingest
 
 import (
+	"aggregator/internal/coastal"
 	"aggregator/internal/wildfire"
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -184,4 +190,82 @@ func TestM2DurableAffectedRegionMatchesReference(t *testing.T) {
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT singletons,excluded FROM source_progress WHERE source='SATELIT' AND namespace=$1`, ns).Scan(&singletons, &excluded))
 	require.EqualValues(t, model.Snapshot().Singletons, singletons)
 	require.EqualValues(t, model.Snapshot().Excluded, excluded)
+}
+
+type incompleteBody struct{}
+
+func (incompleteBody) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+func TestM2ResponseQuarantineKeepsFullBytesWithoutAdvancingSource(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	ns := "response:" + uuid.NewString()
+	payload := bytes.Repeat([]byte("original\x00bytes\r\n"), 10000)
+	require.NoError(t, s.Leases.Run(ctx, "acquire:"+ns, func(owned context.Context) error {
+		if e := s.RetainResponse(owned, "SATELIT", ns, "stream:41", bytes.NewReader(payload), "oversized SSE frame"); e != nil {
+			return e
+		}
+		incomplete := io.MultiReader(bytes.NewReader([]byte("partial bytes")), incompleteBody{})
+		require.Error(t, s.RetainResponse(owned, "SATELIT", ns, "stream:41", incomplete, "incomplete transport"))
+		return nil
+	}))
+	var id string
+	var count int
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM response_failures`).Scan(&count))
+	require.Equal(t, 1, count)
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT message_id::text FROM response_failures`).Scan(&id))
+	var out bytes.Buffer
+	size, digest, e := s.WriteResponsePayload(ctx, id, &out)
+	require.NoError(t, e)
+	require.EqualValues(t, len(payload), size)
+	require.Equal(t, Hash(payload), digest)
+	require.Equal(t, payload, out.Bytes())
+	received, prepared, applied, e := s.Progress(ctx, "SATELIT", ns, 41)
+	require.NoError(t, e)
+	require.EqualValues(t, 40, received)
+	require.EqualValues(t, 40, prepared)
+	require.EqualValues(t, 40, applied)
+	page, e := s.Failures(ctx, "SATELIT", 10, "")
+	require.NoError(t, e)
+	require.Len(t, page["items"], 1)
+}
+
+func TestM2CoastalRejectedPageRetainsTailAndResolvesOnReacquisition(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	ns := "page:" + uuid.NewString()
+	var mode atomic.Int32
+	large := bytes.Repeat([]byte("original rejected response\x00"), 180000)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mode.Load() == 0 {
+			_, _ = w.Write([]byte(`{"items":null}`))
+		} else if mode.Load() == 1 {
+			_, _ = w.Write(large)
+		} else {
+			_, _ = w.Write([]byte(`{"generated_at":"2026-11-12T00:00:00Z","items":[],"next_cursor":null}`))
+		}
+	}))
+	defer server.Close()
+	c := &coastalClient{cfg: CoastalConfig{URL: server.URL, Namespace: ns}, http: server.Client(), s: s,
+		limiter: coastal.Limiter{Rate: 1000, Burst: 1}, observations: coastal.Breaker{Name: "observations", Threshold: 3}}
+	require.NoError(t, s.Leases.Run(ctx, "acquire:"+ns, func(owned context.Context) error {
+		require.Error(t, c.acquire(owned))
+		mode.Store(1)
+		require.Error(t, c.acquire(owned))
+		var id string
+		require.NoError(t, s.Pool.QueryRow(owned, `SELECT message_id::text FROM response_failures WHERE size=$1`, len(large)).Scan(&id))
+		var retained bytes.Buffer
+		_, digest, e := s.WriteResponsePayload(owned, id, &retained)
+		require.NoError(t, e)
+		require.Equal(t, Hash(large), digest)
+		require.Equal(t, large, retained.Bytes())
+		received, _, _, e := s.Progress(owned, "SENSOR_PANTAI", ns, 0)
+		require.NoError(t, e)
+		require.EqualValues(t, -1, received)
+		mode.Store(2)
+		return c.acquire(owned)
+	}))
+	var unresolved int
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM response_failures WHERE NOT resolved`).Scan(&unresolved))
+	require.Zero(t, unresolved)
 }

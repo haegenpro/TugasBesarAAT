@@ -67,6 +67,7 @@ func registerAdmin(r *gin.Engine, s *store.Store, cfg Config) {
 		c.JSON(200, page)
 	})
 	admin.GET("/failures/:id/payload", func(c *gin.Context) {
+		_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(2 * time.Minute))
 		id := c.Param("id")
 		if _, e := uuid.Parse(id); e != nil {
 			problem(c, 400, "invalid message ID")

@@ -40,7 +40,7 @@ func (s *Store) Failures(ctx context.Context, source string, limit int, cursor s
 		at = p.At
 		id = p.ID
 	}
-	rows, e := s.Pool.Query(ctx, `SELECT message_id::text,source,received_at,CASE WHEN reason<>'' THEN reason ELSE 'awaiting durable processing or canonical commit' END,attempts,state FROM raw_inputs WHERE source<>'FIELD_REPORT' AND state<>'applied' AND ($1='' OR source=$1) AND ($2::timestamptz IS NULL OR (received_at,message_id)>($2,$3::uuid)) ORDER BY received_at,message_id LIMIT $4`, source, at, id, limit+1)
+	rows, e := s.Pool.Query(ctx, `SELECT message_id::text,source,received_at,reason,attempts,state FROM (SELECT message_id,source,received_at,CASE WHEN reason<>'' THEN reason ELSE 'awaiting durable processing or canonical commit' END AS reason,attempts,state FROM raw_inputs WHERE source<>'FIELD_REPORT' AND state<>'applied' UNION ALL SELECT message_id,source,received_at,'source response; automatic reacquisition: '||reason,1::bigint,'retrying' FROM response_failures WHERE NOT resolved) failures WHERE ($1='' OR source=$1) AND ($2::timestamptz IS NULL OR (received_at,message_id)>($2,$3::uuid)) ORDER BY received_at,message_id LIMIT $4`, source, at, id, limit+1)
 	if e != nil {
 		return nil, e
 	}

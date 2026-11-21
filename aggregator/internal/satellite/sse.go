@@ -16,8 +16,10 @@ type Event struct {
 }
 
 type Stream struct {
-	r       *bufio.Reader
-	maxLine int
+	r           *bufio.Reader
+	maxLine     int
+	frame       bytes.Buffer
+	partialLine bool
 }
 
 var ErrLineTooLong = errors.New("server-sent event line exceeds the accepted size")
@@ -32,21 +34,28 @@ func (s *Stream) Buffered() int { return s.r.Buffered() }
 func (s *Stream) line() ([]byte, error) {
 	var out []byte
 	for {
-		chunk, prefix, err := s.r.ReadLine()
-		if err != nil {
-			return nil, err
-		}
+		chunk, err := s.r.ReadSlice('\n')
+		s.frame.Write(chunk)
 		out = append(out, chunk...)
+		s.partialLine = err == bufio.ErrBufferFull || (len(chunk) > 0 && chunk[len(chunk)-1] != '\n')
 		if len(out) > s.maxLine {
 			return nil, ErrLineTooLong
 		}
-		if !prefix {
-			return out, nil
+		if s.frame.Len() > s.maxLine {
+			return nil, ErrEventTooLong
 		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if err != nil && len(out) == 0 {
+			return nil, err
+		}
+		return bytes.TrimSuffix(bytes.TrimSuffix(out, []byte{'\n'}), []byte{'\r'}), nil
 	}
 }
 
 func (s *Stream) Next() (Event, error) {
+	s.frame.Reset()
 	var e Event
 	var data [][]byte
 	seen := false
@@ -57,10 +66,15 @@ func (s *Stream) Next() (Event, error) {
 			if errors.Is(err, io.EOF) && seen {
 				err = io.ErrUnexpectedEOF
 			}
+			if s.frame.Len() > 0 {
+				prefix := append([]byte(nil), s.frame.Bytes()...)
+				return Event{}, &RejectedFrame{ID: e.ID, Type: e.Type, Cause: err, Reader: io.MultiReader(bytes.NewReader(prefix), &frameTail{reader: s.r, partial: s.partialLine})}
+			}
 			return Event{}, err
 		}
 		if len(line) == 0 {
 			if !seen {
+				s.frame.Reset()
 				continue
 			}
 			e.Data = bytes.Join(data, []byte{'\n'})
@@ -74,7 +88,7 @@ func (s *Stream) Next() (Event, error) {
 		}
 		size += len(line) + 1
 		if size > s.maxLine {
-			return Event{}, ErrEventTooLong
+			return Event{}, &RejectedFrame{ID: e.ID, Type: e.Type, Cause: ErrEventTooLong, Reader: io.MultiReader(bytes.NewReader(append([]byte(nil), s.frame.Bytes()...)), &frameTail{reader: s.r})}
 		}
 		seen = true
 		field, value, _ := bytes.Cut(line, []byte{':'})
@@ -90,4 +104,52 @@ func (s *Stream) Next() (Event, error) {
 			}
 		}
 	}
+}
+
+// RejectedFrame exposes the exact frame, including delimiters, as a bounded
+// stream. The acquisition owner can quarantine an oversized event without
+// buffering its tail or consuming the following event.
+type RejectedFrame struct {
+	ID, Type string
+	Cause    error
+	Reader   io.Reader
+}
+
+func (e *RejectedFrame) Error() string { return e.Cause.Error() }
+func (e *RejectedFrame) Unwrap() error { return e.Cause }
+
+type frameTail struct {
+	reader        *bufio.Reader
+	pending       []byte
+	partial, done bool
+}
+
+func (r *frameTail) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(r.pending) > 0 {
+		n := copy(p, r.pending)
+		r.pending = r.pending[n:]
+		return n, nil
+	}
+	if r.done {
+		return 0, io.EOF
+	}
+	line, e := r.reader.ReadSlice('\n')
+	blank := !r.partial && (bytes.Equal(line, []byte{'\n'}) || bytes.Equal(line, []byte{'\r', '\n'}))
+	r.partial = e == bufio.ErrBufferFull
+	if blank || e == io.EOF {
+		r.done = true
+	}
+	if e != nil && e != bufio.ErrBufferFull && e != io.EOF {
+		return 0, e
+	}
+	r.pending = append(r.pending, line...)
+	if len(r.pending) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.pending)
+	r.pending = r.pending[n:]
+	return n, nil
 }

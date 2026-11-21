@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 )
 
 func (s *Store) registerOps(r *gin.Engine, token string) {
@@ -35,6 +36,7 @@ func (s *Store) registerOps(r *gin.Engine, token string) {
 		c.JSON(200, page)
 	})
 	ops.GET("/failures/:id/payload", func(c *gin.Context) {
+		_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(2 * time.Minute))
 		id := c.Param("id")
 		if _, e := uuid.Parse(id); e != nil {
 			c.Status(400)
@@ -44,7 +46,17 @@ func (s *Store) registerOps(r *gin.Engine, token string) {
 		var digest string
 		e := s.Pool.QueryRow(c.Request.Context(), `SELECT payload FROM raw_inputs WHERE message_id=$1`, id).Scan(&raw)
 		if errors.Is(e, pgx.ErrNoRows) {
-			c.Status(404)
+			var size int64
+			if e = s.Pool.QueryRow(c.Request.Context(), `SELECT size,sha256 FROM response_failures WHERE message_id=$1`, id).Scan(&size, &digest); e != nil {
+				c.Status(404)
+				return
+			}
+			c.Header("Content-Disposition", "attachment; filename=quarantine-"+id+".bin")
+			c.Header("Content-Type", "application/octet-stream")
+			c.Header("X-Content-Type-Options", "nosniff")
+			c.Header("X-Content-SHA256", digest)
+			c.Header("Content-Length", strconv.FormatInt(size, 10))
+			_, _, _ = s.WriteResponsePayload(c.Request.Context(), id, c.Writer)
 			return
 		}
 		if e != nil {

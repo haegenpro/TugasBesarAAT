@@ -123,7 +123,7 @@ func main() {
 	}
 	router := server.New(logger, a)
 	if st.Distributed {
-		fieldStore, err := st.ReadPool(ctx, 4)
+		fieldStore, err := st.ReadPool(ctx, 3)
 		if err != nil {
 			logger.Error("Field read pool configuration failed")
 			os.Exit(1)

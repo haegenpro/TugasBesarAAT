@@ -20,6 +20,7 @@ import (
 type observationRow struct {
 	Observation    wildfire.Observation
 	Fire, Previous *string
+	Bytes          int
 }
 
 func readObservation(row pgx.Row) (observationRow, error) {
@@ -27,6 +28,7 @@ func readObservation(row pgx.Row) (observationRow, error) {
 	var raw []byte
 	e := row.Scan(&raw, &out.Fire, &out.Previous)
 	if e == nil {
+		out.Bytes = len(raw)*3 + 512
 		e = json.Unmarshal(raw, &out.Observation)
 	}
 	return out, e
@@ -98,9 +100,21 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 	oldRows := map[string]observationRow{}
 	maxRegion := platform.Int("WILDFIRE_REGION_MAX_BYTES", 32<<20)
 	maxRows := max(1, maxRegion/2048)
+	workingBytes := 0
+	charge := func(size int) error {
+		workingBytes += size
+		if workingBytes > maxRegion {
+			return errors.New("wildfire working-memory allowance exceeded; source progress unchanged")
+		}
+		return nil
+	}
 	aliases := map[string]string{}
 	load := func(key string) (observationRow, error) {
-		return readObservation(tx.QueryRow(ctx, `SELECT payload,fire_id,previous_fire_id FROM wildfire_observations WHERE namespace=$1 AND key=$2`, i.Namespace, key))
+		row, e := readObservation(tx.QueryRow(ctx, `SELECT payload,fire_id,previous_fire_id FROM wildfire_observations WHERE namespace=$1 AND key=$2`, i.Namespace, key))
+		if e == nil {
+			e = charge(row.Bytes)
+		}
+		return row, e
 	}
 	var old observationRow
 	if op.Kind == "update" || op.Kind == "retract" {
@@ -129,6 +143,9 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 			return parkInput(ctx, tx, i, e.Error())
 		}
 		incoming = &ob
+		if e = charge(len(ob.Key)*3 + 2048); e != nil {
+			return e
+		}
 		existing, e := load(ob.Key)
 		if e == nil {
 			oldRows[ob.Key] = existing
@@ -158,6 +175,10 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 					rows.Close()
 					return e
 				}
+				if e = charge(r.Bytes); e != nil {
+					rows.Close()
+					return e
+				}
 				if wildfire.Connected(ob, r.Observation) {
 					oldRows[r.Observation.Key] = r
 					if r.Fire != nil {
@@ -180,6 +201,10 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		for rows.Next() {
 			r, e := readObservation(rows)
 			if e != nil {
+				rows.Close()
+				return e
+			}
+			if e = charge(r.Bytes); e != nil {
 				rows.Close()
 				return e
 			}
@@ -255,6 +280,9 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 			continue
 		}
 		if e != nil {
+			return e
+		}
+		if e = charge(len(b) * 3); e != nil {
 			return e
 		}
 		var f wildfire.Fire
