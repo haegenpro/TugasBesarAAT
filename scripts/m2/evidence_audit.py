@@ -160,15 +160,18 @@ def compare_snapshots(before, after):
     return result
 
 
-def scan_source(client, source, since=None):
+def scan_source(client, source, since=None, fields=()):
+    """Scan one source; `fields` names extra event fields to keep (e.g. severity, area_name)."""
     items, partial, unavailable, count = [], False, set(), 0
     for page in pages(client, '/internal/audit/events', {'source': source, 'since': since}):
         partial |= bool(page.get('partial'))
         unavailable.update(page.get('unavailable_units') or [])
         for item in page['items']:
             count += 1
-            items.append({'hazard_id': item['hazard_id'], 'source': item['source'],
-                          'source_ref_id': item['source_ref_id'], 'ingested_at': item['ingested_at']})
+            kept = {'hazard_id': item['hazard_id'], 'source': item['source'],
+                    'source_ref_id': item['source_ref_id'], 'ingested_at': item['ingested_at']}
+            kept.update({field: item.get(field) for field in fields})
+            items.append(kept)
     return {'items': items, 'partial': partial, 'unavailable_units': sorted(unavailable)}
 
 

@@ -22,9 +22,16 @@ Pick the cluster once with `manage.py init --profile minikube|k3s`; all tools fo
 | `p2_load_test.py` + `p2_load_test.js` | P2-6, P2-8 (P5-5 from the summary) | 10,000-VU k6 run, 3 → 5 → 2 scaling, rolling image replacement, PASS/FAIL verdicts |
 | `p2_load_credentials.py` | P2-6 | writes only the demo client credentials for the separate generator PC |
 | `p2_throughput_compare.py` | P2-7 | one-versus-three Aggregator throughput on the same dataset |
+| `p1_analytics_compare.py` | P1-7 | dashboard numbers versus a direct Audit API count per type, severity and area; verdict on the numbers only (the page itself is manual) |
 | `p3_schema_mode.py` | P3-1 | switches the PVMBG mock between `v1`, `compatible` and `breaking` contracts |
+| `p3_schema_behavior.py` | P3-1 | runs every contract and attaches what happened (events added, unprocessed by status) next to the declared policy; no verdict |
+| `p3_ops_access_matrix.py` | P3-5 | HTTP status per identity and Internal Ops endpoint, with a verdict that only Internal Ops gets through |
+| `p3_field_report_ledger.py` | P3-6 | `submit` records every 202 with its Idempotency-Key, `reconcile` checks receipts and database counts |
 | `p4_province_reference.py` | P4-1, P4-6 | validates and installs the checksum-pinned province reference |
 | `p4_requeue_satellite_updates.py` | P4-3 | one-off migration for updates saved under the earlier retraction rule |
+| `p4_ingestion_progress.py` | P4-2, P4-4, P4-7 (helps P4-8) | received/prepared/applied offsets, lag, watermark, late-data counters over time; no verdict |
+| `p5_warning_slo_snapshot.py` | P5-1, P5-8 | critical-warning delivery measurements from the notifier; PASS/FAIL only when measurable |
+| `p5_sensor_fault_probe.py` | P5-4 (supports P5-3) | client latency, source status, breaker state and request rate to the sensor while it is unhealthy; no verdict |
 
 ## Evidence tools (several criteria)
 
@@ -35,6 +42,14 @@ Pick the cluster once with `manage.py init --profile minikube|k3s`; all tools fo
 | `evidence_snapshot.py` | Platform, P1-4 | revision, nodes, pods, requests/limits and checksum snapshot |
 | `evidence_tester_agent.py` | Tester Agent contract; P1-4…P1-6, P2-3…P2-5, P3-6, P4-5, P4-8, P5-6 | install, check, list, practice and read the Tester Agent log |
 | `evidence_integration_tests.py` | supports P1-3, P1-4, P3-3, P3-4, P4-3, P5-1 | Go integration suites on synthetic data (not a pass by themselves) |
+
+## Verdict or attached result
+
+Tools that can judge a criterion mechanically print PASS/FAIL (or a one-line verdict) and exit
+non-zero on failure. Tools marked "no verdict" only measure: they print the tables and save
+`result.txt` and `result.json` in a private `.m2-local/evidence-<tool>-<time>/` directory
+(override with `--output DIR`) so the results can be attached and judged by a person. Tokens
+are never written. `evidence_report.py` and `evidence_metrics.py` are their shared helpers.
 
 ## Platform (no single criterion)
 

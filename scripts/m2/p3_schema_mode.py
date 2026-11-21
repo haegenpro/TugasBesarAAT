@@ -12,21 +12,29 @@ from common import LOCAL, read_config, runtime_secrets
 from evidence_integration_tests import forward
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', default=str(LOCAL/'config.json'))
-    parser.add_argument('mode', choices=('v1', 'compatible', 'breaking'))
-    args = parser.parse_args()
-    cfg = read_config(args.config)
+MODES = ('v1', 'compatible', 'breaking')
+
+
+def set_mode(cfg, mode):
+    """Switch the PVMBG mock contract and return its answer (also used by p3_schema_behavior)."""
     credentials = runtime_secrets(LOCAL/'secrets.json')
     with forward(cfg, 'pvmbg-mock', 8082) as port:
         request = urllib.request.Request(
             f'http://127.0.0.1:{port}/admin/schema-version',
-            data=json.dumps({'mode': args.mode}).encode(), method='POST',
+            data=json.dumps({'mode': mode}).encode(), method='POST',
             headers={'Authorization': 'Bearer '+credentials['admin'],
                      'Content-Type': 'application/json'})
         with urllib.request.urlopen(request, timeout=15) as response:
-            result = json.load(response)
+            return json.load(response)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', default=str(LOCAL/'config.json'))
+    parser.add_argument('mode', choices=MODES)
+    args = parser.parse_args()
+    cfg = read_config(args.config)
+    result = set_mode(cfg, args.mode)
     print('PVMBG source schema: '+str(result['schema_version']))
     if args.mode == 'breaking':
         print('The source renames alert_level to level, sends the count as text, and omits ash height.')

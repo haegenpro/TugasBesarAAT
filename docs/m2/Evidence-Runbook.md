@@ -66,7 +66,7 @@ TOKEN=$(curl -s -X POST $BASE/auth/login -H 'Content-Type: application/json' \
 | 4 | `evidence_audit.py snapshot --ids --output .m2-local/before.json`; run `evidence_outage_probe.py --watch --duration 300 --output .m2-local/outage-4.json` in one terminal; in another `evidence_tester_agent.py practice <node-loss scenario>` (see `evidence_tester_agent.py list`); afterwards `evidence_audit.py snapshot --ids --output .m2-local/after.json`; `evidence_audit.py compare .m2-local/before.json .m2-local/after.json` | `CONTINUITY OK` (no 5xx, no hang, answers complete or explicitly partial) and `ZERO LOSS: yes`. Writes acknowledged during the outage are not in `before.json`; capture the acknowledged identities separately if the report claims them. |
 | 5 | k3s only: `sudo python3 deployment/m2/rebuild-b.py --hostname HOST --execute` while `evidence_outage_probe.py --duration 300` runs; then `p1_placement_load.py distribution` | `CONTINUITY OK` plus placement showing node B holds data again. Not reproducible on Minikube. |
 | 6 | After 4 and 5: `p1_placement_load.py distribution`, then repeat the single-node loss | `PLACEMENT OK` (replica on a different node for every sampled event) before the repeat. |
-| 7 | Browser: `access.py client-api`, open `/analytics`; compare totals with `evidence_audit.py checksum`; repeat with node B stopped | **manual**: charts, severity and area tables, "incomplete" banner. No script checks the page. |
+| 7 | `p1_analytics_compare.py`; then in the browser `access.py client-api` and open `/analytics`; repeat both with node B stopped | Script: dashboard-versus-Audit table per type, severity and area with `NUMBERS MATCH` or `DIFFERENCES FOUND`, plus `partial`/`unavailable_units`. **manual**: the charts and the "incomplete" banner on the page. Result files are attached (`result.txt`, `result.json`). |
 
 ## Problem 2
 
@@ -85,44 +85,46 @@ TOKEN=$(curl -s -X POST $BASE/auth/login -H 'Content-Type: application/json' \
 
 | # | Produce | Verdict / limit |
 | --- | --- | --- |
-| 1 | Policy: `docs/m1/Schema Validation.md` and the `/ops` schema-policy view; trigger the `breaking` mode on the PVMBG mock as described in [Replay-Demo.md](Replay-Demo.md) | **manual** comparison of declared policy and behaviour. |
+| 1 | `p3_schema_behavior.py --execute` (switches the PVMBG mock through `v1`, `compatible`, `breaking` and back; see also [Replay-Demo.md](Replay-Demo.md)) | **Results attached, no verdict**: declared policy, then per mode the PVMBG events added, new unprocessed messages by status/retryability and sample reasons. Compare them with `docs/m1/Schema Validation.md`. |
 | 2 | `evidence_audit.py unprocessed --show 15` | Counts by `retrying`/`parked` and retryable/not-retryable. |
 | 3 | `evidence_integration_tests.py --suite ingestion` for oversize/truncated/deep nesting; `kubectl get pods` shows no restarts | Test output plus restart counters. Live malformed-input injection is **manual**. |
 | 4 | Activate the reader on `/ops`, request replay; then `evidence_audit.py unprocessed` and `evidence_audit.py scan` | Failures resolved, no duplicates, ordering intact. |
-| 5 | Inspect `/ops` as Internal Ops, then as Media/Field (expect 403) | **manual**. |
-| 6 | `evidence_tester_agent.py practice <pod kill scenario>` while `p2_load_test.py --report-every 5` posts reports with `Idempotency-Key` | Reconciliation of 202 receipts against canonical reports is **manual**; no script reconciles acknowledgments. |
+| 5 | `p3_ops_access_matrix.py` (status code per identity and endpoint, including forged role headers); also open `/ops` as Media/Field in the browser | `ONLY INTERNAL OPS CAN INSPECT FAILED MESSAGES` or lines naming each violation or inconclusive row. The browser view is **manual**. |
+| 6 | `p3_field_report_ledger.py submit --count 500 --prefix demo1` while `evidence_tester_agent.py practice <pod kill scenario>` runs; then `p3_field_report_ledger.py reconcile --ledger <ledger path>` | PASS/FAIL: every 202 has a retrievable receipt, one receipt per key, no receipt shared, ingestion holds every acknowledged report, no duplicate processing result. Accepted-versus-processed counts and reports stored without a seen 202 are only reported. |
 
 ## Problem 4
 
 | # | Produce | Verdict / limit |
 | --- | --- | --- |
 | 1 | `evidence_audit.py scan --source SATELIT`; sample one event with `curl -H "Authorization: Bearer $TOKEN" "$BASE/hazards?limit=1"` | Duplicate-free WILDFIRE events; multi-satellite grouping needs the reference. |
-| 2 | Late-data counters: processor metrics/logs | **manual**; no counter appears on the dashboard. |
+| 2 | `p4_ingestion_progress.py --minutes 10` (late mutations, excluded detections and singletons per source) | **Results attached, no verdict**: compare the late counter with the lateness bound you declared. |
 | 3 | Update/retract: integration tests (`evidence_integration_tests.py --suite ingestion`) and Audit before/after | test output + `evidence_audit.py compare`. |
-| 4 | Dashboard panels "Satellite received position", "Canonical apply p95", "Canonical lag" during a 60× session | **manual**. The applications export only the received position for the satellite; applied/prepared offsets and oldest pending age are not exported, so lag has to be argued from these panels. |
+| 4 | `p4_ingestion_progress.py --minutes 15 --metrics` during a 60x session, plus the dashboard panels "Satellite received position" and "Canonical apply p95" | **Results attached, no verdict**: received/prepared/applied offsets, lag, peak lag and seconds from the peak back to zero (the 60-second target). The Prometheus panels show only the received position; applied and prepared offsets come from this tool (Internal Ops progress API). The apply-latency panel measures canonical apply time, not data-in to stored. |
 | 5 | `evidence_tester_agent.py practice <processor kill scenario>`; interrupted vs uninterrupted: `evidence_audit.py snapshot --ids` on two clean runs, then `evidence_audit.py compare` | Requires two clean runs on separate namespaces; compare output is the verdict. |
 | 6 | `p4_province_reference.py --file F --sha256 H --execute`; compare Audit events with the assistants' reference | **manual** difference report. |
-| 7 | Live feed for several minutes: Grafana satellite panels, `evidence_audit.py scan --source SATELIT` | **manual** + scan. |
-| 8 | Break the connection (`evidence_tester_agent.py practice <network scenario>` or `kubectl delete pod`); `evidence_audit.py scan --source SATELIT` | No duplicates, positions continue; probe results in `satellite-probe` output. |
+| 7 | Live feed for several minutes: `p4_ingestion_progress.py --minutes 5 --metrics`, the Grafana satellite panels and `evidence_audit.py scan --source SATELIT` | **Results attached, no verdict** (offsets advancing live) plus the scan's duplicate check. |
+| 8 | Break the connection (`evidence_tester_agent.py practice <network scenario>` or `kubectl delete pod`) while `p4_ingestion_progress.py --metrics` runs; then `evidence_audit.py scan --source SATELIT` | Scan: no duplicates. Progress timeline attached: offsets continue after the reconnect (reconnect counter included with `--metrics`). |
 
 ## Problem 5
 
 | # | Produce | Verdict / limit |
 | --- | --- | --- |
-| 1 | `evidence_tester_agent.py practice <coastal scenario>`; Grafana "Coastal warning p95"; `evidence_audit.py scan --source SENSOR_PANTAI` | p95 from the dashboard; zero-loss reconciliation of critical warnings is **manual** from the notifier ledger. |
+| 1 | `evidence_tester_agent.py practice <coastal scenario>`; then `p5_warning_slo_snapshot.py`; `evidence_audit.py scan --source SENSOR_PANTAI` | PASS/FAIL/NOT MEASURABLE for p95 ≤ 5 s and no overdue pending warning (judged only when the notifier reports a complete cohort and valid p95). Reconciling the sensor's own critical events with deliveries is **manual**. |
 | 2 | `evidence_audit.py unprocessed --source SENSOR_PANTAI` | Rejected inputs visible with reasons. |
 | 3 | `evidence_outage_probe.py --duration 180` while the sensor is unhealthy | Latency criterion for the other sources; `CONTINUITY OK`. |
-| 4 | Dashboard "Coastal breaker state", "Coastal fetch failures and short-circuits"; `curl -w '%{time_total}'` against the coastal read | Fast answers while the breaker is open; request counts from the panels. |
+| 4 | `p5_sensor_fault_probe.py --duration 240` while the sensor is unhealthy, plus the dashboard "Coastal breaker state" and "Coastal fetch failures and short-circuits" panels | **Results attached, no verdict**: client latency and per-source status timeline, breaker states, requests/s to the sensor, failures and short-circuits per second, ingestion `source_health`. Metrics come from one ingestion pod. |
 | 5 | `p2_load_test.py` mixed load; read the Field/Media rows in `summary.json` | Field outcomes versus Media rejections are in the summary tags; judgement is **manual**. |
 | 6 | Run the exam combination without touching the cluster; record the timeline | **manual**; the scripts only observe (`evidence_outage_probe.py`, `evidence_audit.py`, `evidence_tester_agent.py logs`). |
 | 7 | Explain the failure from Grafana, Loki and Jaeger | **manual**. |
-| 8 | Reliability target from "Coastal warning p95" and "Error budget remaining" | **manual**. |
+| 8 | `p5_warning_slo_snapshot.py --samples 20 --interval 30` across the game day, plus "Error budget remaining" | **Results attached, no verdict**: error-budget use, on-time ratio and counts over time. Defining the target is a report decision. |
 
 ## What no script can establish
 
-Visual dashboard content (P1-7, P4-4), the VM freeze (P2-5), the assistants' reference
-comparison (P4-6), reconciliation of 202 receipts and critical warnings against
-receipts (P3-6, P5-1), and any statement that the scenario was run without
-intervention (P5-6). Capture these with screenshots or logs and write them up as manual
-evidence. Results from Minikube or a colocated generator must be labelled as local
-rehearsal, not as demo evidence.
+The charts and banner on the analytics page (P1-7), the VM freeze (P2-5), the assistants'
+reference comparison (P4-6), reconciliation of the sensor's own critical events with
+deliveries (P5-1), and any statement that a scenario was run without intervention
+(P5-6) or explained from the dashboards (P5-7). Capture these with screenshots or logs and
+write them up as manual evidence. Observation tools print and save their results
+(`result.txt`, `result.json` in a private `.m2-local/evidence-*` directory) so they can be
+attached; they never decide for you. Results from Minikube or a colocated generator must be
+labelled as local rehearsal, not as demo evidence.
