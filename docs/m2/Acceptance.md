@@ -19,7 +19,7 @@ artifacts. Retain original acknowledgments and receipts when checking zero loss.
 | Citus commit fences, expired owners, dedup, Audit, retractions, visibility recovery, complete quarantine | `python3 scripts/m2/verify.py --suite canonical` |
 | Field lost response/broker outage, original source offsets, durable wildfire region/reference fixture | `python3 scripts/m2/verify.py --suite ingestion` |
 | Independent Auth/Dashboard/Notifier database schemas | `python3 scripts/m2/verify.py --suite services` |
-| Bounded feed resume probe | `aggregator/cmd/satellite-probe`, with real credentials later |
+| Bounded feed resume probe | `aggregator/cmd/satellite-probe`; practice token exercised as recorded below |
 | Synthetic wildfire oracle | `aggregator/cmd/wildfire-reference replay`, fixture configuration and JSONL |
 
 A skipped integration test is not a pass. Preserve the actual command output and
@@ -69,6 +69,45 @@ The outage was a Minikube node stop/start, not a physical host power loss, and
 the <=60-second takeover target was not timed. Synthetic input continued during
 the run, so Audit counts/checksums changed; these snapshots do not establish a
 strict before/after zero-loss comparison of acknowledged source records.
+
+## Live satellite practice trial (2026-11-21)
+
+The owner configured the token privately and approved reuse of the 38-province
+[reference table](Province-Reference.md). It was checksum checked and installed
+with writers stopped. Credentials are absent from public evidence.
+
+The first 32-record probe exercised detections/retractions but missed updates.
+A live acquisition trial then exposed `{offset,key,changes}` partial updates,
+which the original normalizer incorrectly parked as incomplete detections. The
+fixed normalizer preserves the patch and the original bytes; the processor
+merges supported changes into the retained detection before validation. The
+fixture oracle preserves the original operation and fingerprint for replay.
+Satellite/wildfire race tests and ingestion integration regressions passed.
+
+The expanded probe passed three 1,024-record legs (initial, overlapping resume,
+next-offset resume), covering 2,850 detection, 164 update, and 58 retraction
+deliveries. Replayed offsets retained matching payload/operation hashes. The
+session advertised speed 60. These are replayed deliveries, not counts of unique
+events stored by the application.
+
+Release `m2-20261121-satellite1` was deployed. Acquisition was paused while the
+retained 1,961-record trial was drained and 76 parser failures were selected
+through the authenticated Ops replay endpoint. Of those, 75 resolved. Two records
+remained parked because their source updates followed a retraction of the target
+(offsets 859 and 1480). Their raw bytes remain available. Whether those updates
+should leave the target inactive or reactivate it needs course-contract/reference
+confirmation; this run does not claim complete source-semantic agreement.
+
+Normal acquisition resumed from the stored position. One sample showed received
+5139, prepared 2493, applied 2465, with virtual time/watermark advancing and no
+remaining incomplete-detection parser failures. Processing lag grew. The source
+already had more than 2.45 million historical offsets when the trial began, and
+this trial started at 0. No 60x catch-up, complete-history replay, p95 processing
+latency, or official reference comparison has passed. Evidence is private under
+`.m2-local/satellite-probe-live-*` and `.m2-local/evidence-satellite-*`.
+
+The demo cluster is stopped after evidence capture to bound disk use. Data and
+cursors persist; starting the same profile resumes the token-enabled deployment.
 
 ## P1: partitioning and recovery
 
