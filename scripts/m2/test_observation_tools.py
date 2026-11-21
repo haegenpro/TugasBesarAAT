@@ -13,6 +13,8 @@ import evidence_report as report_module
 import p1_analytics_compare as analytics
 import p3_field_report_ledger as ledger
 import p3_ops_access_matrix as access
+import p3_quarantine_payload as quarantine
+import p3_replay_flow as replay_flow
 import p3_schema_behavior as schema
 import p4_ingestion_progress as progress
 import p5_sensor_fault_probe as sensor
@@ -151,8 +153,41 @@ class LedgerTests(unittest.TestCase):
                                           {'a': (200, 'accepted'), 'b': (200, 'accepted')})
         self.assertEqual(summary['receipts_shared_by_keys'], {'r': ['a', 'b']})
 
+    def test_latency_summary_uses_only_202_answers(self):
+        entries = [{'key': 'a', 'attempts': [{'http': 503, 'seconds': 9.0}, {'http': 202, 'seconds': 0.2}]},
+                   {'key': 'b', 'attempts': [{'http': 202, 'seconds': 0.1}]},
+                   {'key': 'c', 'attempts': [{'http': 202, 'seconds': 0.4}]}]
+        result = ledger.latency_summary(entries)
+        self.assertEqual((result['answers_202'], result['retried_keys'], result['max_seconds']), (3, 1, 0.4))
+        self.assertEqual(ledger.latency_summary([{'key': 'x', 'attempts': [{'http': 0, 'seconds': 5}]}]),
+                         {'answers_202': 0, 'retried_keys': 0})
+
     def test_report_body_is_valid_json_and_stable_per_call(self):
         self.assertEqual(json.loads(ledger.make_body(3, 'p'))['attributes'], {'synthetic': True})
+
+
+class QuarantinePayloadTests(unittest.TestCase):
+    def test_digest_and_length_are_compared_case_insensitively(self):
+        import hashlib
+        content = b'original bytes'
+        digest = hashlib.sha256(content).hexdigest()
+        good = quarantine.compare_download(200, content, {'x-content-sha256': digest.upper(), 'Content-Length': str(len(content))})
+        self.assertTrue(good['sha256_matches'] and good['length_matches'])
+        bad = quarantine.compare_download(200, content+b'!', {'X-Content-SHA256': digest, 'Content-Length': str(len(content))})
+        self.assertFalse(bad['sha256_matches'] or bad['length_matches'])
+        self.assertFalse(quarantine.compare_download(403, b'', {})['sha256_matches'])
+        self.assertFalse(quarantine.compare_download(200, content, {})['sha256_matches'])
+
+    def test_raw_fields_in_metadata_listing_are_flagged(self):
+        self.assertEqual(quarantine.leaked_fields([{'message_id': 'a', 'reason': 'x'}]), [])
+        self.assertEqual(quarantine.leaked_fields([{'message_id': 'a', 'Payload': 'zzz'}]), ['Payload'])
+
+
+class ReplayFlowTests(unittest.TestCase):
+    def test_only_waiting_messages_are_selected_oldest_first(self):
+        items = [{'message_id': 'a', 'status': 'resolved'}, {'message_id': 'b', 'status': 'parked'},
+                 {'message_id': 'c', 'status': 'retrying'}, {'message_id': 'd', 'status': 'parked'}]
+        self.assertEqual(replay_flow.pick_messages(items, 2), ['b', 'c'])
 
 
 class SchemaBehaviorTests(unittest.TestCase):

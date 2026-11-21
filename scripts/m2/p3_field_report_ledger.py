@@ -53,6 +53,17 @@ def summarize_ledger(entries, lookups):
             'receipt_status_counts': statuses, 'receipts_not_found': missing, 'receipts_unreadable': unreadable}
 
 
+def latency_summary(entries):
+    """Seconds of the 202 answers (p50, p95, max) and how many reports needed more than one attempt."""
+    seconds = sorted(a['seconds'] for e in entries for a in e['attempts'] if a.get('http') == 202 and 'seconds' in a)
+    retried = sum(1 for e in entries if len(e['attempts']) > 1)
+    if not seconds:
+        return {'answers_202': 0, 'retried_keys': retried}
+    rank = lambda q: seconds[min(len(seconds)-1, int(q*len(seconds)))]
+    return {'answers_202': len(seconds), 'p50_seconds': rank(0.5), 'p95_seconds': rank(0.95),
+            'max_seconds': seconds[-1], 'retried_keys': retried}
+
+
 def checks(summary, db):
     """PASS/FAIL list of the mechanical checks; db is None when the database was not queried."""
     result = [('every acknowledged report has a retrievable receipt',
@@ -133,6 +144,9 @@ def cmd_reconcile(args, cfg, credentials, report):
     report.line(f"ledger {args.ledger}: {summary['keys']} keys, {summary['acknowledged']} acknowledged with 202, "
                 f"{len(summary['never_acknowledged'])} never acknowledged")
     report.line('receipt status as seen by the submitter: '+(json.dumps(summary['receipt_status_counts']) or '{}'))
+    latency = latency_summary(entries)
+    report.line('202 answer latency and retries: '+json.dumps(latency))
+    report.data['latency'] = latency
     if db is not None:
         report.line(f"ingestion database for prefix {meta.get('prefix')}: {db['reports']} reports {json.dumps(db['by_status'])}, "
                     f"{db['results']} processing results, {db['duplicate_results']} receipts with several results")

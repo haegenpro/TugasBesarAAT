@@ -26,7 +26,9 @@ Pick the cluster once with `manage.py init --profile minikube|k3s`; all tools fo
 | `p3_schema_mode.py` | P3-1 | switches the PVMBG mock between `v1`, `compatible` and `breaking` contracts |
 | `p3_schema_behavior.py` | P3-1 | runs every contract and attaches what happened (events added, unprocessed by status) next to the declared policy; no verdict |
 | `p3_ops_access_matrix.py` | P3-5 | HTTP status per identity and Internal Ops endpoint, with a verdict that only Internal Ops gets through |
-| `p3_field_report_ledger.py` | P3-6 | `submit` records every 202 with its Idempotency-Key, `reconcile` checks receipts and database counts |
+| `p3_field_report_ledger.py` | P3-6 | `submit` records every 202 with its Idempotency-Key, `reconcile` checks receipts and database counts and prints the 202 latency (p50, p95, max) |
+| `p3_quarantine_payload.py` | P3-2 | downloads retained original bytes through Internal Ops, recomputes SHA-256 against `X-Content-SHA256`, checks the Audit listing carries no raw field |
+| `p3_replay_flow.py` | P3-4 | `--execute` activates the reader version, replays retained messages, repeats the request (must select nothing), compares Audit counts and duplicates |
 | `p4_province_reference.py` | P4-1, P4-6 | validates and installs the checksum-pinned province reference |
 | `p4_requeue_satellite_updates.py` | P4-3 | one-off migration for updates saved under the earlier retraction rule |
 | `p4_ingestion_progress.py` | P4-2, P4-4, P4-7 (helps P4-8) | received/prepared/applied offsets, lag, watermark, late-data counters over time; no verdict |
