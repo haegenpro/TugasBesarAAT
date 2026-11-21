@@ -40,6 +40,24 @@ class TuningTests(unittest.TestCase):
         self.assertEqual(config('aggregator')['OTEL_TRACES_SAMPLER_ARG'], '0.05')
         self.assertEqual(config('aggregator')['AGGREGATOR_FIELD_DB_CONNS'], '3')
 
+    def test_rolling_workloads_drain_before_stopping_and_stateful_ones_do_not(self):
+        from apps import DRAIN_SECONDS
+        rolled = []
+        for (kind, name), obj in self.objects(self.cfg).items():
+            template = obj['spec']['template'] if kind == 'Deployment' else {}
+            if 'aat.bnpb/runtime-sha256' not in template.get('metadata', {}).get('annotations', {}):
+                continue
+            container = template['spec']['containers'][0]
+            if obj['spec']['strategy']['type'] == 'RollingUpdate':
+                rolled.append(name)
+                self.assertEqual(container['lifecycle']['preStop']['sleep']['seconds'], DRAIN_SECONDS, name)
+                # The drain delay plus the 30 s shutdown budget must fit the grace period.
+                self.assertLessEqual(DRAIN_SECONDS+30, template['spec']['terminationGracePeriodSeconds'], name)
+            else:
+                self.assertNotIn('lifecycle', container, name)
+        self.assertIn('aggregator', rolled)
+        self.assertIn('client-api', rolled)
+
     def test_public_tuning_overrides_legacy_secret_entries(self):
         objects = self.objects(self.cfg)
         legacy = dict(objects[('Secret', 'aggregator-runtime')]['stringData'])

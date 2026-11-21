@@ -3,14 +3,26 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from common import NAMESPACE, ROOT, owned_path, read_config, runtime_secrets
 from render import GROUPS, inventory, render
 
 
 class FoundationTests(unittest.TestCase):
+    def test_minikube_profile_name_is_configurable_for_a_second_checkout(self):
+        import importlib
+        import minikube
+        with patch.dict(os.environ, {'M2_MINIKUBE_PROFILE': 'aat-run'}):
+            importlib.reload(minikube)
+            self.assertEqual(minikube.NAME, 'aat-run')
+            self.assertIn('profiles/aat-run/', str(minikube.PROFILE))
+        importlib.reload(minikube)
+        self.assertEqual(minikube.NAME, 'aat-m2')
+
     def setUp(self):
         self.config = json.loads((ROOT/'deployment/m2/config.example.json').read_text())
         self.directory = tempfile.TemporaryDirectory()

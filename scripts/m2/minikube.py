@@ -6,15 +6,19 @@ import os
 import subprocess
 from common import LOCAL, ROOT, private_json
 
-PROFILE=LOCAL/'minikube/.minikube/profiles/aat-m2/config.json'
+# Docker containers and networks are named after the profile and are shared by every checkout on
+# the host. Another checkout on the same machine must set M2_MINIKUBE_PROFILE to a different name
+# (and use that name as `manage.py init --context`), or it would reuse the first one's containers.
+NAME=os.environ.get('M2_MINIKUBE_PROFILE','aat-m2')
+PROFILE=LOCAL/f'minikube/.minikube/profiles/{NAME}/config.json'
 
 
 def command(env,*args,check=True):
-    return subprocess.run([str(LOCAL/'bin/minikube'),'-p','aat-m2',*args],env=env,check=check)
+    return subprocess.run([str(LOCAL/'bin/minikube'),'-p',NAME,*args],env=env,check=check)
 
 
 def actual_nodes(env):
-    output=subprocess.check_output([str(LOCAL/'bin/kubectl'),'--context','aat-m2',
+    output=subprocess.check_output([str(LOCAL/'bin/kubectl'),'--context',NAME,
                                     'get','nodes','-o','json'],env=env,text=True)
     return json.loads(output)['items']
 
@@ -36,7 +40,7 @@ def reconcile(env):
     cfg=json.loads(path.read_text()) if path.exists() else json.loads((ROOT/'deployment/m2/config.example.json').read_text())
     expected={'a':primary,'b':worker}
     if cfg['nodes']!=expected:
-        deployed=subprocess.run([str(LOCAL/'bin/kubectl'),'--context','aat-m2','get','statefulsets',
+        deployed=subprocess.run([str(LOCAL/'bin/kubectl'),'--context',NAME,'get','statefulsets',
                                 '-n',cfg['namespace'],'-o','name'],env=env,capture_output=True,text=True)
         if deployed.stdout.strip():
             raise ValueError('deployed node names differ; review config and volume affinity before changing them')

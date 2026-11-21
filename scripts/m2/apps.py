@@ -6,6 +6,12 @@ from common import NAMESPACE, ROOT, labels, local_volume, resource, resources
 from render import configmap, image, pod_env, policy, secret, service
 from tuning import application_env
 
+# A terminating pod keeps serving for this long before SIGTERM reaches the process, so
+# Service endpoints stop pointing at it before its listener closes. Without the delay,
+# connections dialed in that window are refused. DRAIN_SECONDS plus the 30 s SHUTDOWN_TIMEOUT
+# must stay below terminationGracePeriodSeconds (40).
+DRAIN_SECONDS = 8
+
 
 def database(credentials,owner,formation='services',name=None):
     password=quote(credentials[owner+'_db'],safe='')
@@ -38,6 +44,10 @@ def workload(cfg,name,role,port,env,replicas=2,component=None,node=None,volume=N
         result+=local_volume(cfg,name,cfg['nodes'][node],1)
         container['volumeMounts']=[{'name':'data','mountPath':volume}]
         pod['volumes']=[{'name':'data','persistentVolumeClaim':{'claimName':name}}]
+    if not volume:
+        # Rolling workloads are replaced while others keep serving: drain before stopping.
+        # The native sleep action needs no sleep binary in the image (Kubernetes 1.30+).
+        container['lifecycle']={'preStop':{'sleep':{'seconds':DRAIN_SECONDS}}}
     strategy={'type':'Recreate'} if volume else {'type':'RollingUpdate','rollingUpdate':{'maxSurge':1,'maxUnavailable':0}}
     result.append(resource('Deployment',name,spec={'replicas':replicas,'strategy':strategy,
         'selector':{'matchLabels':{'app':name}},'template':{'metadata':{'labels':labels(name,role),'annotations':{

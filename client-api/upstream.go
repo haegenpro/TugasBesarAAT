@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -32,6 +34,29 @@ type logger interface {
 }
 
 var errUpstream = errors.New("upstream unavailable")
+
+const retryDelay = 25 * time.Millisecond
+
+// retryableTransportError reports whether an idempotent request without a body failed at
+// the connection level, so repeating it once cannot apply an effect twice. Timeouts and
+// cancellations are never retried: under overload a second attempt only adds load.
+func retryableTransportError(req *http.Request, err error) bool {
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		return false
+	}
+	if req.Body != nil && req.Body != http.NoBody {
+		return false
+	}
+	if req.Context().Err() != nil {
+		return false
+	}
+	var network net.Error
+	if errors.As(err, &network) && network.Timeout() {
+		return false
+	}
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
 
 func (a *api) call(c *gin.Context, service, method, endpoint string, payload any, internal bool, output any) (int, error) {
 	var body io.Reader
@@ -72,6 +97,17 @@ func (a *api) call(c *gin.Context, service, method, endpoint string, payload any
 		client = a.fieldClient
 	}
 	resp, err := client.Do(req)
+	if err != nil && retryableTransportError(req, err) {
+		// The chosen pod stopped listening while Service endpoints were still being
+		// updated. Another attempt is routed to a live endpoint, so the caller does not
+		// see a 503 for a request that was never served.
+		a.log.Warn("outbound request retry", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "error", err.Error())
+		select {
+		case <-time.After(retryDelay):
+		case <-c.Request.Context().Done():
+		}
+		resp, err = client.Do(req)
+	}
 	if err != nil {
 		a.log.Warn("outbound request", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "latency_ms", time.Since(start).Milliseconds(), "success", false, "error", err.Error())
 		return 0, errUpstream
