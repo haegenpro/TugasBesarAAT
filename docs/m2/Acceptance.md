@@ -207,6 +207,96 @@ were retained. The worker-read prototype and other unfinished code changes
 remain outside this findings commit. No further testing is implied by recording
 these results. Private evidence: `reassessment-checkpoint.json`.
 
+### VPN-disconnected throughput rerun (2026-11-21)
+
+At the owner's request, the normal coordinator read path was measured again
+after they confirmed disconnecting the unwanted VPN. The generator's destination
+was `192.168.49.3` over the local Docker bridge; host policy rules used only the
+standard local/main/default tables. A `wg0` interface remained present, but the
+measured route did not traverse it. No code changes, new images or worker-read
+experiments were introduced for this rerun.
+
+The same dedicated 200-VU protocol above used two Client APIs, default limits and
+`m2-20261121-capacity1`. Acquisition/processors were paused for a fixed 191131
+active rows, unchanged before and after both measurements.
+
+| Aggregators | Complete hazard pages/s | Media hazard-read p95 | Field hazard-read p95 |
+| --- | ---: | ---: | ---: |
+| One | 433.3 | 184.0 ms | 203.7 ms |
+| Three | 510.4 | 200.9 ms | 173.2 ms |
+
+The gain was **1.1780x**, close to the earlier default-path **1.1866x** and still
+below 2x. Both runs completed with zero unexpected errors, transport failures,
+partial pages or invalid responses. Controlled rejections were 86.86% and 80.27%
+of all operations respectively; Field unsuccessful outcomes were 0.0315% and
+0.1673%. These are read benchmarks with report submission disabled, not another
+10,000-VU mixed-workload acceptance run. The configured 60-second hold completed;
+REST sampling observed 56.1 and 51.1 seconds continuously at target VUs.
+
+This rerun reproduces the scaling shortfall without the unwanted VPN. It gives
+no evidence that the VPN caused that shortfall, but cannot reconstruct the old
+VPN's routing or isolate its historical effect: the earlier run had fewer rows
+and host conditions can vary. Deployment defaults/replicas were restored after
+measurement, both cluster nodes were stopped with volumes retained, and the
+temporary inotify limit was restored to 128. Private evidence:
+`.m2-local/throughput-vpn-recheck-20261121T105422Z/comparison.json` and the two
+per-run `run.json`, `summary.json` and `generator.log` captures.
+
+Connection-level balancing with reused HTTP connections remains a possible
+contributor, not a confirmed cause. The earlier tuned four-API worker-read run
+showed all three Aggregators busy at about 1.27-1.36 CPU cores during the hold,
+which does not suggest one idle replica in that experiment. CPU is not a request
+distribution measurement, and that configuration differs from the default-path
+rerun. Per-pod request counts/in-flight requests and latency at both Client API
+and Aggregator are needed before attributing the scaling gap to uneven routing.
+
+### Per-pod balancing diagnosis (2026-11-21)
+
+The owner subsequently authorized a measured diagnosis using existing per-pod
+telemetry. All three Aggregators received meaningful hazard traffic, with shares
+of 35.98%, 37.51% and 26.51% in the sampled window. A fixed 192452-row pair measured
+405.7 -> 513.1 complete pages/s, or 1.2649x; unexpected errors, transport failures,
+partial pages and invalid responses were all zero. Instrumentation overhead
+means this pair is not a controlled comparison against earlier runs.
+
+Scaling relieved Aggregator pool waits, while shared database query latency and
+coordinator CPU rose. The local nodes plus generator consumed about 15.2 logical
+CPU equivalents during the three-pod hold. The evidence favors shared work and
+host contention over a broken balancer, without identifying one exclusive cause.
+See [capacity diagnosis](Capacity-Diagnosis.md) for measurements, limitations,
+specification requirements versus optional design choices, and proposed next
+changes. No application optimization was adopted. Normal deployment settings
+were restored, both nodes stopped, data retained and host inotify restored to 128.
+
+### Read-cost implementation trial (2026-11-21)
+
+The owner approved reduced database round trips, owner-side Media summary
+projection and evaluation of worker reads. A stale Secret was found to override
+the configured database pool (actual eight versus intended six); environment
+precedence was fixed and all candidates used the verified six-plus-three budget.
+On the same 196859 fixed active rows, the eight 200-VU runs measured:
+
+| Implementation | One Aggregator: complete pages/s | Three Aggregators: complete pages/s | Gain |
+| --- | ---: | ---: | ---: |
+| Previous images, corrected configuration | 370.8 | 415.7 | 1.1210x |
+| Reduced transaction-startup round trips | 356.2 | 504.6 | 1.4165x |
+| Above plus owner summaries | 471.5 | 567.7 | 1.2040x |
+| Above plus worker reads | 511.5 | 846.7 | 1.6553x |
+
+Worker reads were beneficial, but **same-version scaling still misses 2x**.
+Every measured run had zero unexpected/transport errors and zero invalid/partial
+responses. The dataset stayed fixed, and live scope/raw-field checks passed.
+Focused race suites, 19 infrastructure tests and 20 real-Citus fixture passes
+covered both strategies. See [implementation findings](Capacity-Diagnosis.md)
+for read semantics, connection reservations, response-size reduction and limits.
+
+Seven failed initial warm-up probes after readiness remain recorded separately;
+they are not hidden in the measured success totals. Startup/rolling continuity
+remains unconfirmed. This was not a new 10000-VU mixed-workload acceptance run.
+Coordinator reads remain the default; worker reads are selectable in operator
+configuration. The harness restored the previous images/settings, stopped both
+nodes, retained data and restored host inotify to 128.
+
 ## Live satellite practice trial (2026-11-21)
 
 The owner configured the token privately and approved reuse of the 38-province
