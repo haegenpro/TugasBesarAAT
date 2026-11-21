@@ -239,10 +239,57 @@ func TestM2LiveSatellitePartialUpdatesAndRetainedReplay(t *testing.T) {
 	var state, reason string
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT state,reason FROM raw_inputs WHERE message_id=$1`, patchID).Scan(&state, &reason))
 	require.Equal(t, "applied", state)
-	require.Contains(t, reason, "later retraction")
 	var active bool
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT active FROM wildfire_observations WHERE namespace=$1`, ns).Scan(&active))
 	require.False(t, active)
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT payload FROM wildfire_observations WHERE namespace=$1`, ns).Scan(&payload))
+	require.NoError(t, json.Unmarshal(payload, &ob))
+	require.Equal(t, 8.68, ob.Detection.FRPMW)
+	require.EqualValues(t, 3, ob.LastOffset, "replay must preserve the later retraction frontier")
+}
+
+func TestM2InactiveSatelliteUpdateAfterWorkerRestart(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	ns := "inactive:" + uuid.NewString()
+	_, err := s.Pool.Exec(ctx, `INSERT INTO provinces(namespace,id,payload) VALUES($1,'fixture','{"id":"fixture","name":"Fixture Province","latitude":0,"longitude":0}')`, ns)
+	require.NoError(t, err)
+	events := []satellite.Event{
+		{ID: "0", Type: "detection", Data: []byte(`{"detection":{"satellite":"N21","acq_date":"2026-11-18","acq_time":2359,"latitude":0,"longitude":0,"confidence":"n","frp":2}}`)},
+		{ID: "1", Type: "detection", Data: []byte(`{"detection":{"satellite":"N21","acq_date":"2026-11-18","acq_time":2359,"latitude":0,"longitude":0.001,"confidence":"n","frp":2}}`)},
+		{ID: "2", Type: "retract", Data: []byte(`{"key":"N21|2026-11-18|2359|0|0"}`)},
+		{ID: "3", Type: "update", Data: []byte(`{"key":"N21|2026-11-18|2359|0|0","changes":{"frp":200,"confidence":"h"}}`)},
+		{ID: "4", Type: "update", Data: []byte(`{"key":"N21|2026-11-18|2359|0|0","detection":{"satellite":"N21","acq_date":"2026-11-18","acq_time":2359,"latitude":0,"longitude":0,"confidence":"h","frp":300}}`)},
+	}
+	worker := s
+	for pos, event := range events {
+		if pos == 3 {
+			// A replacement process can acquire the scope after the crashed
+			// incarnation's lease expires. Advance that condition in the fixture.
+			_, err = s.Pool.Exec(ctx, `UPDATE source_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE scope=$1`, "worker:"+ns)
+			require.NoError(t, err)
+			worker, err = New(ctx, s.Pool.Config().ConnString())
+			require.NoError(t, err)
+			defer worker.Pool.Close()
+		}
+		i := Input{ID: uuid.NewString(), Source: "SATELIT", Namespace: ns, Position: int64(pos), Payload: event.Data, Metadata: map[string]any{"event_id": event.ID, "event_type": event.Type}, CorrelationID: event.ID}
+		require.NoError(t, s.Leases.Run(ctx, "acquire:"+ns, func(c context.Context) error { return s.Append(c, i, 0, "raw.satellite") }))
+		require.NoError(t, worker.Leases.Run(ctx, "worker:"+ns, func(c context.Context) error { return worker.prepareFire(c, i, 30*time.Minute) }))
+		require.NoError(t, worker.Leases.Run(ctx, "worker:"+ns, func(c context.Context) error { return worker.prepareFire(c, i, 30*time.Minute) }), "lost-ack retry")
+	}
+	var payload []byte
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT payload FROM wildfire_observations WHERE namespace=$1 AND key='N21|2026-11-18|2359|0|0'`, ns).Scan(&payload))
+	var ob wildfire.Observation
+	require.NoError(t, json.Unmarshal(payload, &ob))
+	require.False(t, ob.Active)
+	require.Equal(t, 300.0, ob.Detection.FRPMW)
+	var activeFires, patchOutputs, parked int
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM wildfire_fires WHERE namespace=$1 AND active`, ns).Scan(&activeFires))
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM canonical_outbox o JOIN raw_inputs i USING(message_id) WHERE i.namespace=$1 AND i.position>=3`, ns).Scan(&patchOutputs))
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM raw_inputs WHERE namespace=$1 AND state='parked'`, ns).Scan(&parked))
+	require.Zero(t, activeFires)
+	require.Zero(t, patchOutputs)
+	require.Zero(t, parked)
 }
 
 type incompleteBody struct{}

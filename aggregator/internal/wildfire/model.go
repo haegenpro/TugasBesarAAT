@@ -111,8 +111,8 @@ func (m *Model) Apply(input Operation) (Result, error) {
 	historyInput := input
 	if partial {
 		old, ok := m.observations[input.TargetKey]
-		if !ok || !old.Active || old.Detection == nil {
-			return fail("unknown_target", "update target is not an active observation")
+		if !ok || old.Detection == nil {
+			return fail("unknown_target", "update target has no retained detection")
 		}
 		merged, e := MergeDetection(*old.Detection, input.Changes)
 		if e != nil {
@@ -139,9 +139,10 @@ func (m *Model) Apply(input Operation) (Result, error) {
 		}
 		if input.Kind == "update" {
 			old, ok := obs[input.TargetKey]
-			if !ok || !old.Active || old.Detection == nil {
-				return fail("unknown_target", "update target is not an active observation")
+			if !ok || old.Detection == nil {
+				return fail("unknown_target", "update target has no retained detection")
 			}
+			o.Active = old.Active
 			if old.Key != o.Key {
 				if existing, ok := obs[o.Key]; ok && existing.Active {
 					return fail("identity_conflict", "replacement key is already active")

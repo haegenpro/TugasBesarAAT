@@ -129,24 +129,10 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 			return e
 		}
 		oldRows[op.TargetKey] = old
+		if op.Kind == "update" && old.Observation.Detection == nil {
+			return parkInput(ctx, tx, i, "update target has no retained detection")
+		}
 		if op.Kind == "update" && len(op.Changes) != 0 {
-			// A retained historical patch cannot revive a later committed
-			// retraction. Keep the original input and explain the no-op.
-			if replayGeneration(i) > 0 && !old.Observation.Active && old.Observation.LastOffset > op.Offset {
-				if _, e = tx.Exec(ctx, `UPDATE raw_inputs SET state='applied',reason='historical update superseded by a later retraction' WHERE message_id=$1`, i.ID); e != nil {
-					return e
-				}
-				if e = releaseEntity(ctx, tx, i); e != nil {
-					return e
-				}
-				if e = frontiers(ctx, tx, i.Source, i.Namespace); e != nil {
-					return e
-				}
-				return tx.Commit(ctx)
-			}
-			if old.Observation.Detection == nil || !old.Observation.Active {
-				return parkInput(ctx, tx, i, "update target is not an active observation")
-			}
 			merged, err := wildfire.MergeDetection(*old.Observation.Detection, op.Changes)
 			if err != nil {
 				return parkInput(ctx, tx, i, err.Error())
@@ -166,6 +152,14 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		if e != nil {
 			return parkInput(ctx, tx, i, e.Error())
 		}
+		if op.Kind == "update" {
+			// Attribute changes do not undo a source retraction. A later
+			// detection event may explicitly introduce the observation again.
+			ob.Active = old.Observation.Active
+			if !ob.Active {
+				ob.LastOffset = max(ob.LastOffset, old.Observation.LastOffset)
+			}
+		}
 		incoming = &ob
 		if e = charge(len(ob.Key)*3 + 2048); e != nil {
 			return e
@@ -182,7 +176,7 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		// Only the changed detection can add edges between old components. Fetch its
 		// indexed candidates, then load their complete existing components once.
 		// Retractions/splits use the old component; no session-wide graph is loaded.
-		if ob.Detection.Confidence != "l" {
+		if ob.Active && ob.Detection.Confidence != "l" {
 			rows, e := tx.Query(ctx, `SELECT payload,fire_id,previous_fire_id FROM wildfire_observations WHERE namespace=$1 AND active AND confidence<>'l' AND latitude BETWEEN $2-.01 AND $2+.01 AND at BETWEEN $3::timestamptz-interval '6 hours' AND $3::timestamptz+interval '6 hours' ORDER BY key LIMIT $4`, i.Namespace, ob.Latitude, *ob.EventTime, maxRows+1)
 			if e != nil {
 				return e
@@ -268,7 +262,7 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 	if incoming != nil {
 		ob := *incoming
 		body, _ := json.Marshal(ob)
-		if _, e = tx.Exec(ctx, `INSERT INTO wildfire_observations(namespace,key,latitude,longitude,at,confidence,active,payload,last_position) VALUES($1,$2,$3,$4,$5,$6,true,$7,$8) ON CONFLICT(namespace,key) DO UPDATE SET latitude=excluded.latitude,longitude=excluded.longitude,at=excluded.at,confidence=excluded.confidence,active=true,payload=excluded.payload,last_position=excluded.last_position`, i.Namespace, ob.Key, ob.Latitude, ob.Longitude, *ob.EventTime, ob.Detection.Confidence, body, op.Offset); e != nil {
+		if _, e = tx.Exec(ctx, `INSERT INTO wildfire_observations(namespace,key,latitude,longitude,at,confidence,active,payload,last_position) VALUES($1,$2,$3,$4,$5,$6,$9,$7,$8) ON CONFLICT(namespace,key) DO UPDATE SET latitude=excluded.latitude,longitude=excluded.longitude,at=excluded.at,confidence=excluded.confidence,active=excluded.active,payload=excluded.payload,last_position=excluded.last_position`, i.Namespace, ob.Key, ob.Latitude, ob.Longitude, *ob.EventTime, ob.Detection.Confidence, body, ob.LastOffset, ob.Active); e != nil {
 			return e
 		}
 		r := oldRows[ob.Key]
