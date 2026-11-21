@@ -24,6 +24,10 @@ DO $$ BEGIN
   PERFORM create_distributed_table('hazard_events','source_ref_id',shard_count:=8);
  END IF;
 END $$;
+-- Isolate distributed index DDL from the surrounding migration statements.
+DO $$ BEGIN
+ EXECUTE 'CREATE INDEX IF NOT EXISTS hazard_events_active_order ON hazard_events(occurred_at DESC,hazard_id DESC) WHERE active';
+END $$;
 INSERT INTO m2_migrations(version) VALUES(1) ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS schema_cache(id integer PRIMARY KEY,schema text NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS failed_ingestion_payloads(payload_id uuid PRIMARY KEY,size bigint NOT NULL DEFAULT 0,sha256 text NOT NULL DEFAULT '',content_type text NOT NULL);
