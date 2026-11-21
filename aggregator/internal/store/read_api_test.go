@@ -88,6 +88,14 @@ func TestReadAPICombinedQueries(t *testing.T) {
 		}
 		require.Equal(t, queries, logs.selects(t, cid), path)
 	}
+	requireAttributes := func(t *testing.T, expected, actual map[string]any) {
+		t.Helper()
+		expectedJSON, err := json.Marshal(expected)
+		require.NoError(t, err)
+		actualJSON, err := json.Marshal(actual)
+		require.NoError(t, err)
+		require.JSONEq(t, string(expectedJSON), string(actualJSON))
+	}
 	type sourceState struct {
 		State      string `json:"state"`
 		StaleSince string `json:"stale_since"`
@@ -146,7 +154,7 @@ func TestReadAPICombinedQueries(t *testing.T) {
 		require.Len(t, response.Data, 2)
 		require.Equal(t, newer.HazardID, response.Data[0].HazardID)
 		require.Equal(t, older.HazardID, response.Data[1].HazardID)
-		require.Equal(t, newer.Attributes, response.Data[0].Attributes)
+		requireAttributes(t, newer.Attributes, response.Data[0].Attributes)
 		require.NotEmpty(t, response.AsOf)
 		m := response.Metadata[newer.HazardID]
 		require.EqualValues(t, 2, m.Revision)
@@ -183,7 +191,7 @@ func TestReadAPICombinedQueries(t *testing.T) {
 		var response listResponse
 		request(t, "/hazards?hazard_type=VOLCANIC&area_name="+area, http.StatusOK, 2, &response)
 		require.Equal(t, volcanic.HazardID, response.Data[0].HazardID)
-		require.Equal(t, volcanic.Attributes, response.Data[0].Attributes)
+		requireAttributes(t, volcanic.Attributes, response.Data[0].Attributes)
 		require.Equal(t, "stale", response.SourceStatus["PVMBG"].State)
 		require.NotEmpty(t, response.SourceStatus["PVMBG"].StaleSince)
 		require.Equal(t, "stale", response.Metadata[volcanic.HazardID].State)
