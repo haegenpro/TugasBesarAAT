@@ -5,6 +5,11 @@ example, `.m2-local/k3s.json` for the real deployment. Pass the latter with
 `--config` on each helper. Ordinary settings become ConfigMaps and credentials
 become owner-specific Secrets; applications do not read operator files directly.
 
+Application containers load their Secret first and ConfigMap second. The
+ConfigMap therefore overrides stale public tuning keys retained in an older
+Secret. Explicit container `env` overrides both sources, so inspect the running
+process when verifying a diagnostic override. Credentials remain in Secrets.
+
 | JSON key | Meaning / default |
 | --- | --- |
 | `version`, `namespace` | Schema version 1; required assignment namespace |

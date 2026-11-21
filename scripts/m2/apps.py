@@ -19,7 +19,9 @@ def workload(cfg,name,role,port,env,replicas=2,component=None,node=None,volume=N
     public={key:value for key,value in env.items() if key not in private}
     result=[secret(name+'-runtime',private),configmap(name+'-config',public)]
     container={'name':name,'image':image(cfg,component or name),'imagePullPolicy':'IfNotPresent',
-               'env':pod_env({}), 'envFrom':[{'configMapRef':{'name':name+'-config'}},{'secretRef':{'name':name+'-runtime'}}],
+               # Legacy Secrets may retain old public tuning keys. ConfigMap
+               # values must win when both sources contain the same key.
+               'env':pod_env({}), 'envFrom':[{'secretRef':{'name':name+'-runtime'}},{'configMapRef':{'name':name+'-config'}}],
                'resources':resources(role),'ports':[{'name':'metrics','containerPort':port}],
                'readinessProbe':{'httpGet':{'path':'/ready','port':port},'periodSeconds':3,'failureThreshold':2},
                'livenessProbe':{'httpGet':{'path':'/health','port':port},'periodSeconds':10,'failureThreshold':6},

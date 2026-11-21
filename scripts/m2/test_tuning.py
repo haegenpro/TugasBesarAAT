@@ -40,6 +40,19 @@ class TuningTests(unittest.TestCase):
         self.assertEqual(config('aggregator')['OTEL_TRACES_SAMPLER_ARG'], '0.05')
         self.assertEqual(config('aggregator')['AGGREGATOR_FIELD_DB_CONNS'], '3')
 
+    def test_public_tuning_overrides_legacy_secret_entries(self):
+        objects = self.objects(self.cfg)
+        legacy = dict(objects[('Secret', 'aggregator-runtime')]['stringData'])
+        legacy['DB_MAX_OPEN_CONNS'] = '8'
+        configured = objects[('ConfigMap', 'aggregator-config')]['data']
+        container = objects[('Deployment', 'aggregator')]['spec']['template']['spec']['containers'][0]
+        effective = {}
+        for source in container['envFrom']:
+            effective.update(legacy if 'secretRef' in source else configured)
+        self.assertEqual(effective['DB_MAX_OPEN_CONNS'], '6')
+        self.assertEqual(effective['DATABASE_URL'], legacy['DATABASE_URL'])
+        self.assertNotIn('DATABASE_URL', configured)
+
     def test_partial_overrides_reach_owners_and_rollout_hashes(self):
         before = self.objects(self.cfg)
         cfg = copy.deepcopy(self.cfg)
