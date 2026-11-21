@@ -52,6 +52,20 @@ func decodeOperation(raw []byte) (wildfire.Operation, error) {
 	return op, err
 }
 
+func TestObservedPracticePartialUpdates(t *testing.T) {
+	for _, changes := range []string{`{"bright_ti5":272.92,"frp":8.68}`, `{"bright_ti4":318.05,"bright_ti5":275.58}`} {
+		raw := []byte(`{"offset":68,"key":"N21|2026-11-18|2359|1.38352|97.58346","changes":` + changes + `}`)
+		n, err := Normalize("practice", Event{ID: "68", Type: "update", Data: raw})
+		require.NoError(t, err)
+		op, err := decodeOperation(n.Operation)
+		require.NoError(t, err)
+		require.Nil(t, op.Detection)
+		require.JSONEq(t, changes, string(op.Changes))
+		require.Equal(t, raw, op.Payload)
+		require.Equal(t, "N21|2026-11-18|2359|1.38352|97.58346", op.TargetKey)
+	}
+}
+
 func TestNormalizedOperationsAreAcceptedByTheWildfireProcessor(t *testing.T) {
 	events := []Event{
 		{ID: "41", Type: "detection", Data: []byte(`{"offset":41,"virtual_now":"2026-11-12T02:51:08Z","satellite":"N20","acq_date":"2026-11-12","acq_time":"0243","latitude":-2.51230,"longitude":113.80440,"confidence":"h","frp":12.5}`)},

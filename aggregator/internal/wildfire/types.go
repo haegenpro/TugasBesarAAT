@@ -92,14 +92,15 @@ func (d *Detection) UnmarshalJSON(raw []byte) error {
 }
 
 type Operation struct {
-	Version    int        `json:"version"`
-	Namespace  string     `json:"namespace"`
-	Offset     int64      `json:"offset"`
-	Kind       string     `json:"kind"`
-	TargetKey  string     `json:"target_key,omitempty"`
-	Detection  *Detection `json:"detection,omitempty"`
-	VirtualNow *time.Time `json:"virtual_now,omitempty"`
-	Payload    []byte     `json:"payload"`
+	Version    int             `json:"version"`
+	Namespace  string          `json:"namespace"`
+	Offset     int64           `json:"offset"`
+	Kind       string          `json:"kind"`
+	TargetKey  string          `json:"target_key,omitempty"`
+	Detection  *Detection      `json:"detection,omitempty"`
+	Changes    json.RawMessage `json:"changes,omitempty"`
+	VirtualNow *time.Time      `json:"virtual_now,omitempty"`
+	Payload    []byte          `json:"payload"`
 }
 type Observation struct {
 	Key        string     `json:"key"`

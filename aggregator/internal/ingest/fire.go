@@ -129,6 +129,30 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 			return e
 		}
 		oldRows[op.TargetKey] = old
+		if op.Kind == "update" && len(op.Changes) != 0 {
+			// A retained historical patch cannot revive a later committed
+			// retraction. Keep the original input and explain the no-op.
+			if replayGeneration(i) > 0 && !old.Observation.Active && old.Observation.LastOffset > op.Offset {
+				if _, e = tx.Exec(ctx, `UPDATE raw_inputs SET state='applied',reason='historical update superseded by a later retraction' WHERE message_id=$1`, i.ID); e != nil {
+					return e
+				}
+				if e = releaseEntity(ctx, tx, i); e != nil {
+					return e
+				}
+				if e = frontiers(ctx, tx, i.Source, i.Namespace); e != nil {
+					return e
+				}
+				return tx.Commit(ctx)
+			}
+			if old.Observation.Detection == nil || !old.Observation.Active {
+				return parkInput(ctx, tx, i, "update target is not an active observation")
+			}
+			merged, err := wildfire.MergeDetection(*old.Observation.Detection, op.Changes)
+			if err != nil {
+				return parkInput(ctx, tx, i, err.Error())
+			}
+			op.Detection = &merged
+		}
 		if old.Fire != nil {
 			groups[*old.Fire] = true
 		}

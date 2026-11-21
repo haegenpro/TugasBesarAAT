@@ -97,13 +97,29 @@ func (m *Model) Apply(input Operation) (Result, error) {
 	if input.Kind != "detection" && input.Kind != "update" && input.Kind != "retract" && input.Kind != "heartbeat" {
 		return fail("invalid_input", "unknown operation kind")
 	}
-	if (input.Kind == "detection" || input.Kind == "update") != (input.Detection != nil) {
+	partial := input.Kind == "update" && input.Detection == nil && len(input.Changes) != 0
+	if len(input.Changes) != 0 && !partial {
+		return fail("invalid_input", "changes requires update without a replacement detection")
+	}
+	if (input.Kind == "detection" || input.Kind == "update") != (input.Detection != nil || partial) {
 		return fail("invalid_input", "detection/update requires a complete detection; other kinds omit it")
 	}
 	if (input.Kind == "update" || input.Kind == "retract") != text(input.TargetKey) {
 		return fail("invalid_input", "update/retract requires target_key; other kinds omit it")
 	}
 	input = clone(input)
+	historyInput := input
+	if partial {
+		old, ok := m.observations[input.TargetKey]
+		if !ok || !old.Active || old.Detection == nil {
+			return fail("unknown_target", "update target is not an active observation")
+		}
+		merged, e := MergeDetection(*old.Detection, input.Changes)
+		if e != nil {
+			return fail("invalid_input", e.Error())
+		}
+		input.Detection = &merged
+	}
 	obs := map[string]Observation{}
 	for k, o := range m.observations {
 		obs[k] = o
@@ -187,7 +203,7 @@ func (m *Model) Apply(input Operation) (Result, error) {
 	if late {
 		m.late++
 	}
-	m.history = append(m.history, input)
+	m.history = append(m.history, historyInput)
 	outcome := "applied"
 	if len(diagnostics) > 0 {
 		outcome = "blocked_output"

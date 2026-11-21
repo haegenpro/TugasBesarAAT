@@ -205,11 +205,18 @@ func Normalize(namespace string, e Event) (Normalized, error) {
 	}
 	switch n.Kind {
 	case "detection", "update":
-		d, err := detection(m)
-		if err != nil {
-			return n, err
+		if changes, ok := m["changes"]; n.Kind == "update" && ok {
+			if _, err := fields(changes); err != nil {
+				return n, unreadable("update changes must be an object")
+			}
+			op["changes"] = changes
+		} else {
+			d, err := detection(m)
+			if err != nil {
+				return n, err
+			}
+			op["detection"] = json.RawMessage(d)
 		}
-		op["detection"] = json.RawMessage(d)
 		if n.Kind == "update" {
 			k, ok := key(m)
 			if !ok {

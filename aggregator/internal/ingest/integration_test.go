@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"aggregator/internal/coastal"
+	"aggregator/internal/satellite"
 	"aggregator/internal/wildfire"
 	"bufio"
 	"bytes"
@@ -190,6 +191,58 @@ func TestM2DurableAffectedRegionMatchesReference(t *testing.T) {
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT singletons,excluded FROM source_progress WHERE source='SATELIT' AND namespace=$1`, ns).Scan(&singletons, &excluded))
 	require.EqualValues(t, model.Snapshot().Singletons, singletons)
 	require.EqualValues(t, model.Snapshot().Excluded, excluded)
+}
+
+func TestM2LiveSatellitePartialUpdatesAndRetainedReplay(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	ns := "patch:" + uuid.NewString()
+	_, err := s.Pool.Exec(ctx, `INSERT INTO provinces(namespace,id,payload) VALUES($1,'fixture','{"id":"fixture","name":"Fixture Province","latitude":0,"longitude":0}')`, ns)
+	require.NoError(t, err)
+	events := []satellite.Event{
+		{ID: "0", Type: "detection", Data: []byte(`{"offset":0,"detection":{"satellite":"N21","acq_date":"2026-11-18","acq_time":2359,"latitude":0,"longitude":0,"confidence":"n","frp":2}}`)},
+		{ID: "1", Type: "update", Data: []byte(`{"offset":1,"key":"N21|2026-11-18|2359|0|0","changes":{"frp":8.68,"bright_ti5":272.92}}`)},
+		{ID: "2", Type: "update", Data: []byte(`{"offset":2,"key":"N21|2026-11-18|2359|0|0","changes":{"bright_ti4":318.05}}`)},
+	}
+	for pos, event := range events {
+		i := Input{ID: uuid.NewString(), Source: "SATELIT", Namespace: ns, Position: int64(pos), Payload: event.Data, Metadata: map[string]any{"event_id": event.ID, "event_type": event.Type}, CorrelationID: event.ID}
+		if pos == 1 {
+			i.Metadata["rejection"] = "unreadable satellite event: detection is missing satellite"
+		}
+		require.NoError(t, s.Leases.Run(ctx, "acquire:"+ns, func(c context.Context) error { return s.Append(c, i, 0, "raw.satellite") }))
+		require.NoError(t, s.Leases.Run(ctx, "worker:"+ns, func(c context.Context) error { return s.prepareFire(c, i, 30*time.Minute) }))
+		var state string
+		require.NoError(t, s.Pool.QueryRow(ctx, `SELECT state FROM raw_inputs WHERE message_id=$1`, i.ID).Scan(&state))
+		require.NotEqual(t, "parked", state)
+	}
+	var payload []byte
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT payload FROM wildfire_observations WHERE namespace=$1`, ns).Scan(&payload))
+	var ob wildfire.Observation
+	require.NoError(t, json.Unmarshal(payload, &ob))
+	require.Equal(t, 8.68, ob.Detection.FRPMW)
+	require.Equal(t, "n", ob.Detection.Confidence)
+	require.Equal(t, "N21|2026-11-18|2359|0|0", ob.Key)
+	require.EqualValues(t, 2, ob.LastOffset)
+	// A patch parked by an older reader may be replayed after the source has
+	// already retracted its target. It must resolve without resurrecting it.
+	var patchID string
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT message_id::text FROM raw_inputs WHERE namespace=$1 AND position=1`, ns).Scan(&patchID))
+	_, err = s.Pool.Exec(ctx, `UPDATE raw_inputs SET state='parked' WHERE message_id=$1`, patchID)
+	require.NoError(t, err)
+	_, err = s.Pool.Exec(ctx, `UPDATE wildfire_observations SET active=false,last_position=3,payload=jsonb_set(jsonb_set(payload,'{active}','false'),'{last_offset}','3') WHERE namespace=$1`, ns)
+	require.NoError(t, err)
+	_, err = s.RequestReplay(ctx, []string{patchID})
+	require.NoError(t, err)
+	retained, err := s.Input(ctx, patchID)
+	require.NoError(t, err)
+	require.NoError(t, s.Leases.Run(ctx, "worker:"+ns, func(c context.Context) error { return s.prepareFire(c, retained, 30*time.Minute) }))
+	var state, reason string
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT state,reason FROM raw_inputs WHERE message_id=$1`, patchID).Scan(&state, &reason))
+	require.Equal(t, "applied", state)
+	require.Contains(t, reason, "later retraction")
+	var active bool
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT active FROM wildfire_observations WHERE namespace=$1`, ns).Scan(&active))
+	require.False(t, active)
 }
 
 type incompleteBody struct{}
