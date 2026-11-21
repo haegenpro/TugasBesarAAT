@@ -97,6 +97,18 @@ Reservations must be positive and below their respective totals. The per-client
 limit cannot exceed Client API capacity. Auth's DB reservation must be below
 `database.services.auth-service.max_open`.
 
+| Key under `http` | Default |
+| --- | --- |
+| `max_connections_per_host`, `max_idle_per_host`, `max_idle_connections` | `8`, `4`, `16`; shared instrumented HTTP clients |
+| `field_max_connections_per_host` | `8`; Client API's separate Field transport |
+
+These are per process and destination host, including connections waiting on
+upstream responses. Idle connections per host must not exceed the connection
+limit. Field transport retains trace propagation. Increasing HTTP concurrency
+can move queues into Auth or database pools and make latency worse; validate
+successful throughput, per-role outcomes, and resource use before adopting it.
+These defaults preserve the earlier deployment values.
+
 | Key under `sources` | Default |
 | --- | --- |
 | `satellite_idle_timeout_ms` | `20000`; resets on received stream bytes |

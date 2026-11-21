@@ -81,6 +81,9 @@ func (a *api) call(c *gin.Context, service, method, endpoint string, payload any
 	var decodeLatency time.Duration
 	var decodeErr error
 	defer func() {
+		// Small unread response bodies (notably Auth 429s) must be consumed so
+		// the transport can reuse its bounded connections under overload.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 32<<10))
 		fields := []any{"service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "status_code", resp.StatusCode,
 			"latency_ms", time.Since(start).Milliseconds(), "headers_latency_ms", headersLatency.Milliseconds(),
 			"decode_latency_ms", decodeLatency.Milliseconds(), "success", resp.StatusCode < 500 && decodeErr == nil}

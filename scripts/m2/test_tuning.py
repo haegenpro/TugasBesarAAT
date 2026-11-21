@@ -50,6 +50,8 @@ class TuningTests(unittest.TestCase):
                            'aggregator_field_read_connections': 2, 'registry_max_open': 3}
         cfg['admission'] = {'client_max_inflight': 48, 'client_field_reserved': 12}
         cfg['sources'] = {'satellite_idle_timeout_ms': 5000, 'coastal_request_timeout_ms': 300}
+        cfg['http'] = {'max_connections_per_host': 32, 'max_idle_per_host': 16,
+                       'max_idle_connections': 64, 'field_max_connections_per_host': 16}
         objects = self.objects(self.load(cfg))
         config = lambda name: objects[('ConfigMap', name+'-config')]['data']
         self.assertEqual(config('ingestion')['DB_STATEMENT_TIMEOUT'], '900ms')
@@ -62,6 +64,8 @@ class TuningTests(unittest.TestCase):
         self.assertEqual(config('client-api')['CLIENT_API_FIELD_RESERVED'], '12')
         self.assertEqual(config('ingestion')['SATELLITE_IDLE_TIMEOUT_MS'], '5000')
         self.assertEqual(config('ingestion')['PANTAI_REQUEST_TIMEOUT_MS'], '300')
+        self.assertEqual(config('client-api')['HTTP_MAX_CONNS_PER_HOST'], '32')
+        self.assertEqual(config('client-api')['FIELD_HTTP_MAX_CONNS_PER_HOST'], '16')
         for name in ('aggregator', 'client-api', 'auth-service', 'ingestion', 'wildfire-processor',
                      'coastal-processor', 'field-report-processor', 'consumer-dashboard', 'consumer-notifier',
                      'bmkg-mock', 'pvmbg-mock'):
@@ -148,6 +152,7 @@ class TuningTests(unittest.TestCase):
             ('ai', {'chat_concurrency': 17}),
             ('ai', {'reasoning_tokens': 4096, 'max_tokens': 4096}),
             ('ai', {'chat_calls_per_day': -1}),
+            ('http', {'max_connections_per_host': 2, 'max_idle_per_host': 4}),
         ]
         for group, override in cases:
             with self.subTest(group=group, override=override):

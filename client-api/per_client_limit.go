@@ -28,6 +28,7 @@ func limitInFlightPerClient(n int, log logger) gin.HandlerFunc {
 		mu.Lock()
 		if active[p.ClientID] >= n {
 			mu.Unlock()
+			platform.Add("admission_per_client_rejected_total", 1)
 			log.Warn("request rejected", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "client_id", p.ClientID, "reason", "max_in_flight_per_client", "limit", n)
 			c.Header("Retry-After", "1")
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": platform.ProblemStatus(http.StatusTooManyRequests, "client concurrency limit reached")})

@@ -39,6 +39,10 @@ DEFAULTS = {
         'application_memory_mib': 192, 'aggregator_memory_mib': 384, 'mock_memory_mib': 96,
         'monitoring_memory_mib': 192, 'grafana_memory_mib': 128, 'go_processors': 2,
     },
+    'http': {
+        'max_connections_per_host': 8, 'max_idle_per_host': 4, 'max_idle_connections': 16,
+        'field_max_connections_per_host': 8,
+    },
     'ai': {
         'summary_calls_per_day': 45, 'chat_calls_per_day': 150,
         'refresh_interval_seconds': 1800, 'min_call_interval_seconds': 120,
@@ -99,6 +103,8 @@ def settings(cfg):
             raise ValueError(f'ai.{key} must be between {low} and {high}')
     if ai['reasoning_tokens'] * 2 > ai['max_tokens']:
         raise ValueError('AI reasoning tokens must leave at least half the token budget for the answer')
+    if result['http']['max_idle_per_host'] > result['http']['max_connections_per_host']:
+        raise ValueError('HTTP idle connections per host must fit within its connection limit')
     return result
 
 
@@ -114,6 +120,9 @@ def application_env(cfg, name):
         'OTEL_BSP_MAX_EXPORT_BATCH_SIZE': str(obs['trace_batch_spans']),
         'OTEL_BSP_EXPORT_TIMEOUT': str(obs['ai_trace_export_timeout_ms'] if name == 'situation-summarizer'
                                        else obs['trace_export_timeout_ms']),
+        'HTTP_MAX_CONNS_PER_HOST': str(tuning['http']['max_connections_per_host']),
+        'HTTP_MAX_IDLE_CONNS_PER_HOST': str(tuning['http']['max_idle_per_host']),
+        'HTTP_MAX_IDLE_CONNS': str(tuning['http']['max_idle_connections']),
     }
     if name in db['services']:
         sql = db['services'][name]
@@ -129,6 +138,7 @@ def application_env(cfg, name):
     if name == 'sensor-pantai':
         return {}
     if name == 'client-api':
+        env['FIELD_HTTP_MAX_CONNS_PER_HOST'] = str(tuning['http']['field_max_connections_per_host'])
         env.update({wire: str(admission[key]) for wire, key in {
             'CLIENT_API_MAX_INFLIGHT': 'client_max_inflight', 'CLIENT_API_MAX_INFLIGHT_PER_CLIENT': 'client_per_client',
             'CLIENT_API_FIELD_RESERVED': 'client_field_reserved', 'CLIENT_API_AUTH_MAX_INFLIGHT': 'client_auth_max_inflight',

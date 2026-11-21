@@ -138,5 +138,11 @@
     "chat_concurrency": 2,
     "max_tokens": 4096,
     "reasoning_tokens": 1024
+  },
+  "http": {
+    "max_connections_per_host": 8,
+    "max_idle_per_host": 4,
+    "max_idle_connections": 16,
+    "field_max_connections_per_host": 8
   }
 }

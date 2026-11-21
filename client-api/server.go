@@ -46,9 +46,13 @@ func (a *api) router() *gin.Engine {
 			a.authSlots = make(chan struct{}, a.cfg.AuthMaxInFlight-a.cfg.AuthFieldReserved)
 			a.fieldAuthSlots = make(chan struct{}, a.cfg.AuthFieldReserved)
 			transport := http.DefaultTransport.(*http.Transport).Clone()
-			transport.MaxConnsPerHost = a.cfg.AuthFieldReserved
-			transport.MaxIdleConnsPerHost = a.cfg.AuthFieldReserved
-			a.fieldClient = &http.Client{Transport: transport, Timeout: 5 * time.Second}
+			connections := platform.Int("FIELD_HTTP_MAX_CONNS_PER_HOST", a.cfg.AuthFieldReserved)
+			if connections < 1 {
+				panic("FIELD_HTTP_MAX_CONNS_PER_HOST must be positive")
+			}
+			transport.MaxConnsPerHost = connections
+			transport.MaxIdleConnsPerHost = connections
+			a.fieldClient = &http.Client{Transport: platform.Transport{Base: transport}, Timeout: 5 * time.Second}
 		}
 	}
 	limited.POST("/auth/login", a.login)
@@ -117,6 +121,7 @@ func limitInFlight(n int, log logger) gin.HandlerFunc {
 			defer func() { <-slots }()
 			c.Next()
 		default:
+			platform.Add("admission_concurrency_rejected_total", 1)
 			log.Warn("request rejected", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "reason", "max_in_flight", "limit", n)
 			c.Header("Retry-After", "1")
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": platform.ProblemStatus(http.StatusTooManyRequests, "server busy")})
@@ -192,6 +197,11 @@ func (a *api) proxyAuth(c *gin.Context, path string, payload any) {
 	}
 	if status == http.StatusNoContent {
 		c.Status(status)
+		return
+	}
+	if status == http.StatusTooManyRequests {
+		c.Header("Retry-After", "1")
+		c.JSON(status, gin.H{"error": platform.ProblemStatus(status, "authentication capacity unavailable")})
 		return
 	}
 	if status != http.StatusOK {

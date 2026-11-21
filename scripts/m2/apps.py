@@ -48,9 +48,7 @@ def workload(cfg,name,role,port,env,replicas=2,component=None,node=None,volume=N
 def applications(cfg,credentials):
     nats='nats://application:'+quote(credentials['nats'],safe='')+'@broker:4222'
     registry='http://schema-registry:8080/apis/ccompat/v7'
-    common={'DB_MAX_IDLE_CONNS':'2',
-        'HTTP_MAX_IDLE_CONNS':'16',
-        'HTTP_MAX_IDLE_CONNS_PER_HOST':'4','HTTP_MAX_CONNS_PER_HOST':'8','MAX_PAYLOAD_BYTES':str(4<<20),
+    common={'DB_MAX_IDLE_CONNS':'2','MAX_PAYLOAD_BYTES':str(4<<20),
         'MAX_JSON_DEPTH':'64','SHUTDOWN_TIMEOUT':'30s','OTEL_EXPORTER_OTLP_ENDPOINT':'http://jaeger:4318',
         'FAILED_INPUT_QUOTA_BYTES':str(cfg['limits']['quarantine_mib']<<20),
         'NATS_URL':nats,'SCHEMA_REGISTRY_URL':registry,
