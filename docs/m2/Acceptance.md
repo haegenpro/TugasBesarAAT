@@ -109,9 +109,10 @@ latency, or official reference comparison has passed. Evidence is private under
 The demo cluster is stopped after evidence capture to bound disk use. Data and
 cursors persist; starting the same profile resumes the token-enabled deployment.
 
-## Retraction rule and deployed Ops replay (2026-11-21)
+## Earlier retraction rule and deployed Ops replay (2026-11-21)
 
-The owner approved treating updates as attribute changes that preserve an inactive
+The earlier rule below is superseded by the reactivation decision recorded next.
+The owner initially approved treating updates as attribute changes that preserve an inactive
 detection's retraction. A later detection event may explicitly restore it.
 Both the fixture oracle and durable worker implement this rule. Race tests and
 replicated-ingestion regressions passed, including patch/full updates after
@@ -147,6 +148,36 @@ remain inactive with updated confidence/FRP. Private evidence is
 remains disabled in the rehearsal deployment to bound storage use; the normal
 private configuration still contains the token. Use normal `manage.py up` to
 restore that configuration.
+
+## Reactivation decision and verified replay (2026-11-21)
+
+The owner approved a valid later update reactivating its retained detection.
+Partial changes merge into the retained attributes. Source offsets order these
+changes: an older detection, update, or retraction cannot undo newer state or
+attributes. Unknown targets remain parked. Low-confidence detections remain
+excluded from grouping even when active, as M2 requires. This supersedes both
+the earlier active-target rejection and the subsequent keep-inactive rule.
+
+The oracle and durable worker implement this behavior. Race tests for wildfire
+and satellite processing and the seven-test ingestion integration suite passed.
+Coverage includes partial/full updates, replacement workers after lease expiry,
+older replay, idempotent delivery, and preserving one fire identity when a fully
+retracted fire returns. The worker now retains the immediate predecessor fire
+before clearing a detection's current membership.
+
+Release `m2-20261121-reactivation1` was deployed and reached application readiness.
+With acquisition disabled, the offline migration selected only the two affected
+retained updates. Internal Ops downloaded their original bytes, checked SHA-256
+against the live probe, and requested their replay. Both reached `applied` with
+active targets. Offset 859 has confidence `l` and no fire membership; offset 1480
+has confidence `n` and belongs to a fire. A read-only migration postcheck found
+zero remaining candidates. No source bytes, offsets, or storage were reset.
+Private evidence is `.m2-local/satellite-reactivation-resolved.json` and
+`.m2-local/reactivation-postcheck.json`.
+
+This bounded correction does not establish full-history reference agreement or
+the 60x catch-up SLO. Acquisition remains disabled in the rehearsal configuration;
+the normal private configuration retains the token for the next normal startup.
 
 ### Remaining acceptance gates
 
