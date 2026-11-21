@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Validate and install a checksum-pinned province reference for one feed session."""
+"""Validate and install a checksum-pinned province reference for one feed session.
+
+Criteria: P4-1, P4-6 (checksum-pinned province reference for area_name).
+"""
 import argparse
 import hashlib
 import json

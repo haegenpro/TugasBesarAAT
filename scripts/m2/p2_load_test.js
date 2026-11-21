@@ -1,3 +1,4 @@
+// Criteria: P2-6 (10,000 VUs, 3 -> 5 -> 2) and P2-8 (rolling image); P5-5 from its Field/Media summary rows.
 // Run against Client API's private NodePort; record any generator/cluster colocation.
 // Secrets are read from a private JSON file, never printed or sent as tags.
 import http from 'k6/http';

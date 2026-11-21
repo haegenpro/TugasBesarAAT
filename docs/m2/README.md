@@ -97,7 +97,7 @@ in command arguments or screenshots. Demo client IDs are `media-demo`,
 `field-demo`, and `internal-demo`, with their corresponding private secrets.
 
 For the controlled incompatible-source and retained-input replay video, follow
-[Replay-Demo.md](Replay-Demo.md). `scripts/m2/mock_schema.py` selects the required
+[Replay-Demo.md](Replay-Demo.md). `scripts/m2/p3_schema_mode.py` selects the required
 PVMBG breaking mode without putting admin credentials in command arguments.
 
 The Client API also has a NodePort for direct access from the VPN/load machine.
@@ -140,8 +140,8 @@ For first installation, use `up` first (with the satellite token blank), then
 those deliberately stopped. Install the verified reference while writers are off:
 
 ```bash
-python3 scripts/m2/reference.py --file /private/provinces.json --sha256 APPROVED_SHA256
-python3 scripts/m2/reference.py --file /private/provinces.json --sha256 APPROVED_SHA256 --execute
+python3 scripts/m2/p4_province_reference.py --file /private/provinces.json --sha256 APPROVED_SHA256
+python3 scripts/m2/p4_province_reference.py --file /private/provinces.json --sha256 APPROVED_SHA256 --execute
 python3 scripts/m2/manage.py up
 ```
 
@@ -169,8 +169,8 @@ For data processed by the earlier keep-inactive update rule, stop writers and
 bring up only the foundation as above, then review the narrow migration:
 
 ```bash
-python3 scripts/m2/requeue_lifecycle_updates.py
-python3 scripts/m2/requeue_lifecycle_updates.py --execute
+python3 scripts/m2/p4_requeue_satellite_updates.py
+python3 scripts/m2/p4_requeue_satellite_updates.py --execute
 python3 scripts/m2/manage.py up
 ```
 
@@ -243,7 +243,7 @@ operator's current kubectl context; the helpers always select the configured one
 ```bash
 python3 -m unittest discover -s scripts/m2 -p 'test_*.py' -v
 python3 scripts/test-services.py --jobs 2
-python3 scripts/m2/verify.py --suite all
+python3 scripts/m2/evidence_integration_tests.py --suite all
 bash -n deployment/m2/bootstrap-node.sh
 ```
 
@@ -252,6 +252,11 @@ port-forwards. They are not destructive node-failure tests. See
 [Acceptance.md](Acceptance.md) for the evidence that must be collected separately:
 physical-host recovery, actual source/reference agreement, clock/freeze behavior,
 60x catch-up, five-second warnings, sustained load/scaling and resource fit.
+
+[Evidence-Runbook.md](Evidence-Runbook.md) maps every criterion to the command that
+produces its evidence and says which verdicts are scripted (`evidence_audit.py`, `p1_placement_load.py`,
+`evidence_outage_probe.py`, `p2_throughput_compare.py`, `p2_load_test.py`, `evidence_tester_agent.py`) and which are manual. Scripts
+follow the profile chosen at `manage.py init --profile minikube|k3s`.
 
 ## Import the course catalog
 
@@ -266,8 +271,8 @@ For example, a synthetic normalized row is:
 ```
 
 ```bash
-python3 scripts/m2/catalog.py --input /private/catalog.jsonl --sha256 VERIFIED_SHA256
-python3 scripts/m2/catalog.py --input /private/catalog.jsonl --sha256 VERIFIED_SHA256 --execute
+python3 scripts/m2/p1_catalog_import.py --input /private/catalog.jsonl --sha256 VERIFIED_SHA256
+python3 scripts/m2/p1_catalog_import.py --input /private/catalog.jsonl --sha256 VERIFIED_SHA256 --execute
 ```
 
 The importer streams bounded batches through the authenticated canonical HTTP
@@ -278,11 +283,11 @@ with the official dataset.
 
 ## Prepare the separate load PC
 
-Install k6 there and transfer `scripts/m2/load.js` plus only the restricted client
+Install k6 there and transfer `scripts/m2/p2_load_test.js` plus only the restricted client
 credential file, not the entire deployment secret set:
 
 ```bash
-python3 scripts/m2/load_credentials.py
+python3 scripts/m2/p2_load_credentials.py
 ```
 
 Keep that output private. Set `M2_CREDENTIALS_FILE` to its absolute path on the
@@ -293,7 +298,7 @@ ulimit -n 65535
 M2_CREDENTIALS_FILE=/private/load-credentials.json \
 M2_BASE_URL=http://NODE_PRIVATE_IP:CLIENT_NODEPORT \
 M2_VUS=10000 M2_HOLD=120s M2_RUN_ID=demo-001 \
-M2_SUMMARY_FILE=load-summary-demo-001.json k6 run scripts/m2/load.js
+M2_SUMMARY_FILE=load-summary-demo-001.json k6 run scripts/m2/p2_load_test.js
 ```
 
 The default mix is 90% Media and 10% Field, with a 60-second ramp, 120-second hold,
@@ -330,7 +335,7 @@ updates use Kubernetes' deployment rollout with a new loaded image tag; do not u
 Capture small before/during/after status evidence in distinct new private directories:
 
 ```bash
-python3 scripts/m2/evidence.py --output .m2-local/evidence-before
+python3 scripts/m2/evidence_snapshot.py --output .m2-local/evidence-before
 ```
 
 This saves revision, actual placement/readiness/restarts, cgroup working sets and

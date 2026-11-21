@@ -12,11 +12,11 @@ A zero runner exit means the k6 thresholds passed; it does not certify every M2
 criterion. Skipped integration cases are not load-test evidence.
 
 ```bash
-python3 scripts/m2/load_run.py --config .m2-local/config.json \
+python3 scripts/m2/p2_load_test.py --config .m2-local/config.json \
   --output .m2-local/load-smoke-new --vus 20 \
   --ramp-seconds 5 --hold-seconds 15
 
-python3 scripts/m2/load_run.py --config .m2-local/config.json \
+python3 scripts/m2/p2_load_test.py --config .m2-local/config.json \
   --output .m2-local/load-10000-new --scale \
   --roll-from aat/aggregator:ACTUAL_PREVIOUS_TAG
 ```

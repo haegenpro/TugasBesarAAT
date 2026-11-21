@@ -9,15 +9,24 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import load_run
+import p2_load_test as load_run
 
 
 class LoadRunnerTests(unittest.TestCase):
     def test_full_load_memory_guard_cleans_the_generator_not_a_processor(self):
+        self.check_memory_guard('minikube')
+
+    def test_k3s_profile_never_inspects_node_containers_through_docker(self):
+        inspected = self.check_memory_guard('k3s')
+        self.assertNotIn('node-a', inspected)
+        self.assertNotIn('node-b', inspected)
+
+    def check_memory_guard(self, profile):
+        inspected = []
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)/'run'
             cfg = {'nodes': {'a': 'node-a', 'b': 'node-b'}, 'image_prefix': 'aat', 'image_tag': 'fixture',
-                   'external': {}, 'coastal': {'profile': 'practice', 'speed': 60}}
+                   'external': {}, 'coastal': {'profile': 'practice', 'speed': 60}, 'profile': profile}
             controllers = [{'metadata': {'name': name}, 'spec': {'replicas': 2,
                 'template': {'spec': {'containers': [{'name': name, 'image': 'fixture', 'env': []}]}}},
                 'status': {'readyReplicas': 2}} for name in
@@ -59,7 +68,9 @@ class LoadRunnerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, '')
 
             def check_output(command, **kwargs):
-                if command[:2] == ['docker', 'inspect']: return '{}'
+                if command[:2] == ['docker', 'inspect']:
+                    inspected.append(command[-1])
+                    return '{}'
                 return '' if kwargs.get('text') else b''
 
             args = Namespace(config='fixture', output=str(output), vus=10000, ramp_seconds=30,
@@ -69,6 +80,7 @@ class LoadRunnerTests(unittest.TestCase):
                 for name, value in {'read_config': lambda _: cfg,
                     'runtime_secrets': lambda _: {'media': 'fixture', 'field': 'fixture'},
                     'kubectl': kube, 'settings': lambda _: {}, 'application_env': lambda *_: {},
+                    'node_usage': lambda _cfg: {},
                     'available_memory': lambda: 128*1024**2,
                     'request_json': lambda *_: {'data': {'attributes': {'sample': {'value': 10000}}}}}.items():
                     stack.enter_context(patch.object(load_run, name, value))
@@ -86,6 +98,8 @@ class LoadRunnerTests(unittest.TestCase):
             self.assertEqual(removals, [process.name])
             self.assertEqual(evidence['generator_container_name'], process.name)
             self.assertEqual(evidence['generator_state']['ExitCode'], 137)
+            self.assertEqual(evidence['profile'], profile)
+            return inspected
 
 
 if __name__ == '__main__':

@@ -3,7 +3,7 @@
 import argparse
 import os
 import subprocess
-from common import LOCAL, NAMESPACE, read_config
+from common import LOCAL, NAMESPACE, kube_env, kubectl_binary, read_config
 
 
 def main():
@@ -17,9 +17,8 @@ def main():
     local = args.port or remote
     if not 1024 <= local <= 65535:
         raise ValueError('choose an unprivileged local port')
-    env = os.environ.copy()
-    if cfg['profile'] == 'minikube': env['KUBECONFIG'] = str(LOCAL/'kubeconfig')
-    binary = str(LOCAL/'bin/kubectl') if (LOCAL/'bin/kubectl').exists() else 'kubectl'
+    env = kube_env(cfg)
+    binary = kubectl_binary()
     print(f'{args.service}: http://127.0.0.1:{local} (Ctrl-C to close)', flush=True)
     subprocess.run([binary, '--context', cfg['context'], '-n', NAMESPACE, 'port-forward',
                     '--address=127.0.0.1', 'service/'+args.service, f'{local}:{remote}'], env=env, check=True)

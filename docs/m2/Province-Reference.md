@@ -17,8 +17,8 @@ under `docs/m2/fixtures/` is synthetic and is not the deployment reference.
 Install this table with writers stopped, as described in the deployment runbook:
 
 ```bash
-python3 scripts/m2/reference.py --file deployment/m2/provinces.json --sha256 a82363d09ff6f8e85d48db143e4e6a99d6be4283769574fd4a802f82f647cf20
-python3 scripts/m2/reference.py --file deployment/m2/provinces.json --sha256 a82363d09ff6f8e85d48db143e4e6a99d6be4283769574fd4a802f82f647cf20 --execute
+python3 scripts/m2/p4_province_reference.py --file deployment/m2/provinces.json --sha256 a82363d09ff6f8e85d48db143e4e6a99d6be4283769574fd4a802f82f647cf20
+python3 scripts/m2/p4_province_reference.py --file deployment/m2/provinces.json --sha256 a82363d09ff6f8e85d48db143e4e6a99d6be4283769574fd4a802f82f647cf20 --execute
 ```
 
 The installer binds the rows to the configured satellite namespace and refuses

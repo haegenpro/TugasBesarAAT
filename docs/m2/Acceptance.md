@@ -16,9 +16,9 @@ artifacts. Retain original acknowledgments and receipts when checking zero loss.
 | --- | --- |
 | Placement, isolation, memory classes, volume ownership/reset guards | `python3 -m unittest discover -s scripts/m2 -p 'test_*.py' -v` |
 | Native service suites | `python3 scripts/test-services.py --race --jobs 2` |
-| Citus commit fences, expired owners, dedup, Audit, retractions, visibility recovery, complete quarantine | `python3 scripts/m2/verify.py --suite canonical` |
-| Field lost response/broker outage, original source offsets, durable wildfire region/reference fixture | `python3 scripts/m2/verify.py --suite ingestion` |
-| Independent Auth/Dashboard/Notifier database schemas | `python3 scripts/m2/verify.py --suite services` |
+| Citus commit fences, expired owners, dedup, Audit, retractions, visibility recovery, complete quarantine | `python3 scripts/m2/evidence_integration_tests.py --suite canonical` |
+| Field lost response/broker outage, original source offsets, durable wildfire region/reference fixture | `python3 scripts/m2/evidence_integration_tests.py --suite ingestion` |
+| Independent Auth/Dashboard/Notifier database schemas | `python3 scripts/m2/evidence_integration_tests.py --suite services` |
 | Bounded feed resume probe | `aggregator/cmd/satellite-probe`; practice token exercised as recorded below |
 | Synthetic wildfire oracle | `aggregator/cmd/wildfire-reference replay`, fixture configuration and JSONL |
 
@@ -35,7 +35,7 @@ two-host Ubuntu/K3s deployment. The private snapshots are under `.m2-local/`.
 - `manage.py up` completed after fixing the passive Fluent Bit drain check and
   versioning the broker initializer Job by both source and image tag. All
   application, database and broker controllers reached Ready.
-- `verify.py --suite all` passed after deployment and again after each recovery.
+- `evidence_integration_tests.py --suite all` passed after deployment and again after each recovery.
   The dedicated broker phase supplied the real NATS URL and passed the JetStream
   fetch, DLQ and warning-delivery checks. Generic package runs that lacked that
   variable reported those particular tests as skipped; those skips are not being

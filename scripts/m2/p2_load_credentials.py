@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Write only demo client credentials for the separate load-generator PC."""
+"""Write only demo client credentials for the separate load-generator PC.
+
+Criteria: P2-6 (client credentials for the separate load-generator PC).
+"""
 import argparse
 from pathlib import Path
 from common import LOCAL, private_json, runtime_secrets

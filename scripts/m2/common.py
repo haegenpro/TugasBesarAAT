@@ -92,11 +92,44 @@ def runtime_secrets(path: Path) -> dict:
     return data
 
 
-def kubectl(config: dict, *args: str, input_text: str | None = None, timeout: int = 120) -> str:
-    binary = str(LOCAL / 'bin/kubectl') if (LOCAL / 'bin/kubectl').exists() else 'kubectl'
+def is_minikube(config: dict) -> bool:
+    """The profile written by `manage.py init --profile` selects Minikube-only behaviour."""
+    return config.get('profile') == 'minikube'
+
+
+def kubectl_binary() -> str:
+    """Prefer the private pinned binary; fall back to the host's kubectl (k3s hosts)."""
+    return str(LOCAL / 'bin/kubectl') if (LOCAL / 'bin/kubectl').exists() else 'kubectl'
+
+
+def kube_env(config: dict) -> dict:
+    """Environment for kubectl; only Minikube uses the private kubeconfig."""
     env = os.environ.copy()
-    if (LOCAL / 'kubeconfig').exists() and config['profile'] == 'minikube':
+    if is_minikube(config) and (LOCAL / 'kubeconfig').exists():
         env['KUBECONFIG'] = str(LOCAL / 'kubeconfig')
+    return env
+
+
+def node_usage(config: dict) -> dict:
+    """Kubelet CPU/memory summary per configured node; works on Minikube and k3s."""
+    usage = {}
+    for node in config['nodes'].values():
+        try:
+            summary = json.loads(kubectl(config, 'get', '--raw', f'/api/v1/nodes/{node}/proxy/stats/summary', timeout=30))
+        except (RuntimeError, ValueError, subprocess.TimeoutExpired):
+            usage[node] = None
+            continue
+        stats = summary.get('node', {})
+        usage[node] = {'cpu_usage_nano_cores': stats.get('cpu', {}).get('usageNanoCores'),
+                       'memory_working_set_bytes': stats.get('memory', {}).get('workingSetBytes'),
+                       'memory_available_bytes': stats.get('memory', {}).get('availableBytes'),
+                       'fs_available_bytes': stats.get('fs', {}).get('availableBytes')}
+    return usage
+
+
+def kubectl(config: dict, *args: str, input_text: str | None = None, timeout: int = 120) -> str:
+    binary = kubectl_binary()
+    env = kube_env(config)
     command = [binary, '--context', config['context'], *args]
     result = subprocess.run(command, input=input_text, text=True, capture_output=True, env=env, timeout=timeout)
     if result.returncode:

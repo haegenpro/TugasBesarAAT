@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Select the PVMBG source contract for a controlled P3 demonstration."""
+"""Select the PVMBG source contract for a controlled P3 demonstration.
+
+Criteria: P3-1 (incompatible PVMBG contract); prerequisite for P3-2 and P3-4.
+"""
 import argparse
 import json
 import urllib.error
 import urllib.request
 
 from common import LOCAL, read_config, runtime_secrets
-from verify import forward
+from evidence_integration_tests import forward
 
 
 def main():

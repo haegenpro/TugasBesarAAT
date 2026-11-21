@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Capture a small private status/Audit/resource snapshot without Secret manifests."""
+"""Capture a small private status/Audit/resource snapshot without Secret manifests.
+
+Criteria: Platform (topology, requests/limits, role labels) and P1-4 (checksum before/after).
+"""
 import argparse
 import datetime
 import json
@@ -7,7 +10,7 @@ from pathlib import Path
 import subprocess
 import urllib.request
 from common import APPLICATION, LABEL, LOCAL, NAMESPACE, kubectl, private_json, read_config, runtime_secrets
-from verify import forward
+from evidence_integration_tests import forward
 
 
 def collect(cfg):

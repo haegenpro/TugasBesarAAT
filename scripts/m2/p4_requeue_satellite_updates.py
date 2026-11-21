@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Plan reprocessing of inactive satellite updates saved under the previous rule."""
+"""Plan reprocessing of inactive satellite updates saved under the previous rule.
+
+Criteria: P4-3 (updates/retractions after the earlier retraction rule); one-off migration.
+"""
 import argparse
 import json
 

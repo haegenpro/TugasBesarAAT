@@ -5,7 +5,7 @@ import os
 import subprocess
 import shutil
 
-from common import LOCAL, ROOT, read_config
+from common import LOCAL, ROOT, is_minikube, read_config
 from render import image, render
 from common import runtime_secrets
 
@@ -36,7 +36,8 @@ def build(cfg, component):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default=str(LOCAL/'config.json'))
-    parser.add_argument('command', choices=('build', 'load-minikube', 'export'))
+    parser.add_argument('command', choices=('build', 'load-minikube', 'export', 'import-k3s'),
+                        help='load-minikube is for the minikube profile; run import-k3s on each k3s node')
     parser.add_argument('--component', action='append', choices=COMPONENTS)
     parser.add_argument('--output', default=str(LOCAL/'images.tar'))
     parser.add_argument('--include-runtime', action='store_true',
@@ -76,7 +77,22 @@ def main():
             digest = hashlib.file_digest(archive, 'sha256').hexdigest()
         path.with_suffix(path.suffix+'.sha256').write_text(digest+'  '+path.name+'\n')
         print('Exported image archive and SHA-256 checksum. Import the same archive on A and B.')
+    elif args.command == 'import-k3s':
+        # Run on every k3s node (A and B) with the exported, checksum-verified archive.
+        import hashlib
+        from pathlib import Path
+        path = Path(args.output)
+        recorded = path.with_suffix(path.suffix+'.sha256')
+        if recorded.exists():
+            with path.open('rb') as archive:
+                digest = hashlib.file_digest(archive, 'sha256').hexdigest()
+            if digest != recorded.read_text().split()[0]:
+                raise ValueError('image archive does not match its recorded SHA-256')
+        subprocess.run(['k3s', 'ctr', 'images', 'import', str(path)], check=True)
+        print('Imported the archive into this node\'s k3s containerd; repeat on the other node.')
     elif args.command == 'load-minikube':
+        if not is_minikube(cfg):
+            raise ValueError('load-minikube requires the minikube profile; use import-k3s on k3s nodes')
         for tag in tags:
             require_space(args.min_free_gib)
             subprocess.run(['docker','image','inspect',tag],stdout=subprocess.DEVNULL,check=True)

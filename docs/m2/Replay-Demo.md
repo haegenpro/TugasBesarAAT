@@ -19,7 +19,7 @@ by adapting the reader and reprocessing the original retained bytes.
 2. From another terminal, run:
 
    ```bash
-   python3 scripts/m2/mock_schema.py breaking
+   python3 scripts/m2/p3_schema_mode.py breaking
    ```
 
    The source renames `alert_level` to `level`, changes `eruption_count_24h` from
@@ -37,7 +37,7 @@ by adapting the reader and reprocessing the original retained bytes.
 6. Restore the source contract:
 
    ```bash
-   python3 scripts/m2/mock_schema.py v1
+   python3 scripts/m2/p3_schema_mode.py v1
    ```
 
    Leave reader 2 active until all broken-writer input is resolved. Reader 2 also

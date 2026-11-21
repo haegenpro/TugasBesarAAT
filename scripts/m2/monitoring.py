@@ -47,7 +47,18 @@ def monitoring(cfg,credentials):
         ('Admission rejections','sum by(service) (rate(app_admission_role_capacity_rejected_total[1m]))'),
         ('Canonical lag (pending outbox)','app_outbox_pending'),
         ('Coastal warning p95 (seconds)','app_coastal_slo_p95_delivered_seconds'),
-        ('Error budget remaining (1% / demo)','clamp_min(1 - service:error_ratio5m / 0.01, 0)')]
+        ('Error budget remaining (1% / demo)','clamp_min(1 - service:error_ratio5m / 0.01, 0)'),
+        # Failure-explanation panels (P3-3, P4-4, P5-4, P5-7). Every metric below is emitted by the applications.
+        ('Satellite received position (original feed offset)','max by(service) (app_satellite_received_position)'),
+        ('Satellite reconnects','sum by(service) (app_satellite_reconnects_total)'),
+        ('Canonical apply p95 (seconds)','histogram_quantile(0.95, sum by(service,le) (rate(app_canonical_apply_seconds_bucket[5m])))'),
+        ('Coastal breaker state (0 closed, 1 half-open, 2 open)','{__name__=~"app_coastal_.+_breaker_state"}'),
+        ('Coastal fetch failures and short-circuits','{__name__=~"app_coastal_(fetch_failures|.+_short_circuited)_total"}'),
+        ('Coastal request p95 (seconds)','histogram_quantile(0.95, sum by(le) (rate({__name__=~"app_coastal_.+_request_seconds_bucket"}[5m])))'),
+        ('Failed inputs recorded (ingestion failures)','sum by(service) (app_ingestion_failures_total)'),
+        ('Legacy replay backlog','max by(service) (app_replay_backlog)'),
+        ('Database connections in use','sum by(service) (app_db_connections_in_use)'),
+        ('Database pool waits (cumulative)','sum by(service) (app_db_pool_wait_total)')]
     for i,(title,expr) in enumerate(expressions):panels.append({'id':i+1,'type':'timeseries','title':title,'datasource':{'type':'prometheus','uid':'prometheus'},'gridPos':{'x':(i%2)*12,'y':(i//2)*8,'w':12,'h':8},'targets':[{'expr':expr,'legendFormat':'{{service}}'}]})
     dashboard={'uid':'m2-operations','title':'M2 operations','schemaVersion':39,'version':1,'refresh':'15s','time':{'from':'now-30m','to':'now'},'panels':panels}
     result += [configmap(name+'-config',content) for name,content in files.items()]

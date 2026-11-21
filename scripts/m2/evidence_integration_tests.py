@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Run isolated database integration suites through owned local port forwards."""
+"""Run isolated database integration suites through owned local port forwards.
+
+Criteria: supporting evidence for P1-3, P1-4, P3-3, P3-4, P4-3, P5-1 (integration tests on synthetic data; not a pass by themselves).
+"""
 import argparse
 from contextlib import contextmanager, ExitStack
 import json
@@ -8,7 +11,7 @@ import socket
 import subprocess
 import time
 from urllib.parse import quote
-from common import LOCAL, NAMESPACE, ROOT, read_config, runtime_secrets
+from common import LOCAL, NAMESPACE, ROOT, kube_env, kubectl_binary, read_config, runtime_secrets
 from tuning import settings
 
 
@@ -17,9 +20,8 @@ def forward(cfg,service,remote_port=5432):
     target=service if '/' in service else 'service/'+service
     with socket.socket() as probe:
         probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
-    env=os.environ.copy()
-    if cfg['profile']=='minikube':env['KUBECONFIG']=str(LOCAL/'kubeconfig')
-    process=subprocess.Popen([str(LOCAL/'bin/kubectl'),'--context',cfg['context'],'-n',NAMESPACE,
+    env=kube_env(cfg)
+    process=subprocess.Popen([kubectl_binary(),'--context',cfg['context'],'-n',NAMESPACE,
         'port-forward','--address=127.0.0.1',target,f'{port}:{remote_port}'],env=env,
         stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     try:

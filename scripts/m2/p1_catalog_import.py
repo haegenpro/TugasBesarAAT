@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Checksum-verified JSONL catalog import through the canonical HTTP owner."""
+"""Checksum-verified JSONL catalog import through the canonical HTTP owner.
+
+Criteria: P1-1 (load the historical earthquake catalog through the canonical owner).
+"""
 import argparse
 import hashlib
 import json
@@ -8,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from common import LOCAL, read_config, runtime_secrets
-from verify import forward
+from evidence_integration_tests import forward
 
 
 def records(path):
