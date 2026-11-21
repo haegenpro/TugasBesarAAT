@@ -134,7 +134,11 @@ def application_env(cfg, name):
     if name == 'aggregator':
         env['AGGREGATOR_FIELD_DB_CONNS'] = str(db['aggregator_field_read_connections'])
     if name == 'schema-registry':
-        return {'QUARKUS_DATASOURCE_JDBC_MAX_SIZE': str(db['registry_max_open'])}
+        # Apicurio 3 configures a named PostgreSQL datasource through its own
+        # properties; the unnamed Quarkus pool settings do not constrain it.
+        return {'APICURIO_DATASOURCE_JDBC_MAX_SIZE': str(db['registry_max_open']),
+                'APICURIO_DATASOURCE_JDBC_INITIAL_SIZE': '0',
+                'APICURIO_DATASOURCE_JDBC_MIN_SIZE': '0'}
     if name == 'sensor-pantai':
         return {}
     if name == 'client-api':

@@ -85,6 +85,15 @@ preserving effective behavior while honoring overrides. Its lock timeout keeps
 the owning PostgreSQL formation's existing two-second default. Account for all
 replicas, Field reservations, and Citus connections when increasing pool sizes.
 
+The registry pool uses `APICURIO_DATASOURCE_JDBC_MAX_SIZE`, with initial/minimum
+sizes zero. Apicurio 3.3.3 maps these settings to its named PostgreSQL datasource;
+unnamed `QUARKUS_DATASOURCE_JDBC_*` settings did not constrain that pool. The
+[versioned upstream configuration](https://github.com/Apicurio/apicurio-registry/blob/3.3.3/app/src/main/resources/application.properties)
+explains the mapping. A local runtime check after this correction returned 200
+for all 240 concurrent-burst reads and observed four registry database sessions,
+versus twenty before the correction. This verifies the configured connection
+budget; it is not a demonstrated fix for the load-test scaling shortfall.
+
 | Key under `admission` | Default |
 | --- | --- |
 | `client_max_inflight`, `client_per_client` | `64`, `16` |

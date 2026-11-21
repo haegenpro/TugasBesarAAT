@@ -101,8 +101,7 @@ def applications(cfg,credentials):
         'APICURIO_DATASOURCE_URL':'jdbc:postgresql://services-db:5432/registry','APICURIO_DATASOURCE_USERNAME':'registry_app',
         'APICURIO_DATASOURCE_PASSWORD':credentials['registry_db'],'REGISTRY_RETRY_DELAY_SEC':'5',
         'QUARKUS_HTTP_PORT':'8080','QUARKUS_MANAGEMENT_PORT':'9000',
-        'JAVA_OPTS_APPEND':'-Xms32m -Xmx96m -XX:MaxMetaspaceSize=96m -XX:ReservedCodeCacheSize=16m -XX:MaxDirectMemorySize=8m -Xss256k -XX:ActiveProcessorCount=2',
-        'QUARKUS_DATASOURCE_JDBC_MIN_SIZE':'0'}
+        'JAVA_OPTS_APPEND':'-Xms32m -Xmx96m -XX:MaxMetaspaceSize=96m -XX:ReservedCodeCacheSize=16m -XX:MaxDirectMemorySize=8m -Xss256k -XX:ActiveProcessorCount=2'}
     registry_objects=workload(cfg,'schema-registry','other',8080,registry_env,1,node='a')
     registry_template=next(o for o in registry_objects if o['kind']=='Deployment')['spec']['template']
     registry_template['metadata']['annotations']['prometheus.io/port']='9000'
