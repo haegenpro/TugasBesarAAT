@@ -251,3 +251,99 @@ measurement, the harness restored the previous deployment images, three
 Aggregators, two Client APIs and source settings; it then stopped both nodes,
 retained data and restored inotify to 128. New code and configuration do not
 constitute a permanent promotion of the candidate images or a full M2 pass.
+
+## Mixed 10000-VU coordinator versus worker comparison
+
+At the owner's request, both read strategies were subsequently measured using
+the **same** `readcost1` Aggregator and Client API images, summary optimization,
+two Client APIs, general/Field database budget 6/3 and unchanged admission/HTTP
+limits. Worker mode reserved two general worker connections and one Field worker
+connection from those budgets. Both used the pinned generator image with
+2 CPU / 4 GiB limits, a 30-second ramp, 135-second hold, 15-second ramp-down,
+one-second think time, 10% Field VUs and a report every ten Field iterations.
+Both requested and observed **3 -> 5 -> 2** Aggregators; no image rollout occurred
+during either measured run.
+
+BMKG/PVMBG polling, coastal acquisition and the three processors remained active;
+satellite acquisition stayed disabled in the bounded profile. These were
+sequential runs with evolving data, not the earlier fixed-data comparison:
+coordinator active rows grew 199074 -> 199975, and worker rows 200097 -> 200825.
+
+| Outcome | Coordinator | Workers |
+| --- | ---: | ---: |
+| Complete hazard pages/s, whole run | **178.5** | **156.2** |
+| Complete pages | 32392 | 28360 |
+| Explicit partial pages | 2285 | 3225 |
+| Partial share of HTTP-successful hazard reads | 6.59% | 10.21% |
+| Invalid hazard responses | 0 | 0 |
+| Controlled 429s / all operations | 88.32% | 89.38% |
+| Unexpected errors, excluding controlled rejections from denominator | 5 / 0.0072% | 13 / 0.0196% |
+| Transport failures, included in unexpected errors | 2 | 0 |
+| Successful Media hazard-read p95 | 2.428 s | 2.535 s |
+| Successful Field hazard-read p95 | 2.293 s | 2.540 s |
+| Unsuccessful Field operations, including controlled rejection | 68.46% | 73.10% |
+| Accepted Field reports | 5229 | 5048 |
+| Successful Field report-submission p95 | 2.421 s | 2.457 s |
+
+Successful read latencies include explicitly partial 200 responses; the capture
+does not provide complete-page-only latency percentiles.
+
+Workers delivered **12.5% less complete-read throughput** in this pair, despite
+the earlier fixed-data 200-VU improvement. The coordinator's unexpected outcomes
+were three 401s and two transport failures; worker mode had three 401s and ten
+503s. Neither run had invalid hazard bodies. Explicitly partial answers are
+reported separately rather than counted as complete useful throughput.
+
+The unsuccessful Field rate covers login, refresh, reads and report submissions;
+it is not a Field-read-only percentage. For more detail, coordinator Field read
+outcomes included 10029 successes and 25568 controlled rejections; workers had
+8363 successes and 26003 controlled rejections. Field report attempts included
+5229 accepted / 13376 rejected versus 5048 accepted / 17279 rejected. Neither
+result establishes Field protection during overload merely because the overall
+unexpected-error threshold passed.
+
+Existing cached counters over a 45-second window ending 115 seconds after each
+runner started showed about 111410 versus 117201 frontend authentication-capacity
+rejections and 21845 versus 35102 per-client rejections. Aggregator empty-pool
+acquisition increments were about 1044 versus 3319; Auth increments about
+17775 versus 18608. These are scrape-based counts, not measured wait durations.
+They support investigating authentication/admission and reduced coordinator/Field
+pool capacity under mixed activity, rather than assuming faster worker queries
+must improve the whole request path. They do not prove a sole bottleneck.
+
+The generator averaged about 1.969 / 1.957 CPU cores while 10000 VUs were observed,
+near its two-core cap. Node A+B CPU averages were about 11.15 / 9.60 cores.
+Neither run showed sampled restart increments or OOM kills; neither host-memory
+guard triggered. Grafana reached about 255.6 MiB of its 256 MiB limit. The shared
+host, saturated generator, differing connection distributions and evolving
+source state limit causal attribution from this single sequential pair.
+
+Both runners exited zero and completed their configured stages. Coordinator VU
+sampling continuously observed the target for 126.1 seconds. Worker first-to-last
+target observations spanned 123.8 seconds, but an observation gap reduced the
+longest continuous sampled span to 82.1 seconds. The worker capture therefore
+does not independently demonstrate an uninterrupted sampled 120-second interval.
+No one-versus-three or image-rollout acceptance claim follows from these runs.
+A failed initial coordinator warm-up probe is retained separately from k6 results.
+
+Keep coordinator reads as the default for this mixed-load setup. Worker reads
+remain selectable and beneficial in the earlier fixed-data comparison; this
+10k result does not support making them the universal default. No application
+code or tuning changed between the measured strategies.
+
+Private evidence is `.m2-local/read-strategy-10000-20261121T120643Z/`, including
+`comparison.json`, each strategy's `run.json`, `summary.json`, `generator.log`,
+resource snapshots and `cached-counters.json`. The harness restored original
+images, replicas and strategy overrides, stopped both nodes, retained data and
+restored the temporary host inotify limit to 128.
+
+Post-run cleanup exposed a harness bug: the full-load processor-check loop
+reused the generator's `name` variable. Docker had launched the correct k6
+container, but final inspection/removal and a hypothetical low-memory stop used
+the last processor name. Neither memory guard triggered in these captures, so
+the workload/results are unaffected. The loop now uses a separate variable;
+a regression test forces low memory at 10000 VUs and verifies stopping,
+inspecting and removing the actual generator. All 20 infrastructure tests pass.
+Both retained generator states were then inspected (exit 0, not OOM-killed) and
+only those stopped containers were removed. The original captures retain this
+as a separate `post_run_cleanup` entry rather than replacing missing metadata.

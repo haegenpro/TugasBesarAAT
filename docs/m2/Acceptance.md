@@ -297,6 +297,39 @@ Coordinator reads remain the default; worker reads are selectable in operator
 configuration. The harness restored the previous images/settings, stopped both
 nodes, retained data and restored host inotify to 128.
 
+### Mixed 10000-VU read-strategy comparison (2026-11-21)
+
+Both strategies used the same readcost1 images, default admission/HTTP settings,
+verified 6+3 database budget, two Client APIs, active BMKG/PVMBG/coastal acquisition
+and processors, and the same 30-second ramp / 135-second hold / 15-second down
+profile with 3 -> 5 -> 2 scaling. Satellite stayed disabled; no image rollout was
+requested. Data grew during each sequential run.
+
+| Outcome | Coordinator | Workers |
+| --- | ---: | ---: |
+| Complete hazard pages/s | 178.5 | 156.2 |
+| Explicit partial pages | 2285 | 3225 |
+| Controlled rejections / all operations | 88.32% | 89.38% |
+| Unexpected-error rate, controlled outcomes excluded | 0.0072% | 0.0196% |
+| Successful Field hazard-read p95 | 2.293 s | 2.540 s |
+| Unsuccessful Field operations, including controlled rejection | 68.46% | 73.10% |
+| Accepted Field reports | 5229 | 5048 |
+
+Workers were 12.5% lower in complete-read throughput in this comparison. Both
+passed the runner's unexpected-error threshold, but these results do not
+establish Field overload protection or complete normal responses. There were no
+invalid responses, sampled OOM kills or restart increments. The colocated
+generator was near its two-core limit in both runs.
+
+Both configured holds completed and replica counts converged to 3, 5 and 2.
+Target-VU observation spans were 126.1 seconds continuously for coordinator and
+123.8 seconds first-to-last for workers; a worker observation gap left only 82.1
+seconds continuously sampled. This is not a full acceptance pass or evidence
+for same-version 2x scaling or failure-free image rollout. See the
+[full comparison and limitations](Capacity-Diagnosis.md). Coordinator remains
+the default. Original deployment settings were restored, both nodes stopped,
+data retained and host inotify restored to 128.
+
 ## Live satellite practice trial (2026-11-21)
 
 The owner configured the token privately and approved reuse of the 38-province
