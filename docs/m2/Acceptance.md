@@ -26,6 +26,50 @@ A skipped integration test is not a pass. Preserve the actual command output and
 check that required database/broker settings were present. The normal unit suite
 does not run destructive VM scenarios.
 
+## Latest local Minikube rehearsal (2026-11-21)
+
+Environment: two-node Docker Minikube profile `aat-m2`, Kubernetes v1.35.0,
+image tag `m2-20261121-acceptance`. This is a local rehearsal, not the planned
+two-host Ubuntu/K3s deployment. The private snapshots are under `.m2-local/`.
+
+- `manage.py up` completed after fixing the passive Fluent Bit drain check and
+  versioning the broker initializer Job by both source and image tag. All
+  application, database and broker controllers reached Ready.
+- `verify.py --suite all` passed after deployment and again after each recovery.
+  The dedicated broker phase supplied the real NATS URL and passed the JetStream
+  fetch, DLQ and warning-delivery checks. Generic package runs that lacked that
+  variable reported those particular tests as skipped; those skips are not being
+  counted as passes.
+- Aggregators scaled 3 -> 5 -> 2 -> 3. All five were Ready with zero restarts,
+  and the normal three replicas were restored. This checked readiness and
+  placement only; no request load was applied during the scale sequence.
+- With B stopped, the guardian promoted canonical group 2 on A and selected the
+  A-only write policy. Audit returned a complete result with no unavailable
+  units. Isolated Citus dedup/fencing writes, ingestion tests, and real NATS
+  broker tests passed during the outage. Restarting B restored readiness and the
+  post-recovery integration suite passed.
+- The first B rejoin had a kube-proxy `too many open files` exit and B-side
+  networking stalled. A clean Minikube profile restart restored it. A second
+  B stop/start did not reproduce the file-descriptor error; Calico and
+  kube-proxy restarted and all workloads became Ready without another profile
+  restart. The transient Minikube issue has no code-level fix or physical-host
+  reproduction yet.
+- In a post-recovery snapshot while mock ingestion was still active, Docker node
+  containers used about 3.48/6 GiB on A and 1.19/2.15 GiB on B. Per-pod working
+  sets were about 222 MiB for Grafana
+  (256 MiB limit), 49 MiB Prometheus, 41 MiB Loki, 17 MiB Jaeger, and 6 MiB per
+  Fluent Bit pod. The Grafana figure leaves little margin. Minikube's Metrics API
+  was unavailable, so these values came from the node/container and kubelet
+  cgroup snapshots, not `kubectl top`.
+
+The local PC had no `k6` binary, and the separate generator PC was not connected
+to this run. Therefore the 10,000-VU/120-second run, 1-vs-3 throughput target,
+request-continuity/rolling test, and all performance thresholds remain pending.
+The outage was a Minikube node stop/start, not a physical host power loss, and
+the <=60-second takeover target was not timed. Synthetic input continued during
+the run, so Audit counts/checksums changed; these snapshots do not establish a
+strict before/after zero-loss comparison of acknowledged source records.
+
 ## P1: partitioning and recovery
 
 - Import the authoritative earthquake catalog through the canonical service owner;
