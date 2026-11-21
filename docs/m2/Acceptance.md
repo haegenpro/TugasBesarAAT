@@ -140,11 +140,13 @@ the check did not erase them or claim the whole failures list was empty. Their
 resolution/status presentation needs review. Browser assets and the UI's API
 endpoints were exercised; an actual browser-click/video rehearsal is not recorded.
 
-The two old satellite inputs were requested through the Client API after the fix,
-but still await replay behind the retained raw-stream backlog. Completion of those
-two live replays is not claimed. New satellite acquisition remains disabled in
-the rehearsal deployment to bound storage use; the normal private configuration
-still contains the token. Use normal `manage.py up` to restore that configuration.
+The two old satellite inputs were requested through the Client API after the fix
+and both completed. Offsets 859 and 1480 now have state `applied`; their targets
+remain inactive with updated confidence/FRP. Private evidence is
+`.m2-local/satellite-inactive-replay-resolved.json`. New satellite acquisition
+remains disabled in the rehearsal deployment to bound storage use; the normal
+private configuration still contains the token. Use normal `manage.py up` to
+restore that configuration.
 
 ### Remaining acceptance gates
 
@@ -155,7 +157,7 @@ still contains the token. Use normal `manage.py up` to restore that configuratio
 | P2 ownership | SIGSTOP/unfreeze, clock skew, <=60-second takeover and upstream overlap evidence during actual failure/scaling |
 | P2 load | 10,000 VUs for >=120 seconds with 3 -> 5 -> 2, <1% unexpected errors, 3-vs-1 >=2x throughput, M1 latency target, and rolling requests without failures |
 | P3 full rehearsal | Browser recording, broader live malformed-input/oversize cases, retry-history state cleanup, Field-pod crash after 202 with acknowledged-report reconciliation |
-| P4 satellite | The two queued historical replays; full clean interrupted/uninterrupted comparison; official reference/province agreement; 60x catch-up <=60 seconds and processing p95 |
+| P4 satellite | Full clean interrupted/uninterrupted comparison; official reference/province agreement; 60x catch-up <=60 seconds and processing p95 |
 | P5 coastal | Live independent endpoint failures, stale reads, critical delivery with canonical storage blocked, complete receipt reconciliation and <=5-second p95 |
 | P5 priority | Media overload while Field login and report submission continue through reserved capacity |
 | Observability/resources | Browser metrics/logs/traces incident walkthrough and resource caps under sustained load, rollout and recovery |
