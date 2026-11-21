@@ -96,7 +96,7 @@ func analyticsTestServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 				w.WriteHeader(401)
 				return
 			}
-			io.WriteString(w, `{"client_id":"fixture-client","role":"media","scope":"hazards:summary"}`)
+			io.WriteString(w, `{"client_id":"fixture-client","role":"internal","scope":"hazards:raw"}`)
 			return
 		}
 		if r.URL.Path == "/internal/logout" {

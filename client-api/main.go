@@ -30,6 +30,7 @@ type config struct {
 	IngestionURL         string
 	FieldReportToken     string
 	SituationURL         string
+	OpsToken             string
 }
 
 func loadConfig() (config, error) {
@@ -54,6 +55,12 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 	cfg := config{Port: v["CLIENT_API_PORT"], AuthURL: v["AUTH_BASE_URL"], AggregatorURL: v["AGGREGATOR_BASE_URL"], AuthInternalKey: v["AUTH_INTERNAL_KEY"], MaxInFlight: maxInFlight, MaxInFlightPerClient: perClient}
+	if token := os.Getenv("OPS_SERVICE_TOKEN"); token != "" {
+		if len(token) < 32 || token == cfg.AuthInternalKey {
+			return config{}, fmt.Errorf("distinct OPS_SERVICE_TOKEN of at least 32 bytes required")
+		}
+		cfg.OpsToken = token
+	}
 	if key := os.Getenv("FIELD_READ_TOKEN"); key != "" {
 		if len(key) < 32 || key == cfg.AuthInternalKey {
 			return config{}, fmt.Errorf("distinct FIELD_READ_TOKEN of at least 32 bytes required")

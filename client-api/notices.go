@@ -156,10 +156,12 @@ type recordMetadata struct {
 	AssessmentState string `json:"assessment_state"`
 }
 type aggregatorDetail struct {
-	Data         hazard                  `json:"data"`
-	SourceStatus map[string]sourceStatus `json:"source_status"`
-	Metadata     recordMetadata          `json:"metadata"`
-	AsOf         string                  `json:"as_of"`
+	Partial          bool                    `json:"partial"`
+	UnavailableUnits []string                `json:"unavailable_units"`
+	Data             hazard                  `json:"data"`
+	SourceStatus     map[string]sourceStatus `json:"source_status"`
+	Metadata         recordMetadata          `json:"metadata"`
+	AsOf             string                  `json:"as_of"`
 }
 
 // Accept the earlier internal bare-object response during a rolling upgrade.
@@ -173,6 +175,22 @@ func (d *aggregatorDetail) UnmarshalJSON(b []byte) error {
 			return err
 		}
 		d.SourceStatus = map[string]sourceStatus{d.Data.Source: detailStatus(d.Data)}
+		return nil
+	}
+	var partial bool
+	_ = json.Unmarshal(fields["partial"], &partial)
+	if partial && string(fields["data"]) == "null" {
+		var v struct {
+			Unavailable []string `json:"unavailable_units"`
+			AsOf        string   `json:"as_of"`
+		}
+		if err := json.Unmarshal(b, &v); err != nil {
+			return err
+		}
+		if len(v.Unavailable) == 0 || v.AsOf == "" {
+			return fmt.Errorf("incomplete partial detail metadata")
+		}
+		*d = aggregatorDetail{Partial: true, UnavailableUnits: v.Unavailable, AsOf: v.AsOf, SourceStatus: map[string]sourceStatus{}}
 		return nil
 	}
 	if err := requireJSONFields(b, "data", "source_status", "metadata", "as_of"); err != nil {

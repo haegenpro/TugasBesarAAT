@@ -34,6 +34,10 @@ func (a *api) router() *gin.Engine {
 		r.GET("/analytics", a.analyticsAsset)
 		r.GET("/analytics/assets/:file", a.analyticsAsset)
 	}
+	if a.cfg.OpsToken != "" {
+		r.GET("/ops", a.opsAsset)
+		r.GET("/ops/assets/:file", a.opsAsset)
+	}
 	limited := r.Group("/", limitInFlight(a.cfg.MaxInFlight, a.log))
 	if a.cfg.PriorityEnabled {
 		limited = r.Group("/", limitInFlight(a.cfg.AuthMaxInFlight, a.log))
@@ -65,6 +69,15 @@ func (a *api) router() *gin.Engine {
 	protected.GET("/notices/:id", a.getNotice)
 	if a.cfg.AnalyticsEnabled {
 		protected.GET("/analytics/summary", a.analyticsSummary)
+	}
+	if a.cfg.OpsToken != "" {
+		ops := protected.Group("/ops/api", internalOps)
+		ops.GET("/failures", a.opsFailures)
+		ops.GET("/payload/:id", a.opsPayload)
+		ops.POST("/replays", a.opsReplays)
+		ops.GET("/schema-policy", a.opsPolicy)
+		ops.PUT("/schema-policy", a.opsPolicy)
+		ops.GET("/progress", a.opsProgress)
 	}
 	if a.cfg.SituationURL != "" {
 		ai := protected.Group("/situation", limitInFlight(2, a.log))
@@ -327,6 +340,10 @@ func (a *api) getHazard(c *gin.Context) {
 		return
 	}
 	item := detail.Data
+	if detail.Partial {
+		c.JSON(200, gin.H{"data": nil, "partial": true, "unavailable_units": detail.UnavailableUnits, "source_status": detail.SourceStatus, "as_of": detail.AsOf})
+		return
+	}
 	metadata := detail.SourceStatus
 	if view == "summary" {
 		c.JSON(http.StatusOK, gin.H{"data": item.summary(), "source_status": metadata, "metadata": detail.Metadata, "as_of": detail.AsOf})

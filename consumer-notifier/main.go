@@ -252,6 +252,7 @@ type app struct {
 	events  Events
 	*haltController
 	lifecycle  *app
+	warnings   *warningRecipient
 	cfg        config
 	db         *sql.DB
 	schemas    *schemaClient
@@ -562,6 +563,9 @@ func (a *app) router() http.Handler {
 		if a.lifecycle != nil {
 			ready = ready && a.lifecycle.ready.Load() && !a.lifecycle.halted.Load() && time.Now().UnixNano() >= a.lifecycle.pauseUntil.Load()
 		}
+		if a.warnings != nil {
+			ready = ready && a.warnings.ready.Load()
+		}
 		body := map[string]any{"ready": ready, "halted": halted}
 		if halted {
 			body["reason"] = reason
@@ -587,6 +591,9 @@ func (a *app) router() http.Handler {
 
 		writeJSON(w, map[string]any{"data": items, "count": len(items)})
 	})
+	if a.warnings != nil {
+		a.warnings.routes(mux)
+	}
 	return platform.Handler("consumer-"+a.cfg.Role, a.httpRequestLog(mux))
 }
 
@@ -635,6 +642,14 @@ func main() {
 	lifecycleCfg.Durable = cfg.Durable + "-lifecycle"
 	lifecycleCfg.DLQSubject = cfg.DLQSubject + ".lifecycle"
 	a.lifecycle = &app{haltController: a.haltController, cfg: lifecycleCfg, db: db, schemas: a.schemas}
+	warningCfg, warningsEnabled, err := loadWarningConfig(cfg)
+	if err != nil {
+		slog.Error("invalid warning configuration", "error", err)
+		os.Exit(1)
+	}
+	if warningsEnabled {
+		a.warnings = &warningRecipient{cfg: warningCfg, db: db, schemas: a.schemas}
+	}
 	closeAdmin, err := a.startLocalAdmin(ctx)
 	if err != nil {
 		slog.Error("local administration unavailable", "error", err)
@@ -644,6 +659,10 @@ func main() {
 	var workers sync.WaitGroup
 	workers.Add(1)
 	go func() { defer workers.Done(); a.collectMetrics(ctx) }()
+	if a.warnings != nil && platform.Bool("WARNING_SLO_METRICS_ENABLED", false) {
+		workers.Add(1)
+		go func() { defer workers.Done(); a.warnings.collectSLOMetrics(ctx) }()
+	}
 	count := platform.Int("CONSUMER_WORKERS", 1)
 	if count < 1 {
 		panic("CONSUMER_WORKERS must be positive")
@@ -652,6 +671,10 @@ func main() {
 		workers.Add(2)
 		go func() { defer workers.Done(); a.lifecycle.run(ctx) }()
 		go func() { defer workers.Done(); a.run(ctx) }()
+	}
+	if a.warnings != nil {
+		workers.Add(1)
+		go func() { defer workers.Done(); a.warnings.run(ctx) }()
 	}
 	defer func() { stop(); workers.Wait() }()
 	if err := a.serve(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {

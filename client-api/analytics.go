@@ -74,8 +74,8 @@ func (a *api) analyticsAsset(c *gin.Context) {
 }
 func (a *api) analyticsSummary(c *gin.Context) {
 	p := c.MustGet("principal").(principal)
-	if !hasScope(p.Scope, "hazards:summary") && !hasScope(p.Scope, "hazards:raw") {
-		c.JSON(403, gin.H{"error": gin.H{"code": "forbidden", "message": "hazard scope required"}})
+	if p.Role != "internal" {
+		c.JSON(403, gin.H{"error": gin.H{"code": "forbidden", "message": "Internal Ops role required"}})
 		return
 	}
 	for k, v := range c.Request.URL.Query() {
@@ -84,7 +84,7 @@ func (a *api) analyticsSummary(c *gin.Context) {
 			return
 		}
 		switch k {
-		case "from", "to", "interval", "source", "snapshot_id":
+		case "from", "to", "interval", "source":
 		default:
 			c.JSON(400, gin.H{"error": gin.H{"code": "bad_request", "message": "unknown filter"}})
 			return
