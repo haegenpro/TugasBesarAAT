@@ -142,7 +142,8 @@ func (m *Model) Apply(input Operation) (Result, error) {
 			if !ok || old.Detection == nil {
 				return fail("unknown_target", "update target has no retained detection")
 			}
-			o.Active = old.Active
+			// The later source update restores participation. Low confidence
+			// remains excluded by the graph, independently of active state.
 			if old.Key != o.Key {
 				if existing, ok := obs[o.Key]; ok && existing.Active {
 					return fail("identity_conflict", "replacement key is already active")

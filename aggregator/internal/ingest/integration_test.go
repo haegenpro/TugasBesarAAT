@@ -229,7 +229,7 @@ func TestM2LiveSatellitePartialUpdatesAndRetainedReplay(t *testing.T) {
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT message_id::text FROM raw_inputs WHERE namespace=$1 AND position=1`, ns).Scan(&patchID))
 	_, err = s.Pool.Exec(ctx, `UPDATE raw_inputs SET state='parked' WHERE message_id=$1`, patchID)
 	require.NoError(t, err)
-	_, err = s.Pool.Exec(ctx, `UPDATE wildfire_observations SET active=false,last_position=3,payload=jsonb_set(jsonb_set(payload,'{active}','false'),'{last_offset}','3') WHERE namespace=$1`, ns)
+	_, err = s.Pool.Exec(ctx, `UPDATE wildfire_observations SET active=false,last_position=3,payload=jsonb_set(jsonb_set(jsonb_set(payload,'{active}','false'),'{last_offset}','3'),'{detection,frp_mw}','99') WHERE namespace=$1`, ns)
 	require.NoError(t, err)
 	_, err = s.RequestReplay(ctx, []string{patchID})
 	require.NoError(t, err)
@@ -244,11 +244,11 @@ func TestM2LiveSatellitePartialUpdatesAndRetainedReplay(t *testing.T) {
 	require.False(t, active)
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT payload FROM wildfire_observations WHERE namespace=$1`, ns).Scan(&payload))
 	require.NoError(t, json.Unmarshal(payload, &ob))
-	require.Equal(t, 8.68, ob.Detection.FRPMW)
+	require.Equal(t, 99.0, ob.Detection.FRPMW, "stale replay must not overwrite newer retained attributes")
 	require.EqualValues(t, 3, ob.LastOffset, "replay must preserve the later retraction frontier")
 }
 
-func TestM2InactiveSatelliteUpdateAfterWorkerRestart(t *testing.T) {
+func TestM2SatelliteUpdateReactivatesAfterWorkerRestart(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	ns := "inactive:" + uuid.NewString()
@@ -281,14 +281,16 @@ func TestM2InactiveSatelliteUpdateAfterWorkerRestart(t *testing.T) {
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT payload FROM wildfire_observations WHERE namespace=$1 AND key='N21|2026-11-18|2359|0|0'`, ns).Scan(&payload))
 	var ob wildfire.Observation
 	require.NoError(t, json.Unmarshal(payload, &ob))
-	require.False(t, ob.Active)
+	require.True(t, ob.Active)
 	require.Equal(t, 300.0, ob.Detection.FRPMW)
-	var activeFires, patchOutputs, parked int
+	var activeFires, patchOutputs, parked, totalFires int
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM wildfire_fires WHERE namespace=$1 AND active`, ns).Scan(&activeFires))
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM canonical_outbox o JOIN raw_inputs i USING(message_id) WHERE i.namespace=$1 AND i.position>=3`, ns).Scan(&patchOutputs))
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM raw_inputs WHERE namespace=$1 AND state='parked'`, ns).Scan(&parked))
-	require.Zero(t, activeFires)
-	require.Zero(t, patchOutputs)
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM wildfire_fires WHERE namespace=$1`, ns).Scan(&totalFires))
+	require.Equal(t, 1, activeFires)
+	require.Equal(t, 1, totalFires, "reactivation must retain the original wildfire identity")
+	require.Equal(t, 2, patchOutputs)
 	require.Zero(t, parked)
 }
 

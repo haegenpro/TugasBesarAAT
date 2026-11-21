@@ -33,6 +33,20 @@ func readObservation(row pgx.Row) (observationRow, error) {
 	}
 	return out, e
 }
+
+func finishSupersededFire(ctx context.Context, tx pgx.Tx, i Input) error {
+	if _, err := tx.Exec(ctx, `UPDATE raw_inputs SET state='applied',reason='superseded by a newer source offset' WHERE message_id=$1`, i.ID); err != nil {
+		return err
+	}
+	if err := releaseEntity(ctx, tx, i); err != nil {
+		return err
+	}
+	if err := frontiers(ctx, tx, i.Source, i.Namespace); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration) error {
 	tx, e := s.Pool.Begin(ctx)
 	if e != nil {
@@ -128,6 +142,9 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		if e != nil {
 			return e
 		}
+		if op.Offset < old.Observation.LastOffset {
+			return finishSupersededFire(ctx, tx, i)
+		}
 		oldRows[op.TargetKey] = old
 		if op.Kind == "update" && old.Observation.Detection == nil {
 			return parkInput(ctx, tx, i, "update target has no retained detection")
@@ -152,20 +169,20 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		if e != nil {
 			return parkInput(ctx, tx, i, e.Error())
 		}
-		if op.Kind == "update" {
-			// Attribute changes do not undo a source retraction. A later
-			// detection event may explicitly introduce the observation again.
-			ob.Active = old.Observation.Active
-			if !ob.Active {
-				ob.LastOffset = max(ob.LastOffset, old.Observation.LastOffset)
-			}
-		}
+		// A valid detection or update asserts active state at its source
+		// offset. Acquisition time remains the grouping clock.
 		incoming = &ob
 		if e = charge(len(ob.Key)*3 + 2048); e != nil {
 			return e
 		}
 		existing, e := load(ob.Key)
 		if e == nil {
+			if op.Offset < existing.Observation.LastOffset {
+				return finishSupersededFire(ctx, tx, i)
+			}
+			if op.Kind == "update" && ob.Key != op.TargetKey && existing.Observation.Active {
+				return parkInput(ctx, tx, i, "replacement key is already active")
+			}
 			oldRows[ob.Key] = existing
 			if existing.Fire != nil {
 				groups[*existing.Fire] = true
@@ -332,7 +349,7 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		keys = append(keys, k)
 	}
 	if len(keys) > 0 {
-		if _, e = tx.Exec(ctx, `UPDATE wildfire_observations SET fire_id=NULL WHERE namespace=$1 AND key=ANY($2)`, i.Namespace, keys); e != nil {
+		if _, e = tx.Exec(ctx, `UPDATE wildfire_observations SET previous_fire_id=COALESCE(fire_id,previous_fire_id),fire_id=NULL WHERE namespace=$1 AND key=ANY($2)`, i.Namespace, keys); e != nil {
 			return e
 		}
 	}

@@ -156,6 +156,27 @@ go run ./cmd/satellite-probe --namespace SOURCE_SESSION --token-file /private/sa
   --from 0 --records 32 --duration 45s --output ../.m2-local/probe-001
 ```
 
+Satellite detections and valid updates reactivate a retained detection at their
+source offset. Retractions make it inactive; older replays cannot override a
+newer lifecycle change or its attributes. Low-confidence detections remain
+excluded from grouping, even while active. Updates without a retained base are
+parked. Restoration of the same logical fire preserves its event identity.
+
+For data processed by the earlier keep-inactive update rule, stop writers and
+bring up only the foundation as above, then review the narrow migration:
+
+```bash
+python3 scripts/m2/requeue_lifecycle_updates.py
+python3 scripts/m2/requeue_lifecycle_updates.py --execute
+python3 scripts/m2/manage.py up
+```
+
+The default is read-only. Execution requires stopped writers and marks only
+already-applied satellite updates whose latest retained target is inactive for
+review. It preserves original input bytes, IDs and source offsets. After starting
+the corrected workers, select those parked inputs in Internal Ops and replay them.
+This migration does not clear history or replace a full reference comparison.
+
 ## Normal shutdown and restart
 
 ```bash

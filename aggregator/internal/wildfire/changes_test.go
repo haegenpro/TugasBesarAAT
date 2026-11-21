@@ -30,21 +30,23 @@ func TestPartialUpdatePreservesIdentityAndHistory(t *testing.T) {
 	}
 }
 
-func TestUpdatesPreserveRetractionAndExplicitDetectionRestores(t *testing.T) {
+func TestLaterUpdatesReactivateAndOlderReplaysCannotUndoRetraction(t *testing.T) {
 	m := newModel(t)
 	a, b := detection("0.000", "0000"), detection("0.001", "0001")
 	apply(t, m, operation(1, a))
 	apply(t, m, operation(2, b))
 	require.Len(t, active(m), 1)
+	originalID := active(m)[0].ID
 	apply(t, m, Operation{Version: 1, Namespace: config().Namespace, Offset: 3, Kind: "retract", TargetKey: key(a)})
 	require.Empty(t, active(m))
 	op := Operation{Version: 1, Namespace: config().Namespace, Offset: 4, Kind: "update", TargetKey: key(a), Changes: json.RawMessage(`{"frp":200,"confidence":"h"}`)}
 	r := apply(t, m, op)
-	require.Nil(t, r.Batch, "an inactive detection must not recreate a wildfire")
-	require.Empty(t, active(m))
+	require.NotNil(t, r.Batch)
+	require.Len(t, active(m), 1)
+	require.Equal(t, originalID, active(m)[0].ID, "restore the original logical wildfire")
 	for _, ob := range m.Snapshot().Observations {
 		if ob.Key == key(a) {
-			require.False(t, ob.Active)
+			require.True(t, ob.Active)
 			require.Equal(t, 200.0, ob.Detection.FRPMW)
 		}
 	}
@@ -53,12 +55,29 @@ func TestUpdatesPreserveRetractionAndExplicitDetectionRestores(t *testing.T) {
 	replacement := a
 	replacement.FRPMW = 300
 	apply(t, m, Operation{Version: 1, Namespace: config().Namespace, Offset: 5, Kind: "update", TargetKey: key(a), Detection: &replacement})
-	require.Empty(t, active(m))
+	require.Len(t, active(m), 1)
+	require.Equal(t, originalID, active(m)[0].ID)
+	apply(t, m, Operation{Version: 1, Namespace: config().Namespace, Offset: 6, Kind: "retract", TargetKey: key(a)})
+	closed := m.Snapshot()
+	_, err = m.Apply(op)
+	require.NoError(t, err)
+	require.Equal(t, closed, m.Snapshot(), "an older update replay must not undo a later retraction")
+	_, err = m.Apply(operation(1, a))
+	require.NoError(t, err)
+	require.Equal(t, closed, m.Snapshot(), "an older detection replay must not restore the target either")
+	_, err = m.Apply(Operation{Version: 1, Namespace: config().Namespace, Offset: 7, Kind: "update", TargetKey: "unknown", Changes: json.RawMessage(`{"frp":2}`)})
+	require.Error(t, err)
+	apply(t, m, Operation{Version: 1, Namespace: config().Namespace, Offset: 7, Kind: "update", TargetKey: key(a), Changes: json.RawMessage(`{"confidence":"l"}`)})
+	require.Empty(t, active(m), "low confidence stays excluded after reactivation")
+	apply(t, m, Operation{Version: 1, Namespace: config().Namespace, Offset: 8, Kind: "update", TargetKey: key(a), Changes: json.RawMessage(`{"confidence":"h"}`)})
+	require.Equal(t, originalID, active(m)[0].ID)
+	current := m.Snapshot()
+	_, err = m.Apply(Operation{Version: 1, Namespace: config().Namespace, Offset: 3, Kind: "retract", TargetKey: key(a)})
+	require.NoError(t, err)
+	require.Equal(t, current, m.Snapshot(), "an older retraction cannot undo a later restoration")
 	restored := newModel(t)
 	for _, retained := range m.Snapshot().History {
 		apply(t, restored, retained)
 	}
 	require.Equal(t, m.Snapshot(), restored.Snapshot())
-	apply(t, m, operation(6, a))
-	require.Len(t, active(m), 1)
 }
