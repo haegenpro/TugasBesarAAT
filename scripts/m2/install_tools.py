@@ -19,7 +19,7 @@ def download(url: str) -> bytes:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kubectl-version', default='v1.35.0')
-    parser.add_argument('--minikube-version', default='v1.38.1')
+    parser.add_argument('--minikube-version', default='v1.39.0')
     args = parser.parse_args()
     arch = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(platform.machine())
     if platform.system() != 'Linux' or arch is None:

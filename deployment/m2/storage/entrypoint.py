@@ -36,14 +36,21 @@ def configuration(env: dict) -> dict:
         'max_connections': 64 if formation != 'services' else 80,
         'max_prepared_transactions': 128, 'max_wal_senders': 8, 'max_replication_slots': 8,
         'wal_level': 'logical', 'wal_log_hints': 'on', 'fsync': 'on',
-        'full_page_writes': 'on', 'synchronous_commit': 'on', 'max_slot_wal_keep_size': '512MB',
+        'full_page_writes': 'on', 'synchronous_commit': 'on',
+        'tcp_keepalives_idle': 2, 'tcp_keepalives_interval': 1, 'tcp_keepalives_count': 3,
+        'wal_sender_timeout': '5s', 'wal_receiver_timeout': '5s', 'max_slot_wal_keep_size': '512MB',
         'max_wal_size': '256MB', 'min_wal_size': '80MB', 'password_encryption': 'scram-sha-256',
         'idle_in_transaction_session_timeout': '10s', 'statement_timeout': '5s', 'lock_timeout': '2s',
     }
     if group >= 0:
-        parameters.update({'citus.shard_count': 8, 'citus.recover_2pc_interval': 1000})
+        parameters.update({'citus.shard_count': 8, 'citus.recover_2pc_interval': 1000,
+                           'citus.node_conninfo': 'connect_timeout=1',
+                           'citus.max_adaptive_executor_pool_size': 1})
     conf = {
         'scope': formation, 'name': name,
+        # B cannot independently become the coordinator or ingestion authority.
+        # Worker 2 normally leads on B; coordinator access still depends on A.
+        'tags': {'nofailover': env.get('PREFERRED_NODE') == 'b' and group != 2},
         'kubernetes': {'namespace': env['POD_NAMESPACE'], 'use_endpoints': False,
                        'scope_label': 'cluster-name', 'role_label': 'database-role',
                        'labels': {'app.kubernetes.io/part-of': 'aat-m2', 'cluster-name': formation},

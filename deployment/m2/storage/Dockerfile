@@ -5,5 +5,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
 COPY deployment/m2/storage/requirements.txt /tmp/patroni-requirements.txt
 RUN /opt/patroni/bin/pip install --no-cache-dir -r /tmp/patroni-requirements.txt
 COPY deployment/m2/storage/entrypoint.py /opt/m2/entrypoint.py
+COPY deployment/m2/storage/guardian.py /opt/m2/guardian.py
 USER postgres
 ENTRYPOINT ["/opt/patroni/bin/python", "/opt/m2/entrypoint.py"]

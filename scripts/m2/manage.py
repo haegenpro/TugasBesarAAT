@@ -71,6 +71,8 @@ def stop(cfg: dict) -> None:
 
 
 def start(cfg: dict) -> None:
+    if (LOCAL/'reset-pending.json').exists():
+        raise ValueError('application data was reset; use up to initialize schemas before starting writers')
     path = LOCAL/'stopped.json'
     state = json.loads(path.read_text())
     if state['context'] != cfg['context'] or state['digest'] != config_digest(cfg):
@@ -79,6 +81,71 @@ def start(cfg: dict) -> None:
         kubectl(cfg, '-n', NAMESPACE, 'scale', obj['kind']+'/'+obj['name'], '--replicas='+str(obj['replicas']))
     path.unlink()
     print('Original application replica counts restored; inspect readiness with status.')
+
+
+def initialize(cfg: dict) -> None:
+    validate_nodes(cfg)
+    pods = json.loads(kubectl(cfg, '-n', NAMESPACE, 'get', 'pods', '-l',
+                             'role=store,database-role=primary', '-o', 'json'))['items']
+    if len(pods) != 5:
+        raise ValueError('wait for all five PostgreSQL groups to elect primaries')
+    script = (ROOT/'deployment/m2/storage/initialize.py').read_text()
+    for pod in pods:
+        name = pod['metadata']['name']
+        kubectl(cfg, '-n', NAMESPACE, 'exec', '-i', name, '-c', 'postgres', '--',
+                '/opt/patroni/bin/python', '-', input_text=script)
+        print(f'Initialized runtime roles on {name}.')
+
+
+def migrate(cfg: dict) -> None:
+    from lifecycle import require_offline
+    require_offline(cfg)
+    pods = json.loads(kubectl(cfg, '-n', NAMESPACE, 'get', 'pods', '-l',
+                             'formation=canonical,citus-group=0,database-role=primary', '-o', 'json'))['items']
+    if len(pods) != 1:
+        raise ValueError('canonical coordinator primary is not unambiguous')
+    schemas = {name: (ROOT/'store'/name).read_text() for name in ('init.sql', 'm2.sql')}
+    script = '''import json,os,psycopg2
+schemas=json.loads(SCHEMAS)
+c=psycopg2.connect(host='127.0.0.1',dbname='hazards',user='canonical_app',password=os.environ['CANONICAL_PASSWORD'])
+with c.cursor() as cur:
+ cur.execute("SELECT to_regclass('hazard_events') IS NOT NULL")
+ if not cur.fetchone()[0]:
+  cur.execute(schemas['init.sql'])
+  c.commit()
+ cur.execute(schemas['m2.sql'])
+c.commit()
+print('Canonical schema migrated as canonical_app.')
+'''.replace('SCHEMAS', repr(json.dumps(schemas)))
+    kubectl(cfg, '-n', NAMESPACE, 'exec', '-i', pods[0]['metadata']['name'], '-c', 'postgres',
+            '--', '/opt/patroni/bin/python', '-', input_text=script, timeout=120)
+    print('Canonical schema initialized and distributed across eight shards.')
+
+
+def migrate_services(cfg: dict) -> None:
+    from lifecycle import require_offline
+    require_offline(cfg)
+    schemas = {'ingestion': (ROOT/'aggregator/internal/ingest/schema.sql').read_text(),
+               'auth': (ROOT/'auth-service/schema.sql').read_text(),
+               'dashboard': (ROOT/'consumer-dashboard/schema.sql').read_text(),
+               'notifier': (ROOT/'consumer-notifier/schema.sql').read_text()}
+    for formation, databases in [('services', ['auth', 'dashboard', 'notifier']), ('ingestion', ['ingestion'])]:
+        pods = json.loads(kubectl(cfg, '-n', NAMESPACE, 'get', 'pods', '-l',
+                                 f'formation={formation},database-role=primary', '-o', 'json'))['items']
+        if len(pods) != 1:
+            raise ValueError(f'{formation} primary is unavailable')
+        for database in databases:
+            text = schemas[database]
+            if database == 'auth':
+                text = text.replace('CREATE TABLE sessions', 'CREATE TABLE IF NOT EXISTS sessions').replace('CREATE INDEX sessions_', 'CREATE INDEX IF NOT EXISTS sessions_')
+            script = '''import os,psycopg2
+c=psycopg2.connect(host='127.0.0.1',dbname=DATABASE,user=DATABASE+'_app',password=os.environ[DATABASE.upper()+'_PASSWORD'])
+with c.cursor() as cursor: cursor.execute(SCHEMA)
+c.commit()
+'''.replace('DATABASE', repr(database)).replace('SCHEMA', repr(text))
+            kubectl(cfg, '-n', NAMESPACE, 'exec', '-i', pods[0]['metadata']['name'], '-c', 'postgres',
+                    '--', '/opt/patroni/bin/python', '-', input_text=script)
+            print(f'Initialized {database} schema with its own runtime role.')
 
 
 def main() -> int:
@@ -92,11 +159,18 @@ def main() -> int:
     initial.add_argument('--node-b', default='aat-m2-m02')
     renderer = commands.add_parser('render')
     renderer.add_argument('--output', default=str(LOCAL/'manifests.json'))
-    commands.add_parser('plan')
-    commands.add_parser('deploy')
+    renderer.add_argument('--foundation', action='store_true')
+    commands.add_parser('plan').add_argument('--foundation',action='store_true')
+    commands.add_parser('deploy').add_argument('--foundation',action='store_true')
+    commands.add_parser('initialize')
+    commands.add_parser('migrate')
+    commands.add_parser('migrate-services')
     commands.add_parser('status')
     commands.add_parser('stop')
     commands.add_parser('start')
+    commands.add_parser('up')
+    commands.add_parser('ready').add_argument('--timeout', type=int, default=600)
+    commands.add_parser('scale').add_argument('--aggregators',type=int,choices=(1,2,3,5),required=True)
     args = parser.parse_args()
     try:
         if args.command == 'init':
@@ -105,7 +179,7 @@ def main() -> int:
         cfg = read_config(args.config)
         if args.command in ('render', 'plan', 'deploy'):
             credentials = runtime_secrets(LOCAL/'secrets.json')
-            manifest = render(cfg, credentials)
+            manifest = render(cfg, credentials,foundation=args.foundation)
             if args.command == 'plan':
                 print(json.dumps(inventory(manifest), indent=2))
             elif args.command == 'render':
@@ -117,10 +191,26 @@ def main() -> int:
                 print('Applied the M2 resources. Use status to inspect readiness.')
         elif args.command == 'status':
             print(kubectl(cfg, '-n', NAMESPACE, 'get', 'deployment,statefulset,pods,pvc', '-o', 'wide'))
+        elif args.command == 'initialize':
+            initialize(cfg)
+        elif args.command == 'migrate':
+            migrate(cfg)
+        elif args.command == 'migrate-services':
+            migrate_services(cfg)
         elif args.command == 'stop':
             stop(cfg)
         elif args.command == 'start':
             start(cfg)
+        elif args.command == 'up':
+            from lifecycle import up
+            up(cfg)
+        elif args.command == 'ready':
+            from lifecycle import ready
+            ready(cfg, timeout=args.timeout)
+        elif args.command == 'scale':
+            validate_nodes(cfg)
+            kubectl(cfg,'-n',NAMESPACE,'scale','deployment/aggregator','--replicas='+str(args.aggregators))
+            print(f'Aggregator test replica count: {args.aggregators}. Normal deployment count is 3; restore it after the test.')
         return 0
     except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
         # Do not include remote output or serialized credentials in diagnostics.

@@ -73,7 +73,7 @@ class FoundationTests(unittest.TestCase):
 
     def test_storage_broker_placement_and_class_limits(self):
         credentials = runtime_secrets(Path(self.directory.name)/'secrets.json')
-        manifest = render(self.config, credentials)
+        manifest = render(self.config, credentials, foundation=True)
         stateful = [o for o in manifest['items'] if o['kind'] == 'StatefulSet']
         stores = [o for o in stateful if o['spec']['template']['metadata']['labels']['role'] == 'store']
         brokers = [o for o in stateful if o['spec']['template']['metadata']['labels']['role'] == 'broker']
@@ -84,7 +84,7 @@ class FoundationTests(unittest.TestCase):
             counts[obj['spec']['template']['spec']['nodeSelector']['kubernetes.io/hostname']] += 1
         self.assertEqual(sorted(counts.values()), [1, 2])
         inv = inventory(manifest)
-        self.assertEqual(sum(n['requests_mib'] for n in inv['nodes'].values()), 6656)
+        self.assertEqual(sum(n['requests_mib'] for n in inv['nodes'].values()), 6784)
         for obj in stateful:
             container = obj['spec']['template']['spec']['containers'][0]
             self.assertEqual(container['resources']['requests']['memory'], '512Mi')
@@ -102,9 +102,9 @@ class FoundationTests(unittest.TestCase):
         cfg = self.config
         manifest = render(cfg, runtime_secrets(Path(self.directory.name)/'secrets.json'))
         for obj in manifest['items']:
-            if obj['kind'] not in ('Namespace', 'PersistentVolume'):
+            if obj['kind'] not in ('Namespace', 'PersistentVolume', 'ClusterRole', 'ClusterRoleBinding'):
                 self.assertEqual(obj['metadata']['namespace'], NAMESPACE)
-            if obj['kind'] == 'NetworkPolicy' and obj['spec'].get('ingress'):
+            if obj['kind'] == 'NetworkPolicy' and any('from' in rule for rule in obj['spec'].get('ingress', [])):
                 self.assertIn('tester-agent', json.dumps(obj['spec']))
 
     def test_broker_capacity_needs_headroom_and_cidrs_must_not_overlap(self):
@@ -116,6 +116,35 @@ class FoundationTests(unittest.TestCase):
                 cfg['network']['service_cidr'] = cfg['network']['pod_cidr']
             with self.assertRaises(ValueError):
                 self.load_config(cfg)
+
+    def test_full_deployment_uses_three_aggregators_and_bounded_owner_pools(self):
+        manifest=render(self.config,runtime_secrets(Path(self.directory.name)/'secrets.json'))
+        deployments={o['metadata']['name']:o for o in manifest['items'] if o['kind']=='Deployment'}
+        secrets={o['metadata']['name']:o['stringData'] for o in manifest['items'] if o['kind']=='Secret'}
+        configs={o['metadata']['name']:o['data'] for o in manifest['items'] if o['kind']=='ConfigMap'}
+        self.assertEqual(deployments['aggregator']['spec']['replicas'],3)
+        self.assertEqual(configs['aggregator-config']['DB_MAX_OPEN_CONNS'],'6')
+        self.assertEqual(sum(deployments[name]['spec']['replicas']*int(configs[name+'-config']['DB_MAX_OPEN_CONNS'])
+                             for name in ('ingestion','wildfire-processor','coastal-processor','field-report-processor')),32)
+        for name in ('ingestion','wildfire-processor','coastal-processor','field-report-processor'):
+            self.assertNotIn('canonical_app',secrets[name+'-runtime']['DATABASE_URL'])
+        self.assertNotIn('ingestion_app',secrets['aggregator-runtime']['DATABASE_URL'])
+        self.assertNotIn('DATABASE_URL',configs['aggregator-config'])
+        self.assertNotIn('NATS_URL',configs['aggregator-config'])
+        self.assertNotIn('AUDIT_API_TOKEN',configs['aggregator-config'])
+
+    def test_prometheus_discovers_processes_and_uses_real_vendor_metrics_port(self):
+        manifest=render(self.config,runtime_secrets(Path(self.directory.name)/'secrets.json'))
+        objects={(o['kind'],o['metadata']['name']):o for o in manifest['items']}
+        config=json.loads(objects[('ConfigMap','prometheus-config')]['data']['prometheus.yaml'])
+        discovery=config['scrape_configs'][0]['kubernetes_sd_configs'][0]
+        self.assertEqual(discovery,{'role':'pod','namespaces':{'names':[NAMESPACE]}})
+        registry=objects[('Deployment','schema-registry')]['spec']['template']
+        self.assertEqual(registry['metadata']['annotations']['prometheus.io/port'],'9000')
+        sensor=objects[('Deployment','sensor-pantai')]['spec']['template']
+        self.assertEqual(sensor['metadata']['annotations']['prometheus.io/scrape'],'false')
+        grafana=objects[('Deployment','grafana')]['spec']['template']['spec']['containers'][0]
+        self.assertIn({'name':'GOMEMLIMIT','value':'128MiB'},grafana['env'])
 
 
 if __name__ == '__main__':

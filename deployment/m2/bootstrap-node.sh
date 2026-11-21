@@ -15,6 +15,11 @@ ip -4 address show dev "$vpn_interface" | grep -F "$M2_NODE_IP/" >/dev/null || {
   echo 'Expected node address is not configured on the VPN/LAN interface' >&2; exit 2;
 }
 storage_root=/var/lib/aat-m2
+[[ ! -L "$storage_root" ]] || { echo 'Application storage root cannot be a symlink' >&2; exit 2; }
+if [[ -e /etc/systemd/system/k3s.service && "$role" == b ]] || \
+   [[ -e /etc/systemd/system/k3s-agent.service && "$role" == a ]]; then
+  echo 'Existing K3s service has a different node role; refusing to overwrite it' >&2; exit 2
+fi
 install -d -m 0755 "$storage_root"
 install -d -m 0700 /etc/aat-m2
 token_file="${M2_JOIN_TOKEN_FILE:-/etc/aat-m2/k3s-token}"
@@ -35,6 +40,7 @@ if [[ "$role" == a ]]; then
   sh "$installer" server --node-name "$M2_NODE_NAME" --node-ip "$M2_NODE_IP" \
     --advertise-address "$M2_NODE_IP" --flannel-iface "$vpn_interface" --tls-san "$M2_NODE_IP" \
     --write-kubeconfig-mode 600 --disable traefik --disable servicelb \
+    --node-external-ip "$M2_NODE_IP" \
     --cluster-cidr "${M2_POD_CIDR:-10.42.0.0/16}" --service-cidr "${M2_SERVICE_CIDR:-10.43.0.0/16}"
 else
   : "${M2_SERVER_URL:?Set https://A-VPN-IP:6443}"

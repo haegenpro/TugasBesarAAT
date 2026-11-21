@@ -70,7 +70,8 @@ def postgres(cfg: dict, credentials: dict) -> list[dict]:
         selector = {'formation': formation}
         if group is not None:
             selector['citus-group'] = str(group)
-        result.append(service(stem, {**selector, 'database-role': 'primary'}, {'postgres': 5432}))
+        primary_service=stem if group is not None else stem+'-db'
+        result.append(service(primary_service, {**selector, 'database-role': 'primary'}, {'postgres': 5432, 'patroni': 8008}))
         for node_id in ('a', 'b'):
             name = f'{stem}-{node_id}'
             node = cfg['nodes'][node_id]
@@ -102,8 +103,8 @@ def postgres(cfg: dict, credentials: dict) -> list[dict]:
             result.append(resource('StatefulSet', name, spec={'serviceName': name+'-peer', 'replicas': 1,
                 'selector': {'matchLabels': {'app': name}}, 'template': {'metadata': {'labels': lab}, 'spec': pod}}))
         allowed = ['aggregator'] if formation == 'canonical' else (
-            ['ingestion', 'coastal-processor', 'wildfire-processor'] if formation == 'ingestion' else list(OWNERS.values()))
-        result.append(policy(stem+'-ownership', selector, allowed, [5432, 8008], stores=True))
+            ['ingestion', 'coastal-processor', 'wildfire-processor', 'field-report-processor'] if formation == 'ingestion' else list(OWNERS.values()))
+        result.append(policy(stem+'-ownership', selector, allowed+['storage-guardian'], [5432, 8008], stores=True))
     return result
 
 
@@ -137,7 +138,7 @@ def nats(cfg: dict) -> list[dict]:
                 'volumes': [{'name': 'data', 'persistentVolumeClaim': {'claimName': name}},
                             {'name': 'config', 'configMap': {'name': name}}]}}}))
     result.append(service('broker', {'component': 'broker'}, {'client': 4222, 'monitor': 8222}))
-    result.append(policy('broker', {'component': 'broker'}, list(APPS)+names, [4222, 6222, 8222]))
+    result.append(policy('broker', {'component': 'broker'}, list(APPS)+names+['field-report-processor','broker-initialize'], [4222, 6222, 8222]))
     return result
 
 
@@ -158,8 +159,35 @@ def bootstrap(cfg: dict, credentials: dict) -> list[dict]:
     return result
 
 
-def render(cfg: dict, credentials: dict) -> dict:
-    items = bootstrap(cfg, credentials) + postgres(cfg, credentials) + nats(cfg)
+def guardian(cfg: dict) -> list[dict]:
+    name = 'storage-guardian'
+    account = resource('ServiceAccount', name)
+    role = resource('ClusterRole', 'aat-m2-guardian', rules=[{'apiGroups':[''], 'resources':['nodes'], 'verbs':['get','list']}])
+    role['apiVersion']='rbac.authorization.k8s.io/v1'
+    role['metadata'].pop('namespace', None)
+    binding = resource('ClusterRoleBinding', 'aat-m2-guardian',
+        subjects=[{'kind':'ServiceAccount','name':name,'namespace':NAMESPACE}],
+        roleRef={'apiGroup':'rbac.authorization.k8s.io','kind':'ClusterRole','name':'aat-m2-guardian'})
+    binding['apiVersion']='rbac.authorization.k8s.io/v1'
+    binding['metadata'].pop('namespace', None)
+    deployment = resource('Deployment', name, spec={'replicas':1,'selector':{'matchLabels':{'app':name}},
+        'template':{'metadata':{'labels':labels(name,'other')},'spec':{
+        'serviceAccountName':name,'nodeSelector':{'kubernetes.io/hostname':cfg['nodes']['a']},
+        'containers':[{'name':name,'image':image(cfg,'storage'),
+        'command':['/opt/patroni/bin/python','/opt/m2/guardian.py'],
+        'env':pod_env({'NODE_A':cfg['nodes']['a'],'NODE_B':cfg['nodes']['b']}),
+        'envFrom':[{'secretRef':{'name':'storage-runtime'}}], 'resources':resources('other')}]}}})
+    return [account,role,binding,deployment]
+
+
+def render(cfg: dict, credentials: dict, foundation=False) -> dict:
+    items = bootstrap(cfg, credentials) + postgres(cfg, credentials) + nats(cfg) + guardian(cfg)
+    if not foundation:
+        from apps import applications, broker_job
+        items += applications(cfg,credentials) + broker_job(cfg,credentials)
+        if cfg['features'].get('monitoring'):
+            from monitoring import monitoring
+            items += monitoring(cfg,credentials)
     return {'apiVersion': 'v1', 'kind': 'List', 'items': items}
 
 
