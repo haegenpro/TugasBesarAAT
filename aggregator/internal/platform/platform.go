@@ -76,12 +76,13 @@ func Init(service string) func(context.Context) error {
 		host = v
 	}
 	opts := []sdktrace.TracerProviderOption{sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", service), attribute.String("service.instance.id", host))), sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(traceSampleRatio())))}
+	queue, batch, exportTimeout := traceExportSettings()
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" || os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != "" {
-		exp, err := otlptracehttp.New(context.Background(), otlptracehttp.WithTimeout(2*time.Second))
+		exp, err := otlptracehttp.New(context.Background(), otlptracehttp.WithTimeout(exportTimeout))
 		if err != nil {
 			panic("invalid trace exporter configuration")
 		}
-		opts = append(opts, sdktrace.WithBatcher(exp, sdktrace.WithMaxQueueSize(128), sdktrace.WithMaxExportBatchSize(32), sdktrace.WithExportTimeout(2*time.Second)))
+		opts = append(opts, sdktrace.WithBatcher(exp, sdktrace.WithMaxQueueSize(queue), sdktrace.WithMaxExportBatchSize(batch), sdktrace.WithExportTimeout(exportTimeout)))
 	}
 	tp := sdktrace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(tp)

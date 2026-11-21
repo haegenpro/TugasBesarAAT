@@ -58,6 +58,8 @@ def read_config(path: str | Path) -> dict:
         raise ValueError('satellite initial_offset must be nonnegative')
     if type(satellite.get('lateness_seconds')) is not int or satellite['lateness_seconds'] < 0:
         raise ValueError('satellite lateness_seconds must be nonnegative')
+    from tuning import settings
+    settings(cfg)
     return cfg
 
 

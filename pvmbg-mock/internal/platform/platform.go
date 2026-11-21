@@ -76,12 +76,13 @@ func Init(service string) func(context.Context) error {
 		host = v
 	}
 	opts := []sdktrace.TracerProviderOption{sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", service), attribute.String("service.instance.id", host))), sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(traceSampleRatio())))}
+	queue, batch, exportTimeout := traceExportSettings()
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" || os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") != "" {
-		exp, err := otlptracehttp.New(context.Background(), otlptracehttp.WithTimeout(2*time.Second))
+		exp, err := otlptracehttp.New(context.Background(), otlptracehttp.WithTimeout(exportTimeout))
 		if err != nil {
 			panic("invalid trace exporter configuration")
 		}
-		opts = append(opts, sdktrace.WithBatcher(exp, sdktrace.WithMaxQueueSize(128), sdktrace.WithMaxExportBatchSize(32), sdktrace.WithExportTimeout(2*time.Second)))
+		opts = append(opts, sdktrace.WithBatcher(exp, sdktrace.WithMaxQueueSize(queue), sdktrace.WithMaxExportBatchSize(batch), sdktrace.WithExportTimeout(exportTimeout)))
 	}
 	tp := sdktrace.NewTracerProvider(opts...)
 	otel.SetTracerProvider(tp)
@@ -381,7 +382,13 @@ func Serve(ctx context.Context, srv *http.Server) error {
 
 // Parent spans retain their sampling decision across the request chain.
 func traceSampleRatio() float64 {
- raw:=os.Getenv("OTEL_TRACES_SAMPLER_ARG");if raw=="" {return 0.05}
- ratio,err:=strconv.ParseFloat(raw,64);if err!=nil||ratio<0||ratio>1 {panic("OTEL_TRACES_SAMPLER_ARG must be between 0 and 1")}
- return ratio
+	raw := os.Getenv("OTEL_TRACES_SAMPLER_ARG")
+	if raw == "" {
+		return 0.05
+	}
+	ratio, err := strconv.ParseFloat(raw, 64)
+	if err != nil || ratio != ratio || ratio < 0 || ratio > 1 {
+		panic("OTEL_TRACES_SAMPLER_ARG must be between 0 and 1")
+	}
+	return ratio
 }

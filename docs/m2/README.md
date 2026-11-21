@@ -107,7 +107,10 @@ measurement bottleneck. Keep browser/admin services on the VPN or loopback.
 
 Prometheus discovers each annotated process separately, preserving per-replica
 counters. Logs are collected by Fluent Bit on A/B. Tracing is parent-aware with
-5% sampling and bounded queues. Jaeger holds at most 1000 traces in memory, so
+5% sampling and bounded queues by default. Sampling, retention, database pools,
+admission, source deadlines, runtime targets and AI budgets are configurable in
+the private JSON file; see [Configuration.md](Configuration.md#operational-tuning).
+Jaeger holds at most 1000 traces in memory by default, so
 trace evidence must be captured before a restart. Retention is deliberately short
 for a demo; this is not long-term production telemetry storage.
 

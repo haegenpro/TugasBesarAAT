@@ -20,7 +20,7 @@ extensions:
     backends:
       bounded_memory:
         memory:
-          max_traces: 1000
+          max_traces: ${JAEGER_MAX_TRACES}
 receivers:
   otlp:
     protocols:

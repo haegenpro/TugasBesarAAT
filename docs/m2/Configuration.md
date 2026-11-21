@@ -27,6 +27,131 @@ become owner-specific Secrets; applications do not read operator files directly.
 | `external.audit_token` | Later-supplied Audit token; blank uses a generated development token |
 | `external.openrouter_api_key`, `external.summary_model` | Both required when AI is enabled |
 
+## Operational tuning
+
+The optional sections below can be added to the same private JSON file. Omitted
+sections and keys retain the current defaults, including for existing files.
+The [example configuration](../../deployment/m2/config.example.json) lists every
+key. Nested overrides merge with defaults; unknown keys inside these sections,
+invalid types, and inconsistent capacities fail before deployment.
+
+For example, merge this section into the private configuration to capture all
+new root traces during a quiet demo:
+
+```json
+{
+  "observability": {
+    "trace_sample_ratio": 1.0
+  }
+}
+```
+
+Use `0.05` again for the normal default. Parent sampling decisions still propagate
+across services. Metrics are unaffected by trace sampling. Queue saturation can
+drop spans; these are telemetry buffers, not business-event queues.
+
+| Key under `observability` | Default |
+| --- | --- |
+| `trace_sample_ratio` | `0.05`; finite number from 0 to 1 |
+| `trace_queue_spans`, `trace_batch_spans` | `128`, `32`; batch must fit within queue |
+| `trace_export_timeout_ms` | `2000`; applies to application HTTP exporters and batch processors |
+| `ai_trace_export_timeout_ms` | `1000`; preserves the summarizer's existing timeout |
+| `prometheus_scrape_seconds` | `15`; also sets rule evaluation interval |
+| `prometheus_retention_hours`, `prometheus_retention_mib` | `6`, `256` |
+| `jaeger_max_traces` | `1000`; bounded in-memory history, lost on Jaeger restart |
+| `loki_retention_hours` | `24`; compaction/deletion is asynchronous, not immediate space reclamation |
+
+Applications receive `OTEL_TRACES_SAMPLER_ARG`, `OTEL_BSP_MAX_QUEUE_SIZE`,
+`OTEL_BSP_MAX_EXPORT_BATCH_SIZE`, and `OTEL_BSP_EXPORT_TIMEOUT` (milliseconds).
+The monitoring YAML files are renderer templates; deploy their generated
+ConfigMaps rather than passing the templates directly to the backends.
+
+Database settings are per process, not a cluster-wide connection budget:
+
+| Key under `database` | Default |
+| --- | --- |
+| `services.aggregator.max_open` | `6` |
+| `services.auth-service.max_open`, `services.consumer-dashboard.max_open`, `services.consumer-notifier.max_open` | `8` each |
+| `services.ingestion.max_open`, `services.wildfire-processor.max_open`, `services.coastal-processor.max_open`, `services.field-report-processor.max_open` | `4` each |
+| `services.<name>.statement_timeout_ms` | `1500` for Aggregator/Auth/consumers; `5000` for ingestion/processors |
+| `services.<name>.lock_timeout_ms` | `500` for Aggregator/Auth/consumers; `2000` for ingestion/processors |
+| `ingestion_idle_transaction_timeout_ms` | `10000`; ingestion and its three processor types |
+| `aggregator_field_read_connections` | `3`; additional pool in each Aggregator |
+| `registry_max_open` | `4`; registry JDBC pool |
+
+Ingestion previously ignored the shared `DB_STATEMENT_TIMEOUT=1500ms` setting
+and used a literal five seconds. Its new explicit default is five seconds,
+preserving effective behavior while honoring overrides. Its lock timeout keeps
+the owning PostgreSQL formation's existing two-second default. Account for all
+replicas, Field reservations, and Citus connections when increasing pool sizes.
+
+| Key under `admission` | Default |
+| --- | --- |
+| `client_max_inflight`, `client_per_client` | `64`, `16` |
+| `client_field_reserved` | `16` |
+| `client_auth_max_inflight`, `client_auth_field_reserved` | `32`, `8` |
+| `auth_max_inflight`, `auth_field_reserved` | `32`, `8` |
+| `auth_db_field_reserved` | `3`; included in the Auth database pool total |
+
+Reservations must be positive and below their respective totals. The per-client
+limit cannot exceed Client API capacity. Auth's DB reservation must be below
+`database.services.auth-service.max_open`.
+
+| Key under `sources` | Default |
+| --- | --- |
+| `satellite_idle_timeout_ms` | `20000`; resets on received stream bytes |
+| `coastal_request_timeout_ms` | `1200` |
+| `coastal_capture_timeout_ms` | `8000`; bounded tail capture after identifying a rejected response |
+| `coastal_station_refresh_ms`, `coastal_poll_interval_ms` | `30000`, `250` |
+| `coastal_requests_per_second` | `4`; shared by both endpoints, burst remains 1 |
+| `coastal_breaker_failures` | `3` |
+| `coastal_breaker_cooldown_ms`, `coastal_breaker_max_cooldown_ms` | `2000`, `15000`; initial cooldown cannot exceed maximum |
+
+| Key under `runtime` | Default |
+| --- | --- |
+| `application_memory_mib`, `aggregator_memory_mib`, `mock_memory_mib` | `192`, `384`, `96` |
+| `monitoring_memory_mib`, `grafana_memory_mib` | `192`, `128` |
+| `go_processors` | `2` |
+
+These set Go's soft memory target and processor count. Memory targets must stay
+below their M2 container limits; Kubernetes requests/limits are unchanged. The
+target does not bound total process RSS. Vendor services, PostgreSQL, Java and
+Fluent Bit retain their existing runtime settings.
+
+| Key under `ai` | Default |
+| --- | --- |
+| `summary_calls_per_day`, `chat_calls_per_day` | `45`, `150`; chat permits 0 |
+| `refresh_interval_seconds`, `min_call_interval_seconds` | `1800`, `120` |
+| `llm_timeout_seconds`, `chat_timeout_seconds` | `60`, `60` |
+| `chat_concurrency` | `2`; permitted range 1..16 |
+| `max_tokens`, `reasoning_tokens` | `4096`, `1024`; reasoning must leave at least half the answer budget |
+
+AI settings take effect only when the optional service is enabled. These knobs
+do not enable AI or supply credentials.
+
+### Applying a change
+
+The first release containing this feature requires rebuilt application images,
+because the new exporter/source settings and ingestion timeout handling are code
+changes. After deploying those images, tuning changes require configuration
+rollouts, not image rebuilds:
+
+```bash
+python3 scripts/m2/manage.py --config .m2-local/config.json plan
+python3 scripts/m2/manage.py --config .m2-local/config.json deploy
+python3 scripts/m2/manage.py --config .m2-local/config.json ready
+```
+
+Use the intended private config path, including the bounded replay config when
+acquisition should remain disabled. The cluster must already be running.
+Configuration changes update pod templates and trigger the relevant rollouts;
+no hot reload is promised. `deploy` applies the complete desired manifest and
+restores configured replica counts. Keep capture of trace evidence separate from
+changing Jaeger retention, because restarting its memory store clears history.
+
+Spec-defined wildfire rules, durability, fencing, authorization, Kubernetes
+memory limits, lease/failover timing, and PostgreSQL server internals remain fixed.
+
 Private runtime credentials are generated once in `.m2-local/secrets.json`.
 Deleting that file while retaining PostgreSQL data is not a password-rotation
 procedure. Do not regenerate it just to fix a startup problem. Keep a secure copy
@@ -34,6 +159,8 @@ with the corresponding cluster identity. Use separate working directories/privat
 state when two independent clusters need different credentials.
 
 ## Owner boundaries and runtime limits
+
+Numeric tuning values below describe the defaults unless explicitly fixed by M2.
 
 - Aggregator alone receives `canonical_app` credentials; Citus replicas enforce
   that owner and the formation's role/HBA policy.

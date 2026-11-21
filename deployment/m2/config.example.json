@@ -3,14 +3,140 @@
   "profile": "minikube",
   "context": "aat-m2",
   "namespace": "sistem-informasi-kebencanaan-bnpb",
-  "nodes": {"a": "aat-m2", "b": "aat-m2-m02"},
+  "nodes": {
+    "a": "aat-m2",
+    "b": "aat-m2-m02"
+  },
   "storage_root": "/var/lib/aat-m2",
   "image_prefix": "aat",
   "image_tag": "m2",
-  "network": {"pod_cidr": "10.244.0.0/16", "service_cidr": "10.96.0.0/12"},
-  "features": {"monitoring": true, "ai": false},
-  "satellite": {"url": "https://satellite.naufarrel.dev", "namespace": "satellite-practice", "initial_offset": 0, "lateness_seconds": 1800},
-  "coastal": {"profile": "practice", "speed": 60},
-  "limits": {"broker_volume_gib": 2, "broker_message_mib": 1024, "postgres_volume_gib": 2, "quarantine_mib": 256},
-  "external": {"satellite_token": "", "audit_token": "", "openrouter_api_key": "", "summary_model": ""}
+  "network": {
+    "pod_cidr": "10.244.0.0/16",
+    "service_cidr": "10.96.0.0/12"
+  },
+  "features": {
+    "monitoring": true,
+    "ai": false
+  },
+  "satellite": {
+    "url": "https://satellite.naufarrel.dev",
+    "namespace": "satellite-practice",
+    "initial_offset": 0,
+    "lateness_seconds": 1800
+  },
+  "coastal": {
+    "profile": "practice",
+    "speed": 60
+  },
+  "limits": {
+    "broker_volume_gib": 2,
+    "broker_message_mib": 1024,
+    "postgres_volume_gib": 2,
+    "quarantine_mib": 256
+  },
+  "external": {
+    "satellite_token": "",
+    "audit_token": "",
+    "openrouter_api_key": "",
+    "summary_model": ""
+  },
+  "observability": {
+    "trace_sample_ratio": 0.05,
+    "trace_queue_spans": 128,
+    "trace_batch_spans": 32,
+    "trace_export_timeout_ms": 2000,
+    "ai_trace_export_timeout_ms": 1000,
+    "prometheus_scrape_seconds": 15,
+    "prometheus_retention_hours": 6,
+    "prometheus_retention_mib": 256,
+    "jaeger_max_traces": 1000,
+    "loki_retention_hours": 24
+  },
+  "database": {
+    "services": {
+      "aggregator": {
+        "max_open": 6,
+        "statement_timeout_ms": 1500,
+        "lock_timeout_ms": 500
+      },
+      "auth-service": {
+        "max_open": 8,
+        "statement_timeout_ms": 1500,
+        "lock_timeout_ms": 500
+      },
+      "consumer-dashboard": {
+        "max_open": 8,
+        "statement_timeout_ms": 1500,
+        "lock_timeout_ms": 500
+      },
+      "consumer-notifier": {
+        "max_open": 8,
+        "statement_timeout_ms": 1500,
+        "lock_timeout_ms": 500
+      },
+      "ingestion": {
+        "max_open": 4,
+        "statement_timeout_ms": 5000,
+        "lock_timeout_ms": 2000
+      },
+      "wildfire-processor": {
+        "max_open": 4,
+        "statement_timeout_ms": 5000,
+        "lock_timeout_ms": 2000
+      },
+      "coastal-processor": {
+        "max_open": 4,
+        "statement_timeout_ms": 5000,
+        "lock_timeout_ms": 2000
+      },
+      "field-report-processor": {
+        "max_open": 4,
+        "statement_timeout_ms": 5000,
+        "lock_timeout_ms": 2000
+      }
+    },
+    "ingestion_idle_transaction_timeout_ms": 10000,
+    "aggregator_field_read_connections": 3,
+    "registry_max_open": 4
+  },
+  "admission": {
+    "client_max_inflight": 64,
+    "client_per_client": 16,
+    "client_field_reserved": 16,
+    "client_auth_max_inflight": 32,
+    "client_auth_field_reserved": 8,
+    "auth_max_inflight": 32,
+    "auth_field_reserved": 8,
+    "auth_db_field_reserved": 3
+  },
+  "sources": {
+    "satellite_idle_timeout_ms": 20000,
+    "coastal_request_timeout_ms": 1200,
+    "coastal_capture_timeout_ms": 8000,
+    "coastal_station_refresh_ms": 30000,
+    "coastal_poll_interval_ms": 250,
+    "coastal_requests_per_second": 4,
+    "coastal_breaker_failures": 3,
+    "coastal_breaker_cooldown_ms": 2000,
+    "coastal_breaker_max_cooldown_ms": 15000
+  },
+  "runtime": {
+    "application_memory_mib": 192,
+    "aggregator_memory_mib": 384,
+    "mock_memory_mib": 96,
+    "monitoring_memory_mib": 192,
+    "grafana_memory_mib": 128,
+    "go_processors": 2
+  },
+  "ai": {
+    "summary_calls_per_day": 45,
+    "chat_calls_per_day": 150,
+    "refresh_interval_seconds": 1800,
+    "min_call_interval_seconds": 120,
+    "llm_timeout_seconds": 60,
+    "chat_timeout_seconds": 60,
+    "chat_concurrency": 2,
+    "max_tokens": 4096,
+    "reasoning_tokens": 1024
+  }
 }

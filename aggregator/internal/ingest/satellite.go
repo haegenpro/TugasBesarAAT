@@ -65,9 +65,10 @@ func (s *Store) satelliteSession(ctx context.Context, cfg SatelliteConfig) error
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("satellite stream returned %d", resp.StatusCode)
 	}
-	idle := time.AfterFunc(20*time.Second, cancel)
+	idleTimeout := platform.Milliseconds("SATELLITE_IDLE_TIMEOUT_MS", 20000)
+	idle := time.AfterFunc(idleTimeout, cancel)
 	defer idle.Stop()
-	stream := satellite.NewStream(&streamActivity{Reader: resp.Body, timer: idle}, platform.Int("MAX_PAYLOAD_BYTES", 4<<20))
+	stream := satellite.NewStream(&streamActivity{Reader: resp.Body, timer: idle, timeout: idleTimeout}, platform.Int("MAX_PAYLOAD_BYTES", 4<<20))
 	var lastHealth time.Time
 	for ctx.Err() == nil {
 		event, e := stream.Next()
@@ -132,13 +133,14 @@ func (s *Store) satelliteSession(ctx context.Context, cfg SatelliteConfig) error
 
 type streamActivity struct {
 	io.Reader
-	timer *time.Timer
+	timer   *time.Timer
+	timeout time.Duration
 }
 
 func (r *streamActivity) Read(p []byte) (int, error) {
 	n, e := r.Reader.Read(p)
 	if n > 0 {
-		r.timer.Reset(20 * time.Second)
+		r.timer.Reset(r.timeout)
 	}
 	return n, e
 }

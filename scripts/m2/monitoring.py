@@ -1,11 +1,15 @@
 """Small browser observability stack with explicit memory and retention bounds."""
 import json
 import hashlib
+from string import Template
 from common import LABEL, APPLICATION, NAMESPACE, ROOT, labels, resource, resources, local_volume
 from render import configmap, secret, service, policy, pod_env, image
+from tuning import settings
 
 
 def monitoring(cfg,credentials):
+    tuning=settings(cfg)['observability']
+    runtime_tuning=settings(cfg)['runtime']
     result=[]
     targets={8080:['aggregator','client-api','ingestion','wildfire-processor','coastal-processor','field-report-processor'],
              8081:['bmkg-mock'],8082:['pvmbg-mock'],8083:['auth-service'],8091:['consumer-dashboard'],8092:['consumer-notifier'],9000:['schema-registry']}
@@ -21,7 +25,8 @@ def monitoring(cfg,credentials):
              'regex':'([^:]+)(?::[0-9]+)?;([0-9]+)','target_label':'__address__','replacement':'$1:$2'},
             {'source_labels':['__meta_kubernetes_pod_label_app'],'target_label':'service'},
             {'source_labels':['__meta_kubernetes_pod_name'],'target_label':'pod'}]}]
-    prometheus={'global':{'scrape_interval':'15s','evaluation_interval':'15s'},'scrape_configs':jobs,'rule_files':['/config/slo.yaml']}
+    interval=str(tuning['prometheus_scrape_seconds'])+'s'
+    prometheus={'global':{'scrape_interval':interval,'evaluation_interval':interval},'scrape_configs':jobs,'rule_files':['/config/slo.yaml']}
     # Go services expose the same fixed metric contract. SLOs include server
     # failures; overload rejections remain separately visible, never erased.
     rules={'groups':[{'name':'m2-availability','rules':[{'record':'service:request_rate5m',
@@ -30,8 +35,8 @@ def monitoring(cfg,credentials):
         {'alert':'ServiceErrorBudgetBurn','expr':'service:error_ratio5m > 0.01','for':'2m','labels':{'severity':'warning'},
          'annotations':{'summary':'More than 1% server errors over the last five minutes'}}]}]}
     files={'prometheus':{'prometheus.yaml':json.dumps(prometheus),'slo.yaml':json.dumps(rules)},
-           'loki':{'loki.yaml':(ROOT/'deployment/m2/monitoring/loki.yaml').read_text()},
-           'jaeger':{'jaeger.yaml':(ROOT/'deployment/m2/monitoring/jaeger.yaml').read_text()}}
+           'loki':{'loki.yaml':Template((ROOT/'deployment/m2/monitoring/loki.yaml').read_text()).substitute(LOKI_RETENTION_HOURS=tuning['loki_retention_hours'])},
+           'jaeger':{'jaeger.yaml':Template((ROOT/'deployment/m2/monitoring/jaeger.yaml').read_text()).substitute(JAEGER_MAX_TRACES=tuning['jaeger_max_traces'])}}
     datasources={'apiVersion':1,'datasources':[{'name':'Prometheus','uid':'prometheus','type':'prometheus','url':'http://prometheus:9090','access':'proxy','isDefault':True},
         {'name':'Loki','uid':'loki','type':'loki','url':'http://loki:3100','access':'proxy','jsonData':{'maxLines':500,'derivedFields':[{'name':'TraceID','matcherRegex':'"trace_id":"([a-f0-9]{32})"','datasourceUid':'jaeger','url':'${__value.raw}'}]}},
         {'name':'Jaeger','uid':'jaeger','type':'jaeger','url':'http://jaeger:16686','access':'proxy'}]}
@@ -57,8 +62,8 @@ def monitoring(cfg,credentials):
         configmap('grafana-environment',{'GF_SECURITY_ADMIN_USER':'admin',
             'GF_USERS_ALLOW_SIGN_UP':'false','GF_ANALYTICS_REPORTING_ENABLED':'false','GF_ANALYTICS_CHECK_FOR_UPDATES':'false',
             'GF_PLUGINS_PREINSTALL_DISABLED':'true','GF_PLUGINS_PREINSTALL_AUTO_UPDATE':'false',
-            'GF_UNIFIED_ALERTING_ENABLED':'false','GOMEMLIMIT':'128MiB','GOGC':'50'})]
-    definitions=[('prometheus','prom/prometheus:v3.15.0',9090,['--config.file=/config/prometheus.yaml','--storage.tsdb.path=/data','--storage.tsdb.retention.time=6h','--storage.tsdb.retention.size=256MB','--query.max-concurrency=2','--query.max-samples=1000000','--query.timeout=5s','--storage.tsdb.min-block-duration=30m','--storage.tsdb.max-block-duration=30m'],'/-/ready'),
+            'GF_UNIFIED_ALERTING_ENABLED':'false','GOMEMLIMIT':str(runtime_tuning['grafana_memory_mib'])+'MiB','GOGC':'50'})]
+    definitions=[('prometheus','prom/prometheus:v3.15.0',9090,['--config.file=/config/prometheus.yaml','--storage.tsdb.path=/data',f"--storage.tsdb.retention.time={tuning['prometheus_retention_hours']}h",f"--storage.tsdb.retention.size={tuning['prometheus_retention_mib']}MB",'--query.max-concurrency=2','--query.max-samples=1000000','--query.timeout=5s','--storage.tsdb.min-block-duration=30m','--storage.tsdb.max-block-duration=30m'],'/-/ready'),
         ('loki','grafana/loki:3.7.8',3100,['-config.file=/config/loki.yaml'],'/ready'),
         ('jaeger','jaegertracing/jaeger:2.22.0',16686,['--config=/config/jaeger.yaml'],'/'),
         ('grafana','grafana/grafana:13.2.3',3000,None,'/api/health')]
@@ -69,14 +74,14 @@ def monitoring(cfg,credentials):
             result+=local_volume(cfg,name,cfg['nodes']['a'],1)
             volumes.append({'name':'data','persistentVolumeClaim':{'claimName':name}})
             path={'prometheus':'/data','loki':'/loki','grafana':'/var/lib/grafana'}[name];mounts.append({'name':'data','mountPath':path})
-        container={'name':name,'image':img,'resources':resources('other'),'env':pod_env({'GOMEMLIMIT':'192MiB','GOMAXPROCS':'2'}),
+        container={'name':name,'image':img,'resources':resources('other'),'env':pod_env({'GOMEMLIMIT':str(runtime_tuning['monitoring_memory_mib'])+'MiB','GOMAXPROCS':str(runtime_tuning['go_processors'])}),
             'ports':[{'containerPort':port}],'volumeMounts':mounts,
             'readinessProbe':{'httpGet':{'path':ready,'port':port},'periodSeconds':5},
             'startupProbe':{'httpGet':{'path':ready,'port':port},'periodSeconds':5,'failureThreshold':60}}
         if args:container['args']=args
         if name=='jaeger':container['ports'].append({'containerPort':4318})
         if name=='grafana':
-            container['env']=pod_env({'GOMEMLIMIT':'128MiB','GOGC':'50','GOMAXPROCS':'2'})
+            container['env']=pod_env({'GOMEMLIMIT':str(runtime_tuning['grafana_memory_mib'])+'MiB','GOGC':'50','GOMAXPROCS':str(runtime_tuning['go_processors'])})
             container['envFrom']=[{'configMapRef':{'name':'grafana-environment'}},{'secretRef':{'name':'grafana-runtime'}}]
             for volume,path in [('datasources','/etc/grafana/provisioning/datasources'),('dashboards','/etc/grafana/provisioning/dashboards'),('dashboard-content','/dashboards')]:
                 volumes.append({'name':volume,'configMap':{'name':'grafana-'+volume}});mounts.append({'name':volume,'mountPath':path,'readOnly':True})

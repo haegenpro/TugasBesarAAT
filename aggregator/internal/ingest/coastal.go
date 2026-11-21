@@ -46,7 +46,7 @@ func (c *coastalClient) get(ctx context.Context, path string, b *coastal.Breaker
 	}
 	call, cancel := context.WithCancel(ctx)
 	defer cancel()
-	deadline := time.AfterFunc(1200*time.Millisecond, cancel)
+	deadline := time.AfterFunc(platform.Milliseconds("PANTAI_REQUEST_TIMEOUT_MS", 1200), cancel)
 	defer deadline.Stop()
 	req, e := http.NewRequestWithContext(call, "GET", c.cfg.URL+path, nil)
 	if e != nil {
@@ -91,7 +91,7 @@ func (c *coastalClient) get(ctx context.Context, path string, b *coastal.Breaker
 		// Normal source calls keep the short deadline. After a rejected prefix
 		// is identified, allow bounded time to stream its tail into quarantine;
 		// database writes must not consume the remaining network-read allowance.
-		captureDeadline := time.AfterFunc(8*time.Second, cancel)
+		captureDeadline := time.AfterFunc(platform.Milliseconds("PANTAI_CAPTURE_TIMEOUT_MS", 8000), cancel)
 		defer captureDeadline.Stop()
 		c.health(ctx, b.Name, false, e.Error())
 		if retained := c.s.RetainResponse(call, "SENSOR_PANTAI", c.cfg.Namespace, path, io.MultiReader(bytes.NewReader(body), resp.Body), e.Error()); retained != nil {
@@ -127,7 +127,13 @@ func (s *Store) RunCoastal(ctx context.Context, cfg CoastalConfig) {
 	if cfg.Rate <= 0 {
 		cfg.Rate = 4
 	}
-	c := &coastalClient{cfg: cfg, http: platform.Client(0), limiter: coastal.Limiter{Rate: cfg.Rate, Burst: 1}, observations: coastal.Breaker{Name: "observations", Threshold: 3, Cooldown: 2 * time.Second, MaxCooldown: 15 * time.Second}, stations: coastal.Breaker{Name: "stations", Threshold: 3, Cooldown: 2 * time.Second, MaxCooldown: 15 * time.Second}, s: s}
+	failures := platform.Int("PANTAI_BREAKER_FAILURES", 3)
+	cooldown := platform.Milliseconds("PANTAI_BREAKER_COOLDOWN_MS", 2000)
+	maxCooldown := platform.Milliseconds("PANTAI_BREAKER_MAX_COOLDOWN_MS", 15000)
+	if failures < 1 || cooldown > maxCooldown {
+		panic("coastal breaker requires positive failures and cooldown <= maximum")
+	}
+	c := &coastalClient{cfg: cfg, http: platform.Client(0), limiter: coastal.Limiter{Rate: cfg.Rate, Burst: 1}, observations: coastal.Breaker{Name: "observations", Threshold: failures, Cooldown: cooldown, MaxCooldown: maxCooldown}, stations: coastal.Breaker{Name: "stations", Threshold: failures, Cooldown: cooldown, MaxCooldown: maxCooldown}, s: s}
 	c.http.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	// One owner covers both endpoints, so the shared limiter remains a source-wide
 	// bound rather than multiplying upstream traffic by the replica count.
@@ -139,7 +145,7 @@ func (s *Store) RunCoastal(ctx context.Context, cfg CoastalConfig) {
 				defer close(stationDone)
 				for stationCtx.Err() == nil {
 					c.refreshStations(stationCtx)
-					Sleep(stationCtx, 30*time.Second)
+					Sleep(stationCtx, platform.Milliseconds("PANTAI_STATION_REFRESH_MS", 30000))
 				}
 			}()
 			defer func() { stop(); <-stationDone }()
@@ -147,7 +153,7 @@ func (s *Store) RunCoastal(ctx context.Context, cfg CoastalConfig) {
 				if e := c.acquire(owned); e != nil {
 					platform.Add("coastal_fetch_failures_total", 1)
 				}
-				Sleep(owned, 250*time.Millisecond)
+				Sleep(owned, platform.Milliseconds("PANTAI_POLL_INTERVAL_MS", 250))
 			}
 			return owned.Err()
 		})

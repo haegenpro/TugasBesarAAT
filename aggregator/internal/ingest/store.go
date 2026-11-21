@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"strconv"
 	"time"
 )
 
@@ -35,8 +36,9 @@ func New(ctx context.Context, url string) (*Store, error) {
 	}
 	cfg.MaxConns = int32(platform.Int("DB_MAX_OPEN_CONNS", 8))
 	cfg.ConnConfig.Tracer = platform.SQLTracer{}
-	cfg.ConnConfig.RuntimeParams["statement_timeout"] = "5000"
-	cfg.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = "10000"
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(platform.Duration("DB_STATEMENT_TIMEOUT", 5*time.Second).Milliseconds(), 10)
+	cfg.ConnConfig.RuntimeParams["lock_timeout"] = strconv.FormatInt(platform.Duration("DB_LOCK_TIMEOUT", 2*time.Second).Milliseconds(), 10)
+	cfg.ConnConfig.RuntimeParams["idle_in_transaction_session_timeout"] = strconv.FormatInt(platform.Duration("DB_IDLE_TRANSACTION_TIMEOUT", 10*time.Second).Milliseconds(), 10)
 	p, e := pgxpool.NewWithConfig(ctx, cfg)
 	if e != nil {
 		return nil, e

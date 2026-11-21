@@ -123,7 +123,11 @@ func main() {
 	}
 	router := server.New(logger, a)
 	if st.Distributed {
-		fieldStore, err := st.ReadPool(ctx, 3)
+		fieldConnections := platform.Int("AGGREGATOR_FIELD_DB_CONNS", 3)
+		if fieldConnections < 1 || fieldConnections > 2147483647 {
+			panic("AGGREGATOR_FIELD_DB_CONNS must be a positive 32-bit integer")
+		}
+		fieldStore, err := st.ReadPool(ctx, int32(fieldConnections))
 		if err != nil {
 			logger.Error("Field read pool configuration failed")
 			os.Exit(1)

@@ -4,6 +4,7 @@ import hashlib
 import json
 from common import NAMESPACE, ROOT, labels, local_volume, resource, resources
 from render import configmap, image, pod_env, policy, secret, service
+from tuning import application_env
 
 
 def database(credentials,owner,formation='services',name=None):
@@ -13,6 +14,7 @@ def database(credentials,owner,formation='services',name=None):
 
 
 def workload(cfg,name,role,port,env,replicas=2,component=None,node=None,volume=None,command=None):
+    env={**env,**application_env(cfg,name)}
     private={key:value for key,value in env.items() if key in ('DATABASE_URL','NATS_URL') or key.endswith(('_TOKEN','_KEY','_SECRET','_PASSWORD'))}
     public={key:value for key,value in env.items() if key not in private}
     result=[secret(name+'-runtime',private),configmap(name+'-config',public)]
@@ -46,18 +48,17 @@ def workload(cfg,name,role,port,env,replicas=2,component=None,node=None,volume=N
 def applications(cfg,credentials):
     nats='nats://application:'+quote(credentials['nats'],safe='')+'@broker:4222'
     registry='http://schema-registry:8080/apis/ccompat/v7'
-    common={'GOMEMLIMIT':'192MiB','GOMAXPROCS':'2','DB_MAX_OPEN_CONNS':'8','DB_MAX_IDLE_CONNS':'2',
-        'DB_STATEMENT_TIMEOUT':'1500ms','DB_LOCK_TIMEOUT':'500ms','HTTP_MAX_IDLE_CONNS':'16',
+    common={'DB_MAX_IDLE_CONNS':'2',
+        'HTTP_MAX_IDLE_CONNS':'16',
         'HTTP_MAX_IDLE_CONNS_PER_HOST':'4','HTTP_MAX_CONNS_PER_HOST':'8','MAX_PAYLOAD_BYTES':str(4<<20),
         'MAX_JSON_DEPTH':'64','SHUTDOWN_TIMEOUT':'30s','OTEL_EXPORTER_OTLP_ENDPOINT':'http://jaeger:4318',
         'FAILED_INPUT_QUOTA_BYTES':str(cfg['limits']['quarantine_mib']<<20),
-        'OTEL_TRACES_SAMPLER_ARG':'0.05','NATS_URL':nats,'SCHEMA_REGISTRY_URL':registry,
+        'NATS_URL':nats,'SCHEMA_REGISTRY_URL':registry,
         'NATS_STREAM':'HAZARDS','NATS_SUBJECT':'hazard.events','NATS_LIFECYCLE_STREAM':'LIFECYCLE',
         'NATS_LIFECYCLE_SUBJECT':'hazard.lifecycle','NATS_DLQ_STREAM':'HAZARDS_DLQ',
         'NATS_MAX_ACK_PENDING':'32','NATS_ACK_WAIT':'30s','CONSUMER_WORKERS':'1'}
     result=[]
-    env={**common,'M2_ENABLED':'true','GOMEMLIMIT':'384MiB','DATABASE_URL':database(credentials,'canonical','canonical-0','hazards'),
-        'DB_MAX_OPEN_CONNS':'6',
+    env={**common,'M2_ENABLED':'true','DATABASE_URL':database(credentials,'canonical','canonical-0','hazards'),
         'AGGREGATOR_PORT':'8080','AGGREGATOR_ADMIN_TOKEN':credentials['admin'],
         'BMKG_BASE_URL':'http://bmkg-mock:8081','BMKG_API_KEY':credentials['bmkg'],
         'PVMBG_BASE_URL':'http://pvmbg-mock:8082','PVMBG_TOKEN':credentials['pvmbg'],
@@ -73,12 +74,12 @@ def applications(cfg,credentials):
     auth={**common,'AUTH_PORT':'8083','DATABASE_URL':database(credentials,'auth'),'AUTH_INTERNAL_KEY':credentials['auth_internal'],
         'ACCESS_TOKEN_TTL_SEC':'60','REFRESH_TOKEN_TTL_SEC':'86400','MEDIA_CLIENT_ID':'media-demo','MEDIA_CLIENT_SECRET':credentials['media'],
         'FIELD_CLIENT_ID':'field-demo','FIELD_CLIENT_SECRET':credentials['field'],'INTERNAL_CLIENT_ID':'internal-demo','INTERNAL_CLIENT_SECRET':credentials['internal'],
-        'AUTH_PRIORITY_ENABLED':'true','AUTH_PRIORITY_KEY':credentials['priority'],'AUTH_MAX_INFLIGHT':'32','AUTH_FIELD_RESERVED':'8','AUTH_DB_FIELD_RESERVED':'3'}
+        'AUTH_PRIORITY_ENABLED':'true','AUTH_PRIORITY_KEY':credentials['priority']}
     result+=workload(cfg,'auth-service','api',8083,auth)
     result.append(policy('auth-api',{'app':'auth-service'},['client-api'],[8083]))
     client={**common,'CLIENT_API_PORT':'8080','AUTH_BASE_URL':'http://auth-service:8083','AGGREGATOR_BASE_URL':'http://aggregator:8080',
-        'AUTH_INTERNAL_KEY':credentials['auth_internal'],'CLIENT_API_MAX_INFLIGHT':'64','CLIENT_API_MAX_INFLIGHT_PER_CLIENT':'16',
-        'CLIENT_API_PRIORITY_ENABLED':'true','CLIENT_API_FIELD_RESERVED':'16','CLIENT_API_AUTH_MAX_INFLIGHT':'32','CLIENT_API_AUTH_FIELD_RESERVED':'8',
+        'AUTH_INTERNAL_KEY':credentials['auth_internal'],
+        'CLIENT_API_PRIORITY_ENABLED':'true',
         'AUTH_PRIORITY_KEY':credentials['priority'],'FIELD_READ_TOKEN':credentials['field_read'],'ANALYTICS_ENABLED':'true','ANALYTICS_SERVICE_TOKEN':credentials['canonical_internal'],
         'INGESTION_BASE_URL':'http://ingestion:8080','FIELD_REPORT_SERVICE_TOKEN':credentials['ingestion_internal'],'OPS_SERVICE_TOKEN':credentials['admin']}
     if cfg['features'].get('ai'):client['SITUATION_BASE_URL']='http://situation-summarizer:8094'
@@ -93,7 +94,7 @@ def applications(cfg,credentials):
         result+=workload(cfg,name,'consumer',port,env)
         result.append(policy(name,{'app':name},['client-api'],[port]))
     for name,port in [('bmkg-mock',8081),('pvmbg-mock',8082)]:
-        env={**common,'SOURCE_ARCHIVE_PATH':'/data/history.db','GOMEMLIMIT':'96MiB'}
+        env={**common,'SOURCE_ARCHIVE_PATH':'/data/history.db'}
         if name=='bmkg-mock':env.update(BMKG_PORT=str(port),BMKG_API_KEY=credentials['bmkg'],BMKG_DELAY_MS='50',BMKG_EVENT_INTERVAL_MS='1000')
         else:env.update(PVMBG_PORT=str(port),PVMBG_TOKEN=credentials['pvmbg'],PVMBG_ADMIN_TOKEN=credentials['admin'],PVMBG_MIN_DELAY_MS='500',PVMBG_MAX_DELAY_MS='3000',PVMBG_REPORT_INTERVAL_MS='1000')
         result+=workload(cfg,name,'mock',port,env,1,node='a',volume='/data')
@@ -103,7 +104,7 @@ def applications(cfg,credentials):
         'APICURIO_DATASOURCE_PASSWORD':credentials['registry_db'],'REGISTRY_RETRY_DELAY_SEC':'5',
         'QUARKUS_HTTP_PORT':'8080','QUARKUS_MANAGEMENT_PORT':'9000',
         'JAVA_OPTS_APPEND':'-Xms32m -Xmx96m -XX:MaxMetaspaceSize=96m -XX:ReservedCodeCacheSize=16m -XX:MaxDirectMemorySize=8m -Xss256k -XX:ActiveProcessorCount=2',
-        'QUARKUS_DATASOURCE_JDBC_MAX_SIZE':'4','QUARKUS_DATASOURCE_JDBC_MIN_SIZE':'0'}
+        'QUARKUS_DATASOURCE_JDBC_MIN_SIZE':'0'}
     registry_objects=workload(cfg,'schema-registry','other',8080,registry_env,1,node='a')
     registry_template=next(o for o in registry_objects if o['kind']=='Deployment')['spec']['template']
     registry_template['metadata']['annotations']['prometheus.io/port']='9000'
@@ -114,7 +115,6 @@ def applications(cfg,credentials):
     result+=registry_objects
     result.append(policy('registry-api',{'app':'schema-registry'},['aggregator','ingestion','coastal-processor','wildfire-processor','field-report-processor','bmkg-mock','pvmbg-mock','consumer-dashboard','consumer-notifier'],[8080,9000]))
     ingestion={**common,'DATABASE_URL':database(credentials,'ingestion','ingestion'),'FIELD_REPORT_SERVICE_TOKEN':credentials['ingestion_internal'],
-        'DB_MAX_OPEN_CONNS':'4',
         'COASTAL_SLO_TOKEN':credentials['coastal_slo'],'SATELLITE_TOKEN':cfg['external'].get('satellite_token',''),
         'SATELLITE_URL':cfg['satellite']['url'],'SATELLITE_NAMESPACE':cfg['satellite']['namespace'],
         'SATELLITE_INITIAL_OFFSET':str(cfg['satellite']['initial_offset']),'PANTAI_BASE_URL':'http://sensor-pantai:8080',
@@ -124,7 +124,6 @@ def applications(cfg,credentials):
     for kind in ['wildfire','coastal','field-report']:
         name=kind+'-processor'
         env={**common,'DATABASE_URL':database(credentials,'ingestion','ingestion'),'WORKER_KIND':'field' if kind=='field-report' else kind,
-            'DB_MAX_OPEN_CONNS':'4',
             'AGGREGATOR_BASE_URL':'http://aggregator:8080','CANONICAL_SERVICE_TOKEN':credentials['canonical_internal'],
             'SATELLITE_ALLOWED_LATENESS':str(cfg['satellite']['lateness_seconds'])+'s'}
         result+=workload(cfg,name,'consumer',8080,env,component='aggregator',command=['/usr/local/bin/m2-worker'])
@@ -151,7 +150,7 @@ def applications(cfg,credentials):
         external=cfg['external']
         if not external.get('openrouter_api_key') or not external.get('summary_model'):raise ValueError('AI requires an explicit model and API key in private configuration')
         env={**common,'SUMMARIZER_PORT':'8094','AGGREGATOR_BASE_URL':'http://aggregator:8080','OPENROUTER_API_KEY':external['openrouter_api_key'],
-            'SUMMARY_MODEL':external['summary_model'],'LLM_MAX_TOKENS':'4096','LLM_REASONING_TOKENS':'1024','SUMMARY_SERVICE_TOKEN':credentials['canonical_internal']}
+            'SUMMARY_MODEL':external['summary_model'],'SUMMARY_SERVICE_TOKEN':credentials['canonical_internal']}
         result+=workload(cfg,'situation-summarizer','other',8094,env,1,node='b')
         result.append(policy('situation-api',{'app':'situation-summarizer'},['client-api'],[8094]))
     return result

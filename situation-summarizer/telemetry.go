@@ -38,22 +38,35 @@ func setupTelemetry() (func(context.Context) error, error) {
 	ratio := 0.05
 	if raw := os.Getenv("OTEL_TRACES_SAMPLER_ARG"); raw != "" {
 		value, err := strconv.ParseFloat(raw, 64)
-		if err != nil || value < 0 || value > 1 {
+		if err != nil || value != value || value < 0 || value > 1 {
 			return nil, fmt.Errorf("invalid trace sampling ratio")
 		}
 		ratio = value
 	}
+	queue, err := envInt("OTEL_BSP_MAX_QUEUE_SIZE", 128, 1, 2147483647)
+	if err != nil {
+		return nil, err
+	}
+	batch, err := envInt("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", 32, 1, queue)
+	if err != nil {
+		return nil, err
+	}
+	timeoutMS, err := envInt("OTEL_BSP_EXPORT_TIMEOUT", 1000, 1, 2147483647)
+	if err != nil {
+		return nil, err
+	}
+	exportTimeout := time.Duration(timeoutMS) * time.Millisecond
 	options := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", "situation-summarizer"))),
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))),
 	}
 	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" {
-		exporter, err := otlptracehttp.New(context.Background(), otlptracehttp.WithTimeout(time.Second))
+		exporter, err := otlptracehttp.New(context.Background(), otlptracehttp.WithTimeout(exportTimeout))
 		if err != nil {
 			return nil, err
 		}
-		options = append(options, sdktrace.WithBatcher(exporter, sdktrace.WithMaxQueueSize(128),
-			sdktrace.WithMaxExportBatchSize(32), sdktrace.WithExportTimeout(time.Second)))
+		options = append(options, sdktrace.WithBatcher(exporter, sdktrace.WithMaxQueueSize(queue),
+			sdktrace.WithMaxExportBatchSize(batch), sdktrace.WithExportTimeout(exportTimeout)))
 	}
 	provider := sdktrace.NewTracerProvider(options...)
 	otel.SetTracerProvider(provider)
