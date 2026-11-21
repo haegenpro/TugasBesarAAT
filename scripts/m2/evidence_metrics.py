@@ -118,3 +118,42 @@ class Scraper:
     def metrics(self, path='/metrics'):
         status, text, _ = self.get_text(path)
         return parse_metrics(text) if status == 200 else None
+
+
+def merge_metrics(scrapes):
+    """One metrics dict whose samples are the concatenation of every pod's samples; None when no pod answered."""
+    merged = {}
+    for scrape in scrapes:
+        for name, samples in (scrape or {}).items():
+            merged.setdefault(name, []).extend(samples)
+    return merged or None
+
+
+class PodScrapers:
+    """Scrape every running pod of one app: work such as source polling is done only by the lease holder."""
+
+    def __init__(self, cfg, app, port):
+        self.cfg, self.app, self.port = cfg, app, port
+        self.scrapers = []
+
+    def __enter__(self):
+        from common import NAMESPACE, kubectl
+        pods = json.loads(kubectl(self.cfg, '-n', NAMESPACE, 'get', 'pods', '-l', f'app={self.app}', '-o', 'json'))['items']
+        for pod in pods:
+            if pod['status'].get('phase') == 'Running' and not pod['metadata'].get('deletionTimestamp'):
+                scraper = Scraper(self.cfg, 'pod/'+pod['metadata']['name'], self.port)
+                scraper.__enter__()
+                self.scrapers.append(scraper)
+        if not self.scrapers:
+            raise RuntimeError(f'no running {self.app} pod to scrape')
+        return self
+
+    def __exit__(self, *_):
+        for scraper in self.scrapers:
+            scraper.close()
+
+    def metrics(self, path='/metrics'):
+        return merge_metrics(scraper.metrics(path) for scraper in self.scrapers)
+
+    def get_json(self, path, token=None, timeout=10):
+        return self.scrapers[0].get_json(path, token, timeout)

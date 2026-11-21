@@ -24,16 +24,18 @@ Pick the cluster once with `manage.py init --profile minikube|k3s`; all tools fo
 | `p2_throughput_compare.py` | P2-7 | one-versus-three Aggregator throughput on the same dataset |
 | `p1_analytics_compare.py` | P1-7 | dashboard numbers versus a direct Audit API count per type, severity and area; verdict on the numbers only (the page itself is manual) |
 | `p3_schema_mode.py` | P3-1 | switches the PVMBG mock between `v1`, `compatible` and `breaking` contracts |
-| `p3_schema_behavior.py` | P3-1 | runs every contract and attaches what happened (events added, unprocessed by status) next to the declared policy; no verdict |
+| `p3_schema_behavior.py` | P3-1 | `--execute` runs reader v1 with mock v1, compatible and breaking, then activates reader v2, replays and runs breaking again; PASS/FAIL per scenario against the declared design |
 | `p3_ops_access_matrix.py` | P3-5 | HTTP status per identity and Internal Ops endpoint, with a verdict that only Internal Ops gets through |
 | `p3_field_report_ledger.py` | P3-6 | `submit` records every 202 with its Idempotency-Key, `reconcile` checks receipts and database counts and prints the 202 latency (p50, p95, max) |
 | `p3_quarantine_payload.py` | P3-2 | downloads retained original bytes through Internal Ops, recomputes SHA-256 against `X-Content-SHA256`, checks the Audit listing carries no raw field |
 | `p3_replay_flow.py` | P3-4 | `--execute` activates the reader version, replays retained messages, repeats the request (must select nothing), compares Audit counts and duplicates |
 | `p4_province_reference.py` | P4-1, P4-6 | validates and installs the checksum-pinned province reference |
 | `p4_requeue_satellite_updates.py` | P4-3 | one-off migration for updates saved under the earlier retraction rule |
+| `p4_processor_kill_check.py` | P4-5 | force-deletes the wildfire processor repeatedly during processing; PASS/FAIL for no regression, resumption, no lost or duplicated identity |
+| `p4_reference_compare.py` | P4-6 | compares Audit WILDFIRE events with a reference file from the assistants (needs the file) |
 | `p4_ingestion_progress.py` | P4-2, P4-4, P4-7 (helps P4-8) | received/prepared/applied offsets, lag, watermark, late-data counters over time; no verdict |
-| `p5_warning_slo_snapshot.py` | P5-1, P5-8 | critical-warning delivery measurements from the notifier; PASS/FAIL only when measurable |
-| `p5_sensor_fault_probe.py` | P5-4 (supports P5-3) | client latency, source status, breaker state and request rate to the sensor while it is unhealthy; no verdict |
+| `p5_warning_slo_snapshot.py` | P5-1, P5-2, P5-8 | delivery measurements over the whole coverage period plus reconciliation (expected = delivered + rejected + pending, rejected ids listed); PASS/FAIL only when measurable |
+| `p5_sensor_fault_probe.py` | P5-3, P5-4 | with `--break-at/--restore-at` scales the sensor down and up itself and judges latency, errors, stale status, breaker opening, request surge and recovery; scrapes every ingestion pod |
 
 ## Evidence tools (several criteria)
 

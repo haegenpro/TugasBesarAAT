@@ -17,6 +17,8 @@ import p3_quarantine_payload as quarantine
 import p3_replay_flow as replay_flow
 import p3_schema_behavior as schema
 import p4_ingestion_progress as progress
+import p4_processor_kill_check as killcheck
+import p4_reference_compare as refcompare
 import p5_sensor_fault_probe as sensor
 import p5_warning_slo_snapshot as slo
 
@@ -203,6 +205,18 @@ class SchemaBehaviorTests(unittest.TestCase):
         self.assertEqual(result['unprocessed_added'], {'parked/not-retryable': 2, 'retrying/retryable': 0})
         self.assertEqual(result['new_reasons'], ['schema_incompatible: x'])
 
+    def test_each_scenario_is_judged_against_the_declared_design(self):
+        accepted = {'events_added': 5, 'unprocessed_added': {}}
+        self.assertTrue(schema.judge(1, 'v1', accepted)[1])
+        self.assertTrue(schema.judge(1, 'compatible', accepted)[1])
+        self.assertTrue(schema.judge(2, 'breaking', accepted)[1])
+        self.assertFalse(schema.judge(1, 'compatible', {'events_added': 0, 'unprocessed_added': {}})[1])
+        self.assertFalse(schema.judge(2, 'breaking', {'events_added': 3, 'unprocessed_added': {'parked/not-retryable': 1}})[1])
+        quarantined = {'events_added': 0, 'unprocessed_added': {'parked/not-retryable': 2, 'retrying/retryable': 0}}
+        self.assertTrue(schema.judge(1, 'breaking', quarantined)[1])
+        self.assertFalse(schema.judge(1, 'breaking', accepted)[1])
+        self.assertFalse(schema.judge(1, 'breaking', {'events_added': 0, 'unprocessed_added': {'parked/not-retryable': 1, 'retrying/retryable': 1}})[1])
+
 
 class ProgressTests(unittest.TestCase):
     @staticmethod
@@ -237,6 +251,69 @@ class ProgressTests(unittest.TestCase):
         self.assertIsNone(progress.summarize(rows)['SATELIT/ns']['seconds_peak_to_zero'])
 
 
+class CatchUpVerdictTests(unittest.TestCase):
+    @staticmethod
+    def rows(inflow, applied_rate, seconds=60, backlog=0):
+        rows, received, applied = [], 1000, 1000-backlog
+        for t in range(0, seconds+1, 5):
+            rows.append({'t': t, 'key': 'SATELIT/x', 'received': received, 'applied': applied, 'lag': received-applied})
+            received += inflow*5
+            applied = min(received, applied+applied_rate*5)
+        return rows
+
+    def test_keeping_up_passes_and_falling_behind_fails(self):
+        self.assertEqual(progress.catchup_verdict(self.rows(80, 120))[0], 'PASS')
+        state, detail = progress.catchup_verdict(self.rows(80, 15, seconds=120))
+        self.assertEqual(state, 'FAIL')
+        self.assertIn('worst backlog', detail)
+
+    def test_an_idle_feed_is_not_measurable_never_a_pass(self):
+        self.assertEqual(progress.catchup_verdict(self.rows(0, 0, backlog=5000))[0], 'NOT MEASURABLE')
+        self.assertEqual(progress.catchup_verdict([])[0], 'NOT MEASURABLE')
+
+
+class ProcessorKillTests(unittest.TestCase):
+    @staticmethod
+    def samples(applied):
+        return [{'t': 10*i, 'applied': a, 'prepared': 500, 'received': 500} for i, a in enumerate(applied)]
+
+    def test_resuming_progress_with_nothing_lost_passes(self):
+        verdicts = killcheck.evaluate(self.samples([100, 120, 120, 150, 200, 260]), [15], 30, ['a', 'b'], ['a', 'b', 'c'],
+                                      {'duplicate_hazard_ids': [], 'duplicate_source_refs': []})
+        self.assertTrue(all(ok for _, ok, _ in verdicts), verdicts)
+
+    def test_stall_regression_loss_and_duplicates_fail(self):
+        verdicts = {n.split(':')[-1].strip(): ok for n, ok, _ in killcheck.evaluate(
+            self.samples([100, 120, 120, 120, 120, 120]), [15], 30, ['a', 'b'], ['a'],
+            {'duplicate_hazard_ids': ['x'], 'duplicate_source_refs': []})}
+        self.assertFalse(verdicts['applied advances within 30 s'])
+        self.assertFalse(verdicts['no WILDFIRE identity present before the kills is missing afterwards'])
+        self.assertFalse(verdicts['no duplicated hazard id or source reference'])
+        regress = killcheck.evaluate(self.samples([100, 90, 120]), [], 30)
+        self.assertFalse(regress[0][1])
+
+    def test_no_backlog_is_not_measurable(self):
+        idle = [{'t': 10*i, 'applied': 500, 'prepared': 500, 'received': 500} for i in range(4)]
+        found = {n: ok for n, ok, _ in killcheck.evaluate(idle, [5], 30)}
+        self.assertIsNone(found['kill 1: applied advances within 30 s'])
+        self.assertIsNone(found['processing made progress during the run'])
+
+
+class ReferenceCompareTests(unittest.TestCase):
+    def test_reference_formats_and_differences(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)/'ref.json'
+            path.write_text(json.dumps({'events': ['a', {'source_ref_id': 'b', 'severity': 'SIAGA'}, {'source_ref_id': 'c'}]}))
+            reference = refcompare.load_reference(path)
+            path.write_text(json.dumps([{'detail': 1}]))
+            with self.assertRaises(ValueError):
+                refcompare.load_reference(path)
+        actual = {'a': {}, 'b': {'severity': 'AWAS'}, 'z': {}}
+        result = refcompare.compare(reference, actual)
+        self.assertEqual((result['missing'], result['extra'], result['common']), (['c'], ['z'], 2))
+        self.assertEqual(result['different'], [('b', 'severity', 'SIAGA', 'AWAS')])
+
+
 class SloTests(unittest.TestCase):
     @staticmethod
     def values(**overrides):
@@ -266,6 +343,25 @@ class SloTests(unittest.TestCase):
         failed = {label: state for label, state, _ in slo.p95_lines(self.values(collection_success=0.0))}
         self.assertEqual(failed['no overdue pending warning'], 'NOT MEASURABLE')
 
+    def test_notifier_report_maps_to_gauge_style_values(self):
+        values = slo.from_report({'expected': 5, 'delivered': 4, 'pending': 0, 'rejected': 1, 'pending_overdue': 0, 'evaluated': 4,
+                                  'p95_seconds': 0.8, 'coverage_complete': True, 'p95_complete': False,
+                                  'all_acquired_critical_delivered': False, 'on_time_ratio': None})
+        self.assertEqual((values['expected'], values['p95_delivered_seconds'], values['coverage_complete'], values['p95_complete']),
+                         (5.0, 0.8, 1.0, 0.0))
+        self.assertTrue(math.isnan(values['on_time_ratio']))
+
+    def test_whole_run_reports_judge_delivery_and_reconciliation(self):
+        done = self.values(all_acquired_critical_delivered=1.0, expected=5.0, delivered=4.0, rejected=1.0, pending=0.0)
+        states = {label: state for label, state, _ in slo.p95_lines(done)}
+        self.assertEqual(states['every acquired critical warning delivered'], 'PASS')
+        self.assertEqual(slo.books_close(done)[1], 'PASS')
+        missing = dict(done, delivered=3.0)
+        self.assertEqual(slo.books_close(missing)[1], 'FAIL')
+        self.assertEqual(slo.books_close(dict(done, expected=0.0, delivered=0.0, rejected=0.0))[1], 'NOT MEASURABLE')
+        partial = {label: state for label, state, _ in slo.p95_lines(dict(done, coverage_complete=0.0))}
+        self.assertEqual(partial['every acquired critical warning delivered'], 'NOT MEASURABLE')
+
 
 class SensorProbeTests(unittest.TestCase):
     def test_keys_states_and_latency(self):
@@ -280,6 +376,44 @@ class SensorProbeTests(unittest.TestCase):
     def test_breaker_state_names(self):
         parsed = metrics.parse_metrics('app_coastal_observations_breaker_state 2\napp_coastal_stations_breaker_state 0\n')
         self.assertEqual(sensor.breaker_states(parsed), {'observations': 'open', 'stations': 'closed'})
+
+    def test_breaker_state_of_several_pods_takes_the_most_open(self):
+        merged = metrics.merge_metrics([metrics.parse_metrics('app_coastal_observations_breaker_state 0\n'),
+                                        metrics.parse_metrics('app_coastal_observations_breaker_state 2\n'), None])
+        self.assertEqual(sensor.breaker_states(merged), {'observations': 'open'})
+        self.assertIsNone(metrics.merge_metrics([None, None]))
+
+    def timeline(self, status_in_fault=200, p95=0.02, opened=True, rate_in_fault=1.0, recovers=True):
+        ticks = []
+        for t in range(0, 40, 2):
+            fault = 10 <= t < 20
+            healthy = not fault and (t < 10 or (recovers and t >= 24))
+            ticks.append({'t': t, 'http': status_in_fault if fault else 200, 'seconds': p95 if fault else 0.01, 'partial': False,
+                          'sources': {'SENSOR_PANTAI': 'fresh' if healthy else 'stale'}})
+        scrapes = [{'t': t, 'breakers': {'observations': 'open' if opened and 10 <= t < 20 else 'closed'},
+                    **({'sensor_requests_per_s': rate_in_fault if 10 <= t < 20 else 4.0} if t else {})} for t in range(0, 40, 5)]
+        return ticks, scrapes
+
+    def verdicts(self, **kwargs):
+        ticks, scrapes = self.timeline(**kwargs)
+        return {name.split(' (')[0]: ok for name, ok, _ in sensor.evaluate(ticks, scrapes, 10, 20)}
+
+    def test_a_healthy_degradation_passes_every_check(self):
+        self.assertTrue(all(ok for ok in self.verdicts().values()))
+
+    def test_errors_slow_answers_missing_breaker_surge_and_no_recovery_fail(self):
+        self.assertFalse(self.verdicts(status_in_fault=503)['no client read fails while the sensor is down'])
+        self.assertFalse(self.verdicts(p95=2.0)['client answers stay fast while the sensor is down'])
+        self.assertFalse(self.verdicts(opened=False)['a circuit breaker opened'])
+        self.assertFalse(self.verdicts(rate_in_fault=50.0)['requests to the sensor do not surge while it is down'])
+        self.assertFalse(self.verdicts(recovers=False)['the sensor sources are fresh again within 60 s of the restore'])
+
+    def test_without_breaker_gauges_the_breaker_check_is_not_measurable(self):
+        ticks, scrapes = self.timeline()
+        for scrape in scrapes:
+            scrape['breakers'] = {}
+        found = {name: ok for name, ok, _ in sensor.evaluate(ticks, scrapes, 10, 20)}
+        self.assertIsNone(found['a circuit breaker opened'])
 
 
 if __name__ == '__main__':

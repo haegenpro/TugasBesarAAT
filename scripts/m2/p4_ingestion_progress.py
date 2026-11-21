@@ -61,6 +61,32 @@ def summarize(rows):
     return summary
 
 
+def lag_seconds(rows, window=6):
+    """[(t, lag in seconds of feed time, inflow per second)].
+
+    The feed rate is averaged from the start of the run up to each sample, so a stall of the
+    acquisition itself (which collapses the instantaneous rate) cannot inflate the backlog
+    figure; `window` is the number of samples needed before the first judgement."""
+    result = []
+    for index in range(window, len(rows)):
+        first, last = rows[0], rows[index]
+        span = last['t']-first['t']
+        inflow = (last['received']-first['received'])/span if span > 0 else 0
+        if inflow > 0:
+            result.append((last['t'], max(0, last['lag'])/inflow, inflow))
+    return result
+
+
+def catchup_verdict(rows, limit=60, min_inflow=5):
+    """(state, detail) for 'the backlog never exceeds `limit` seconds of feed'; not measurable without a live feed."""
+    points = [p for p in lag_seconds(rows) if p[2] >= min_inflow]
+    if not points:
+        return ('NOT MEASURABLE', f'the feed delivered less than {min_inflow} inputs per second, so lag cannot be expressed in feed seconds')
+    worst = max(points, key=lambda p: p[1])
+    detail = f'worst backlog {worst[1]:.0f} s of feed at +{worst[0]:.0f} s (inflow {worst[2]:.0f}/s); final {points[-1][1]:.0f} s'
+    return ('PASS' if worst[1] <= limit else 'FAIL', detail)
+
+
 def cell(number, digits=1):
     return '-' if number is None else f'{number:.{digits}f}'
 
@@ -73,6 +99,8 @@ def main(argv=None):
     parser.add_argument('--interval', type=float, default=5)
     parser.add_argument('--only', help='show only keys containing this text (case-insensitive)')
     parser.add_argument('--metrics', action='store_true', help='also scrape satellite gauges from one ingestion pod')
+    parser.add_argument('--lag-limit-seconds', type=float, default=0,
+                        help='judge that the backlog never exceeds this many seconds of feed (60 for P4-4); 0 gives no verdict')
     parser.add_argument('--output')
     args = parser.parse_args(argv)
     cfg = read_config(args.config)
@@ -134,11 +162,17 @@ def main(argv=None):
                  [[k, s['samples'], s['peak_lag'], s['peak_at_s'], s['final_lag'],
                    '-' if s['seconds_peak_to_zero'] is None else s['seconds_peak_to_zero'], s['received_delta'],
                    s['applied_delta'], s['late_mutations_delta']] for k, s in summary.items()])
-    report.line('No verdict: compare the lag timeline with the 60 s catch-up target and the late counter with the declared bound.')
-    report.data.update(samples=rows, summary=summary, metrics=metric_rows,
+    verdicts = []
+    if args.lag_limit_seconds:
+        for key in sorted({r['key'] for r in rows}):
+            state, detail = catchup_verdict([r for r in rows if r['key'] == key], args.lag_limit_seconds)
+            verdicts.append((key, state, detail))
+            report.line(f'{state:14} {key}: backlog stays within {args.lag_limit_seconds:g} s of feed ({detail})')
+    report.line('Compare the late counter with the declared bound; the lag verdict divides the backlog by the feed rate averaged since the start of the run.')
+    report.data.update(samples=rows, summary=summary, metrics=metric_rows, verdicts=[list(v) for v in verdicts],
                        finished_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
     report.save(directory)
-    return 0
+    return 1 if any(state == 'FAIL' for _, state, _ in verdicts) else 0
 
 
 if __name__ == '__main__':
