@@ -60,7 +60,10 @@ def configuration(env: dict) -> dict:
         'bootstrap': {'dcs': {'ttl': 15, 'loop_wait': 2, 'retry_timeout': 3,
                                'synchronous_mode': True, 'synchronous_mode_strict': True,
                                'synchronous_node_count': 1, 'check_timeline': True,
-                               'failsafe_mode': False, 'postgresql': {'use_pg_rewind': True,
+                               # A leader that cannot reach the Kubernetes API keeps its role only
+                               # while every other member confirms it over the REST API; a slow API
+                               # server no longer demotes a healthy primary (retry_timeout is short).
+                               'failsafe_mode': True, 'postgresql': {'use_pg_rewind': True,
                                                                      'parameters': parameters}},
                       'initdb': [{'encoding': 'UTF8'}, 'data-checksums']},
         'postgresql': {'listen': '0.0.0.0:5432', 'connect_address': host+':5432',

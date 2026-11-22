@@ -55,6 +55,7 @@ func (l BatchLimits) normalized() BatchLimits {
 }
 
 func (s *Store) RunSatellite(ctx context.Context, cfg SatelliteConfig) {
+	refused := 0
 	for ctx.Err() == nil {
 		e := s.Leases.Run(ctx, "acquire:SATELIT:"+cfg.Namespace, func(c context.Context) error {
 			err := s.satelliteSession(c, cfg)
@@ -66,8 +67,35 @@ func (s *Store) RunSatellite(ctx context.Context, cfg SatelliteConfig) {
 		if e != nil {
 			platform.Add("satellite_reconnects_total", 1)
 		}
-		Sleep(ctx, time.Second)
+		var delay time.Duration
+		delay, refused = satelliteRetryDelay(e, refused)
+		Sleep(ctx, delay)
 	}
+}
+
+// feedStatusError is a non-200 answer to the stream request.
+type feedStatusError struct{ code int }
+
+func (e feedStatusError) Error() string { return fmt.Sprintf("satellite stream returned %d", e.code) }
+
+// satelliteRetryDelay returns how long to wait before reconnecting and the new count of consecutive
+// refusals. Transient failures (503, a dropped connection, an idle cut) reconnect after a second so
+// catch-up resumes quickly. A refusal that repeating at once cannot fix (401/403 credentials, 429 an
+// earlier connection the feed still counts) backs off exponentially up to SATELLITE_RETRY_MAX_MS,
+// and the count resets once any other outcome occurs.
+func satelliteRetryDelay(err error, refused int) (time.Duration, int) {
+	var status feedStatusError
+	if !errors.As(err, &status) || (status.code != http.StatusUnauthorized && status.code != http.StatusForbidden && status.code != http.StatusTooManyRequests) {
+		return time.Second, 0
+	}
+	refused++
+	limit := platform.Milliseconds("SATELLITE_RETRY_MAX_MS", 30000)
+	delay := time.Second << min(refused, 10)
+	if delay > limit {
+		delay = limit
+	}
+	platform.Add(fmt.Sprintf("satellite_refusals_total_%d", status.code), 1)
+	return delay, refused
 }
 
 // rejection is an unreadable frame that is retained as evidence, after every
@@ -108,17 +136,21 @@ func (s *Store) satelliteSession(ctx context.Context, cfg SatelliteConfig) error
 	req.Header.Set("Accept", "text/event-stream")
 	client := platform.Client(0)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	// The idle deadline starts before the request, so connecting and waiting for the response
+	// headers are bounded too: a feed (or proxy) that accepts the connection but never answers
+	// is cut after the same idle limit instead of holding the session indefinitely.
+	idleTimeout := platform.Milliseconds("SATELLITE_IDLE_TIMEOUT_MS", 20000)
+	idle := time.AfterFunc(idleTimeout, cancel)
+	defer idle.Stop()
 	resp, e := client.Do(req)
 	if e != nil {
 		return e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("satellite stream returned %d", resp.StatusCode)
+		return feedStatusError{resp.StatusCode}
 	}
-	idleTimeout := platform.Milliseconds("SATELLITE_IDLE_TIMEOUT_MS", 20000)
-	idle := time.AfterFunc(idleTimeout, cancel)
-	defer idle.Stop()
+	idle.Reset(idleTimeout)
 	stream := satellite.NewStream(&streamActivity{Reader: resp.Body, timer: idle, timeout: idleTimeout}, platform.Int("MAX_PAYLOAD_BYTES", 4<<20))
 
 	// The reader keeps draining the connection while the writer commits, through a

@@ -367,3 +367,52 @@ func TestM2GapLargerThanTheFillBoundKeepsTheOrderingBarrier(t *testing.T) {
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM raw_inputs WHERE namespace=$1 AND state='pending'`, ns).Scan(&pending))
 	require.Equal(t, len(inputs), pending, "nothing was prepared out of order")
 }
+
+// An append commits while frontiers() waits for the progress row: the re-evaluated row carries the
+// new received, but the statement's snapshot does not contain the appended (pending) inputs. The
+// frontier must not move past them.
+func TestM2FrontiersNeverPassInputsAppendedWhileWaiting(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	ns, inputs := fireFixture(t, s, "bridge.jsonl")
+	last := inputs[len(inputs)-1].Position
+	// Everything stored so far is finished, so there is no pending input before the append.
+	_, e := s.Pool.Exec(ctx, `UPDATE raw_inputs SET state='applied' WHERE namespace=$1`, ns)
+	require.NoError(t, e)
+
+	appender, e := s.Pool.Begin(ctx)
+	require.NoError(t, e)
+	defer appender.Rollback(ctx)
+	_, e = appender.Exec(ctx, `INSERT INTO raw_inputs(message_id,source,namespace,position,entity_key,payload,metadata,digest,correlation_id) VALUES($1,'SATELIT',$2,$3,'k','\x00','{}','d','c')`, uuid.NewString(), ns, last+1)
+	require.NoError(t, e)
+	_, e = appender.Exec(ctx, `UPDATE source_progress SET received=$2 WHERE source='SATELIT' AND namespace=$1`, ns, last+1)
+	require.NoError(t, e)
+
+	done := make(chan error, 1)
+	go func() {
+		tx, e := s.Pool.Begin(ctx)
+		if e != nil {
+			done <- e
+			return
+		}
+		defer tx.Rollback(ctx)
+		if e = frontiers(ctx, tx, "SATELIT", ns); e != nil {
+			done <- e
+			return
+		}
+		done <- tx.Commit(ctx)
+	}()
+	// Wait until frontiers() is blocked on the row lock, so its snapshot predates the append.
+	require.Eventually(t, func() bool {
+		var waiting int
+		_ = s.Pool.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE 'UPDATE source_progress p SET%'`).Scan(&waiting)
+		return waiting > 0
+	}, 5*time.Second, 20*time.Millisecond)
+	require.NoError(t, appender.Commit(ctx))
+	require.NoError(t, <-done)
+
+	var prepared, applied int64
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT prepared,applied FROM source_progress WHERE source='SATELIT' AND namespace=$1`, ns).Scan(&prepared, &applied))
+	require.LessOrEqual(t, prepared, last, "prepared must not pass the input appended while frontiers waited")
+	require.LessOrEqual(t, applied, last)
+}

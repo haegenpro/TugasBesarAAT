@@ -264,6 +264,17 @@ func (s *Store) prepareCoastal(ctx context.Context, i Input, js jetstream.JetStr
 	return commit(ctx, tx, "prepare_coastal")
 }
 func parkInput(ctx context.Context, tx pgx.Tx, i Input, reason string) error {
+	if e := parkRows(ctx, tx, i, reason); e != nil {
+		return e
+	}
+	if e := frontiers(ctx, tx, i.Source, i.Namespace); e != nil {
+		return e
+	}
+	return commit(ctx, tx, "park")
+}
+
+// parkRows records an input as parked (and blocks its entity) without touching progress.
+func parkRows(ctx context.Context, tx pgx.Tx, i Input, reason string) error {
 	if len(reason) > 1024 {
 		reason = string([]rune(reason)[:min(len([]rune(reason)), 256)])
 	}
@@ -275,13 +286,8 @@ func parkInput(ctx context.Context, tx pgx.Tx, i Input, reason string) error {
 	if _, e := tx.Exec(ctx, `UPDATE raw_inputs SET state='parked',reason=$2 WHERE message_id=$1`, i.ID, reason); e != nil {
 		return e
 	}
-	if _, e := tx.Exec(ctx, `UPDATE warning_expectations SET rejected=true WHERE message_id=$1`, i.ID); e != nil {
-		return e
-	}
-	if e := frontiers(ctx, tx, i.Source, i.Namespace); e != nil {
-		return e
-	}
-	return commit(ctx, tx, "park")
+	_, e := tx.Exec(ctx, `UPDATE warning_expectations SET rejected=true WHERE message_id=$1`, i.ID)
+	return e
 }
 func queueCanonical(ctx context.Context, tx pgx.Tx, i Input, b store.CanonicalBatch) error {
 	metadata, e := json.Marshal(traceMetadata(ctx, i.Metadata))
@@ -314,7 +320,18 @@ func queueCanonical(ctx context.Context, tx pgx.Tx, i Input, b store.CanonicalBa
 	_, e = tx.Exec(ctx, `UPDATE raw_inputs SET state='prepared' WHERE message_id=$1`, i.ID)
 	return e
 }
+// frontiers advances prepared and applied to just before the first input that is still pending
+// (respectively pending or prepared), or to the last stored input when there is none.
+//
+// The fallback is the last stored input read in the same snapshot as the pending subquery, not the
+// row's received column. Under READ COMMITTED, an UPDATE that waited for an append's row lock is
+// re-evaluated on the appended row version (new received) while its subqueries keep the statement's
+// original snapshot, which does not contain the appended inputs; falling back to received then moved
+// the frontier past inputs that were still pending.
 func frontiers(ctx context.Context, tx pgx.Tx, source, ns string) error {
-	_, e := tx.Exec(ctx, `UPDATE source_progress p SET prepared=GREATEST(prepared,coalesce((SELECT min(position)-1 FROM raw_inputs i WHERE i.source=p.source AND i.namespace=p.namespace AND i.state='pending'),received)),applied=GREATEST(applied,coalesce((SELECT min(position)-1 FROM raw_inputs i WHERE i.source=p.source AND i.namespace=p.namespace AND i.state IN ('pending','prepared')),received)) WHERE source=$1 AND namespace=$2`, source, ns)
+	_, e := tx.Exec(ctx, `UPDATE source_progress p SET
+ prepared=GREATEST(prepared,coalesce((SELECT min(position)-1 FROM raw_inputs i WHERE i.source=p.source AND i.namespace=p.namespace AND i.state='pending'),(SELECT max(position) FROM raw_inputs i WHERE i.source=p.source AND i.namespace=p.namespace))),
+ applied=GREATEST(applied,coalesce((SELECT min(position)-1 FROM raw_inputs i WHERE i.source=p.source AND i.namespace=p.namespace AND i.state IN ('pending','prepared')),(SELECT max(position) FROM raw_inputs i WHERE i.source=p.source AND i.namespace=p.namespace)))
+ WHERE source=$1 AND namespace=$2`, source, ns)
 	return e
 }

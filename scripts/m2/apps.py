@@ -29,7 +29,8 @@ def workload(cfg,name,role,port,env,replicas=2,component=None,node=None,volume=N
                # values must win when both sources contain the same key.
                'env':pod_env({}), 'envFrom':[{'secretRef':{'name':name+'-runtime'}},{'configMapRef':{'name':name+'-config'}}],
                'resources':resources(role),'ports':[{'name':'metrics','containerPort':port}],
-               'readinessProbe':{'httpGet':{'path':'/ready','port':port},'periodSeconds':3,'failureThreshold':2},
+               # An explicit timeout: the 1 s default fails a healthy replica during a load burst.
+               'readinessProbe':{'httpGet':{'path':'/ready','port':port},'periodSeconds':3,'timeoutSeconds':2,'failureThreshold':3},
                'livenessProbe':{'httpGet':{'path':'/health','port':port},'periodSeconds':10,'failureThreshold':6},
                'startupProbe':{'httpGet':{'path':'/health','port':port},'periodSeconds':3,'failureThreshold':60}}
     if command:container['command']=command
@@ -49,10 +50,15 @@ def workload(cfg,name,role,port,env,replicas=2,component=None,node=None,volume=N
         # The native sleep action needs no sleep binary in the image (Kubernetes 1.30+).
         container['lifecycle']={'preStop':{'sleep':{'seconds':DRAIN_SECONDS}}}
     strategy={'type':'Recreate'} if volume else {'type':'RollingUpdate','rollingUpdate':{'maxSurge':1,'maxUnavailable':0}}
-    result.append(resource('Deployment',name,spec={'replicas':replicas,'strategy':strategy,
+    spec={'replicas':replicas,'strategy':strategy,
         'selector':{'matchLabels':{'app':name}},'template':{'metadata':{'labels':labels(name,role),'annotations':{
             'prometheus.io/scrape':'true','prometheus.io/port':str(port),
-            'aat.bnpb/runtime-sha256':hashlib.sha256(json.dumps(env,sort_keys=True).encode()).hexdigest()}},'spec':pod}}))
+            'aat.bnpb/runtime-sha256':hashlib.sha256(json.dumps(env,sort_keys=True).encode()).hexdigest()}},'spec':pod}}
+    if name=='aggregator':
+        # Pace rolling updates: a new Aggregator serves for 10 s after becoming ready before the
+        # next old one is removed, so instance start-up bursts do not stack.
+        spec['minReadySeconds']=10
+    result.append(resource('Deployment',name,spec=spec))
     result.append(service(name,{'app':name},{'http':port},public=name=='client-api'))
     return result
 

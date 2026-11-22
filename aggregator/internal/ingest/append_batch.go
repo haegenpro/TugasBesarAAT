@@ -14,6 +14,10 @@ import (
 
 // Append durably captures one source record. It is AppendBatch with a batch of
 // one, which is also the comparison mode used when judging batch sizes.
+// errReceivedMoved means another writer advanced the received frontier during this append; the
+// append is rolled back and the caller resumes from the durable frontier.
+var errReceivedMoved = errors.New("received frontier moved during append; resume from durable progress")
+
 func (s *Store) Append(ctx context.Context, i Input, initial int64, subject string) error {
 	return s.AppendBatch(ctx, []Input{i}, initial, subject)
 }
@@ -79,11 +83,12 @@ func (s *Store) AppendBatch(ctx context.Context, inputs []Input, initial int64, 
 	if _, e = tx.Exec(ctx, `INSERT INTO source_progress(source,namespace,received,prepared,applied) VALUES($1,$2,$3,$3,$3) ON CONFLICT DO NOTHING`, source, namespace, initial-1); e != nil {
 		return e
 	}
+	// The frontier is read without a row lock: only the acquisition lease holder appends a source,
+	// and the final update below only applies if received is still this value. Locking the row here
+	// held it through the whole append and its commit, so preparation and canonical completion,
+	// which update the same row, queued behind every batch.
 	var pos int64
-	locked := time.Now()
-	e = tx.QueryRow(ctx, `SELECT received FROM source_progress WHERE source=$1 AND namespace=$2 FOR UPDATE`, source, namespace).Scan(&pos)
-	lockWait("source_progress", locked)
-	if e != nil {
+	if e = tx.QueryRow(ctx, `SELECT received FROM source_progress WHERE source=$1 AND namespace=$2`, source, namespace).Scan(&pos); e != nil {
 		return e
 	}
 	first, last := inputs[0].Position, inputs[len(inputs)-1].Position
@@ -171,8 +176,14 @@ func (s *Store) AppendBatch(ctx context.Context, inputs []Input, initial int64, 
 	if _, e = tx.Exec(ctx, `INSERT INTO raw_outbox(message_id,subject) SELECT unnest($1::text[])::uuid,$2`, ids[skip:], subject); e != nil {
 		return e
 	}
-	if _, e = tx.Exec(ctx, `UPDATE source_progress SET received=$3 WHERE source=$1 AND namespace=$2`, source, namespace, last); e != nil {
+	locked := time.Now()
+	moved, e := tx.Exec(ctx, `UPDATE source_progress SET received=$3 WHERE source=$1 AND namespace=$2 AND received=$4`, source, namespace, last, pos)
+	lockWait("source_progress", locked)
+	if e != nil {
 		return e
+	}
+	if moved.RowsAffected() != 1 {
+		return errReceivedMoved
 	}
 	if source == "SATELIT" {
 		if _, e = tx.Exec(ctx, `UPDATE response_failures SET resolved=true WHERE source=$1 AND namespace=$2 AND entity=ANY($3) AND NOT resolved`, source, namespace, resolved); e != nil {

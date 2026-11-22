@@ -263,3 +263,65 @@ func TestM2AppendBatchResolvesRetainedResponseFailuresAndRecordsBatchMetrics(t *
 	out := scrape()
 	require.Contains(t, out, "app_ingest_batch_records_total_append")
 }
+
+func TestM2SatelliteFeedThatNeverAnswersIsCutAtTheIdleLimit(t *testing.T) {
+	s := testStore(t)
+	t.Setenv("SATELLITE_IDLE_TIMEOUT_MS", "300")
+	// Accepts the request and never sends response headers, like a stuck proxy.
+	silent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	t.Cleanup(silent.Close)
+	ns := "sat:" + uuid.NewString()
+	started := time.Now()
+	stop, done := runSession(t, s, SatelliteConfig{URL: silent.URL, Token: "t", Namespace: ns, Batch: BatchLimits{Records: 10}})
+	defer stop()
+	select {
+	case e := <-done:
+		require.Error(t, e)
+		require.Less(t, time.Since(started), 3*time.Second, "waiting for headers is bounded by the idle limit")
+	case <-time.After(5 * time.Second):
+		t.Fatal("session still waiting for response headers")
+	}
+	received, rows, _ := durable(t, s, ns)
+	require.EqualValues(t, -1, received)
+	require.Zero(t, rows)
+}
+
+func TestM2SatelliteRefusedConnectionReturnsItsStatusWithoutTouchingProgress(t *testing.T) {
+	s := testStore(t)
+	refusing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(refusing.Close)
+	ns := "sat:" + uuid.NewString()
+	stop, done := runSession(t, s, SatelliteConfig{URL: refusing.URL, Token: "t", Namespace: ns, Batch: BatchLimits{Records: 10}})
+	defer stop()
+	e := <-done
+	var status feedStatusError
+	require.ErrorAs(t, e, &status)
+	require.Equal(t, http.StatusServiceUnavailable, status.code)
+	received, rows, _ := durable(t, s, ns)
+	require.EqualValues(t, -1, received)
+	require.Zero(t, rows)
+}
+
+func TestSatelliteRetryDelayBacksOffOnlyForRefusals(t *testing.T) {
+	t.Setenv("SATELLITE_RETRY_MAX_MS", "10000")
+	for _, transient := range []error{nil, feedStatusError{503}, feedStatusError{500}, context.Canceled, fmt.Errorf("connection reset")} {
+		delay, refused := satelliteRetryDelay(transient, 4)
+		require.Equal(t, time.Second, delay, "%v reconnects quickly", transient)
+		require.Zero(t, refused, "%v resets the refusal count", transient)
+	}
+	refused := 0
+	var delays []time.Duration
+	for range 5 {
+		var delay time.Duration
+		delay, refused = satelliteRetryDelay(feedStatusError{429}, refused)
+		delays = append(delays, delay)
+	}
+	require.Equal(t, []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 10 * time.Second, 10 * time.Second}, delays)
+	delay, _ := satelliteRetryDelay(feedStatusError{401}, 0)
+	require.Equal(t, 2*time.Second, delay)
+	delay, refused = satelliteRetryDelay(feedStatusError{503}, refused)
+	require.Equal(t, time.Second, delay)
+	require.Zero(t, refused)
+}

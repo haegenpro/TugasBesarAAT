@@ -109,6 +109,7 @@ func (a *api) call(c *gin.Context, service, method, endpoint string, payload any
 		resp, err = client.Do(req)
 	}
 	if err != nil {
+		countUpstreamFailure(service, failureClass(err))
 		a.log.Warn("outbound request", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "latency_ms", time.Since(start).Milliseconds(), "success", false, "error", err.Error())
 		return 0, errUpstream
 	}
@@ -123,6 +124,9 @@ func (a *api) call(c *gin.Context, service, method, endpoint string, payload any
 		fields := []any{"service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", service, "target_endpoint", req.URL.Path, "status_code", resp.StatusCode,
 			"latency_ms", time.Since(start).Milliseconds(), "headers_latency_ms", headersLatency.Milliseconds(),
 			"decode_latency_ms", decodeLatency.Milliseconds(), "success", resp.StatusCode < 500 && decodeErr == nil}
+		if resp.StatusCode >= 500 {
+			countUpstreamFailure(service, "status_5xx")
+		}
 		if resp.StatusCode >= 500 || decodeErr != nil {
 			a.log.Warn("outbound request", fields...)
 		} else {

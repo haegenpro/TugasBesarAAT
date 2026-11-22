@@ -72,6 +72,23 @@ func main() {
 	defer st.Close()
 
 	deps := &api.Dependencies{}
+	// Readiness waits until this instance has opened its connections and run its first reads, so
+	// a new instance (scale-out, rolling update) does not serve its first requests cold. Bounded:
+	// after AGGREGATOR_WARMUP_TIMEOUT readiness no longer waits, so a slow store cannot stall a
+	// rollout that keeps every old instance until the new one is ready.
+	deps.SetWarming(true)
+	go func() {
+		defer deps.SetWarming(false)
+		warm, cancel := context.WithTimeout(ctx, platform.Duration("AGGREGATOR_WARMUP_TIMEOUT", 10*time.Second))
+		defer cancel()
+		started := time.Now()
+		conns := platform.Int("AGGREGATOR_WARMUP_CONNS", max(1, int(st.Pool.Config().MaxConns)/2))
+		if e := st.Warm(warm, conns); e != nil {
+			logger.Warn("warm-up ended early", "service", "aggregator", "error", e.Error(), "elapsed_ms", time.Since(started).Milliseconds())
+			return
+		}
+		logger.Info("warm-up complete", "service", "aggregator", "connections", conns, "elapsed_ms", time.Since(started).Milliseconds())
+	}()
 	bmkgClient := clients.NewBMKGClient(cfg.BMKGBaseURL, cfg.BMKGAPIKey, logger)
 	pvmbgClient := clients.NewPVMBGClient(cfg.PVMBGBaseURL, cfg.PVMBGToken, logger)
 	bmkgClient.CaptureFailure = st.RecordFailure

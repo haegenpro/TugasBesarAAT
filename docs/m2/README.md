@@ -252,6 +252,8 @@ port-forwards. They are not destructive node-failure tests. See
 [Acceptance.md](Acceptance.md) for the evidence that must be collected separately:
 physical-host recovery, actual source/reference agreement, clock/freeze behavior,
 60x catch-up, five-second warnings, sustained load/scaling and resource fit.
+[Field-Priority.md](Field-Priority.md) records how Field is prioritized under overload (P5-5),
+the measured Field/Media outcomes and the known limits.
 
 [Evidence-Runbook.md](Evidence-Runbook.md) maps every criterion to the command that
 produces its evidence and says which verdicts are scripted (`evidence_audit.py`, `p1_placement_load.py`,

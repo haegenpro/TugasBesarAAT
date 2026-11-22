@@ -252,3 +252,18 @@ func TestInternalReadScopePreservesRawViews(t *testing.T) {
 		t.Fatal("scope substring grants raw access")
 	}
 }
+
+// A saturated or unavailable dependency must not take the Client API out of rotation: readiness
+// reflects only this process, so Kubernetes keeps routing to it and requests get explicit answers.
+func TestReadyDoesNotDependOnAuthOrAggregator(t *testing.T) {
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(down.Close)
+	a := &api{cfg: config{AuthURL: down.URL, AggregatorURL: down.URL, AuthInternalKey: "k"}, log: slog.New(slog.NewJSONHandler(io.Discard, nil)), client: http.DefaultClient}
+	w := httptest.NewRecorder()
+	a.router().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("/ready with unavailable dependencies = %d, want 200", w.Code)
+	}
+}

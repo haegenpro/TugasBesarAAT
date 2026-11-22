@@ -328,12 +328,16 @@ func (s *Store) prepareChunk(call context.Context, items []chunkItem, lateness t
 	if err = ownership.Guard(call, tx); err != nil {
 		return 0, nil, err
 	}
+	progress := &fireProgress{}
 	for _, item := range items {
+		// An input that fails rolls back its savepoint, so its progress changes are undone too.
+		before := *progress
 		savepoint, e := tx.Begin(item.ctx)
 		if e == nil {
-			e = s.prepareFireIn(item.ctx, savepoint, item.input, lateness)
+			e = s.prepareFireIn(item.ctx, savepoint, item.input, lateness, progress)
 			if e != nil {
 				_ = savepoint.Rollback(item.ctx)
+				*progress = before
 			}
 		}
 		if e != nil {
@@ -344,6 +348,10 @@ func (s *Store) prepareChunk(call context.Context, items []chunkItem, lateness t
 			break
 		}
 		done++
+	}
+	// The progress row is written (and locked) only now, just before the commit.
+	if err = progress.flush(call, tx); err != nil {
+		return 0, nil, err
 	}
 	platform.Observe("ingest_stage_seconds_fire_batch_process", time.Since(at).Seconds())
 	if err = commit(call, tx, "prepare_fire_batch"); err != nil {

@@ -111,15 +111,18 @@ func enqueueReplay(ctx context.Context, tx pgx.Tx, id string) error {
 	return e
 }
 func blocked(ctx context.Context, tx pgx.Tx, i Input) (bool, error) {
+	id, e := blockHolder(ctx, tx, i)
+	return id != "" && id != i.ID, e
+}
+
+// blockHolder returns the input that blocks i's entity, or "" when the entity is not blocked.
+func blockHolder(ctx context.Context, tx pgx.Tx, i Input) (string, error) {
 	var id string
 	e := tx.QueryRow(ctx, `SELECT message_id::text FROM blocked_entities WHERE source=$1 AND namespace=$2 AND entity_key=$3`, i.Source, i.Namespace, i.Entity).Scan(&id)
 	if errors.Is(e, pgx.ErrNoRows) {
-		return false, nil
+		return "", nil
 	}
-	if e != nil {
-		return false, e
-	}
-	return id != i.ID, nil
+	return id, e
 }
 func releaseEntity(ctx context.Context, tx pgx.Tx, i Input) error {
 	result, e := tx.Exec(ctx, `DELETE FROM blocked_entities WHERE source=$1 AND namespace=$2 AND entity_key=$3 AND message_id=$4`, i.Source, i.Namespace, i.Entity, i.ID)

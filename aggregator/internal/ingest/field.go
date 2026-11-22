@@ -76,10 +76,11 @@ func (s *Store) AcceptReport(ctx context.Context, submitter, key string, body []
 		return nil, e
 	}
 	metadata, _ := json.Marshal(traceMetadata(ctx, map[string]any{"submitter": submitter, "receipt_id": id}))
-	// Receipt identity is also the raw message identity; positions come from the
-	// durable acceptance ledger, so retries cannot create another obligation.
+	// Receipt identity is also the raw message identity, so retries cannot create another
+	// obligation. The position only has to be unique: it comes from a sequence, which takes no
+	// row lock, so concurrent reports of one submitter no longer queue behind each other.
 	var position int64
-	if e = tx.QueryRow(ctx, `INSERT INTO source_progress(source,namespace,received,prepared,applied) VALUES('FIELD_REPORT',$1,0,-1,-1) ON CONFLICT(source,namespace) DO UPDATE SET received=source_progress.received+1 RETURNING received`, submitter).Scan(&position); e != nil {
+	if e = tx.QueryRow(ctx, `SELECT nextval('field_report_position')`).Scan(&position); e != nil {
 		return nil, e
 	}
 	if _, e = tx.Exec(ctx, `INSERT INTO raw_inputs(message_id,source,namespace,position,entity_key,payload,metadata,digest,correlation_id,received_at) VALUES($1::uuid,'FIELD_REPORT',$2,$3,$1::text,$4,$5,$6,$7,$8)`, id, submitter, position, body, metadata, Hash(body), cid, at); e != nil {

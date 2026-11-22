@@ -58,6 +58,7 @@ func (a *api) forwardIngestion(c *gin.Context, method, path string, headers http
 	start := time.Now()
 	resp, err := a.client.Do(req)
 	if err != nil {
+		countUpstreamFailure("ingestion", failureClass(err))
 		a.log.Warn("outbound request", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", "ingestion", "target_endpoint", path, "latency_ms", time.Since(start).Milliseconds(), "success", false, "error", err.Error())
 		c.Header("Retry-After", "1")
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "field report service unavailable")})
@@ -66,7 +67,15 @@ func (a *api) forwardIngestion(c *gin.Context, method, path string, headers http
 	defer resp.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	a.log.Info("outbound request", "service", "client-api", "correlation_id", c.GetString("correlation_id"), "target_service", "ingestion", "target_endpoint", path, "status_code", resp.StatusCode, "latency_ms", time.Since(start).Milliseconds(), "success", resp.StatusCode < 500)
+	if resp.StatusCode >= 500 {
+		countUpstreamFailure("ingestion", "status_5xx")
+	}
 	if err != nil || resp.Header.Get("Content-Type") == "" {
+		if err != nil {
+			countUpstreamFailure("ingestion", failureClass(err))
+		} else {
+			countUpstreamFailure("ingestion", "unreadable")
+		}
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "field report service unavailable")})
 		return
 	}

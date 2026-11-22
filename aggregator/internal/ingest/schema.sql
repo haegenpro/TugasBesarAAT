@@ -62,3 +62,9 @@ ALTER TABLE canonical_outbox ADD COLUMN IF NOT EXISTS claim_epoch bigint;
 -- frontiers() asks for the first input that is not yet applied once per prepared input; without this
 -- index that question walks every applied input from the oldest, so its cost grows with history.
 CREATE INDEX IF NOT EXISTS raw_unapplied ON raw_inputs(source,namespace,position) WHERE state IN ('pending','prepared');
+-- Field report positions come from a sequence: allocating them from the submitter's progress row
+-- made every report of one identity wait on that row lock through a replicated commit. Positions
+-- stay unique (gaps are harmless: nothing orders or gap-checks Field reports by position). The
+-- sequence is moved past every existing Field position, never backwards.
+CREATE SEQUENCE IF NOT EXISTS field_report_position;
+SELECT setval('field_report_position', GREATEST((SELECT coalesce(max(position),0) FROM raw_inputs WHERE source='FIELD_REPORT'), (SELECT last_value FROM field_report_position), 1));
