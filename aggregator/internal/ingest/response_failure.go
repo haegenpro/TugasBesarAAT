@@ -17,7 +17,7 @@ import (
 // RetainResponse streams a rejected acquisition frame/page without admitting it
 // to the source event sequence. Its source cursor remains unchanged for retry.
 func (s *Store) RetainResponse(ctx context.Context, source, namespace, entity string, body io.Reader, reason string) error {
-	tx, e := s.Pool.Begin(ctx)
+	tx, e := s.begin(ctx)
 	if e != nil {
 		return e
 	}
@@ -71,7 +71,7 @@ func (s *Store) RetainResponse(ctx context.Context, source, namespace, entity st
 	if _, e = tx.Exec(ctx, `UPDATE response_failures SET size=$2,sha256=$3 WHERE message_id=$1`, id, size, hex.EncodeToString(sum.Sum(nil))); e != nil {
 		return e
 	}
-	return tx.Commit(ctx)
+	return commit(ctx, tx, "response_failure")
 }
 
 type evidenceReader struct {

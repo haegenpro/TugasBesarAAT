@@ -21,6 +21,37 @@ type SatelliteConfig struct {
 	URL, Token, Namespace string
 	Initial               int64
 	Exclusive             bool
+	Batch                 BatchLimits
+}
+
+// BatchLimits bound one acquisition transaction by record count, payload bytes
+// and the time the oldest buffered record may wait. Records=1 is the
+// batch-size-one comparison mode.
+type BatchLimits struct {
+	Records int
+	Bytes   int
+	Wait    time.Duration
+}
+
+// BatchLimitsFromEnv reads SATELLITE_BATCH_RECORDS, SATELLITE_BATCH_BYTES and
+// SATELLITE_BATCH_WAIT_MS.
+func BatchLimitsFromEnv() BatchLimits {
+	return BatchLimits{Records: platform.Int("SATELLITE_BATCH_RECORDS", 100), Bytes: platform.Int("SATELLITE_BATCH_BYTES", 2<<20),
+		Wait: platform.Milliseconds("SATELLITE_BATCH_WAIT_MS", 100)}
+}
+
+func (l BatchLimits) normalized() BatchLimits {
+	defaults := BatchLimitsFromEnv()
+	if l.Records <= 0 {
+		l.Records = defaults.Records
+	}
+	if l.Bytes <= 0 {
+		l.Bytes = defaults.Bytes
+	}
+	if l.Wait <= 0 {
+		l.Wait = defaults.Wait
+	}
+	return l
 }
 
 func (s *Store) RunSatellite(ctx context.Context, cfg SatelliteConfig) {
@@ -38,9 +69,29 @@ func (s *Store) RunSatellite(ctx context.Context, cfg SatelliteConfig) {
 		Sleep(ctx, time.Second)
 	}
 }
+
+// rejection is an unreadable frame that is retained as evidence, after every
+// record that preceded it is durable, and then stops the session.
+type rejection struct {
+	body   io.Reader
+	reason string
+	err    error
+}
+
+// queued is what the reader hands to the writer: one record, or a terminal rejection or error.
+type queued struct {
+	input    Input
+	enqueued time.Time
+	end      *rejection
+}
+
 func (s *Store) satelliteSession(ctx context.Context, cfg SatelliteConfig) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	limits := cfg.Batch.normalized()
+	// The durable position is the only resume point. It moves only after a commit,
+	// so after an interruption or an ambiguous commit it is reloaded from storage
+	// and the stable record identities make the retry idempotent.
 	received, _, _, e := s.Progress(ctx, "SATELIT", cfg.Namespace, cfg.Initial)
 	if e != nil {
 		return e
@@ -69,66 +120,142 @@ func (s *Store) satelliteSession(ctx context.Context, cfg SatelliteConfig) error
 	idle := time.AfterFunc(idleTimeout, cancel)
 	defer idle.Stop()
 	stream := satellite.NewStream(&streamActivity{Reader: resp.Body, timer: idle, timeout: idleTimeout}, platform.Int("MAX_PAYLOAD_BYTES", 4<<20))
-	var lastHealth time.Time
-	for ctx.Err() == nil {
-		event, e := stream.Next()
-		if e != nil {
-			var rejected *satellite.RejectedFrame
-			if errors.As(e, &rejected) {
-				if retained := s.RetainResponse(ctx, "SATELIT", cfg.Namespace, "stream:"+strconv.FormatInt(received+1, 10), rejected.Reader, e.Error()); retained != nil {
-					return retained
+
+	// The reader keeps draining the connection while the writer commits, through a
+	// bounded buffer, so a slow commit cannot stall the feed past its idle limit.
+	queue := make(chan queued, 2*limits.Records)
+	send := func(item queued) bool {
+		select {
+		case queue <- item:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	go func() {
+		defer close(queue)
+		next := received + 1
+		var lastHealth time.Time
+		finish := func(r rejection) { send(queued{end: &r}) }
+		for ctx.Err() == nil {
+			event, e := stream.Next()
+			if e != nil {
+				var rejected *satellite.RejectedFrame
+				if errors.As(e, &rejected) {
+					finish(rejection{body: rejected.Reader, reason: e.Error(), err: e})
+				} else {
+					finish(rejection{err: e})
 				}
+				return
 			}
-			return e
-		}
-		if time.Since(lastHealth) > time.Second {
-			s.RecordSourceHealth(ctx, "satellite", true, "")
-			lastHealth = time.Now()
-		}
-		n, normErr := satellite.Normalize(cfg.Namespace, event)
-		if n.Offset < 0 {
-			if event.Type == "heartbeat" {
+			if time.Since(lastHealth) > time.Second {
+				s.RecordSourceHealth(ctx, "satellite", true, "")
+				lastHealth = time.Now()
+			}
+			n, normErr := satellite.Normalize(cfg.Namespace, event)
+			if n.Offset < 0 {
+				if event.Type == "heartbeat" {
+					continue
+				}
+				finish(rejection{body: bytes.NewReader(event.Data), reason: fmt.Sprint(normErr), err: normErr})
+				return
+			}
+			if n.Offset < next {
 				continue
 			}
-			if retained := s.RetainResponse(ctx, "SATELIT", cfg.Namespace, "stream:"+strconv.FormatInt(received+1, 10), bytes.NewReader(event.Data), fmt.Sprint(normErr)); retained != nil {
-				return retained
+			if n.Offset != next {
+				finish(rejection{body: bytes.NewReader(event.Data), reason: ErrGap.Error(), err: ErrGap})
+				return
 			}
-			return normErr
-		}
-		if n.Offset <= received {
-			continue
-		}
-		if n.Offset != received+1 {
-			if retained := s.RetainResponse(ctx, "SATELIT", cfg.Namespace, "stream:"+strconv.FormatInt(received+1, 10), bytes.NewReader(event.Data), ErrGap.Error()); retained != nil {
-				return retained
+			metadata := map[string]any{"event_id": event.ID, "event_type": event.Type}
+			if n.VirtualNow != nil {
+				metadata["virtual_now"] = n.VirtualNow.UTC().Format(time.RFC3339Nano)
 			}
-			return ErrGap
-		}
-		metadata := map[string]any{"event_id": event.ID, "event_type": event.Type}
-		if n.VirtualNow != nil {
-			metadata["virtual_now"] = n.VirtualNow.UTC().Format(time.RFC3339Nano)
-		}
-		if normErr != nil {
-			metadata["rejection"] = normErr.Error()
-		}
-		entity := ""
-		if normErr == nil {
-			var op wildfire.Operation
-			if json.Unmarshal(n.Operation, &op) == nil {
-				entity = op.TargetKey
-				if entity == "" && op.Detection != nil {
-					entity = strings.Join([]string{op.Detection.Satellite, op.Detection.AcqDate, op.Detection.AcqTime, op.Detection.Latitude, op.Detection.Longitude}, "|")
+			if normErr != nil {
+				metadata["rejection"] = normErr.Error()
+			}
+			entity := ""
+			if normErr == nil {
+				var op wildfire.Operation
+				if json.Unmarshal(n.Operation, &op) == nil {
+					entity = op.TargetKey
+					if entity == "" && op.Detection != nil {
+						entity = strings.Join([]string{op.Detection.Satellite, op.Detection.AcqDate, op.Detection.AcqTime, op.Detection.Latitude, op.Detection.Longitude}, "|")
+					}
 				}
 			}
+			i := Input{Source: "SATELIT", Namespace: cfg.Namespace, Position: n.Offset, Entity: entity, Payload: event.Data, Metadata: metadata, CorrelationID: uuid.NewString()}
+			if !send(queued{input: i, enqueued: time.Now()}) {
+				return
+			}
+			next++
 		}
-		i := Input{Source: "SATELIT", Namespace: cfg.Namespace, Position: n.Offset, Entity: entity, Payload: event.Data, Metadata: metadata, CorrelationID: uuid.NewString()}
-		if e = s.Append(ctx, i, cfg.Initial, "raw.satellite"); e != nil {
+	}()
+
+	batch := make([]Input, 0, limits.Records)
+	enqueued := make([]time.Time, 0, limits.Records)
+	size := 0
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if e := s.AppendBatch(ctx, batch, cfg.Initial, "raw.satellite"); e != nil {
 			return e
 		}
-		received = n.Offset
+		received = batch[len(batch)-1].Position
+		now := time.Now()
+		for _, at := range enqueued {
+			platform.Observe("ingest_acquire_to_commit_seconds", now.Sub(at).Seconds())
+		}
 		platform.Gauge("satellite_received_position", float64(received))
+		batch, enqueued, size = batch[:0], enqueued[:0], 0
+		return nil
 	}
-	return ctx.Err()
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
+	for {
+		var due <-chan time.Time
+		if len(batch) > 0 {
+			due = timer.C
+		}
+		select {
+		case item, ok := <-queue:
+			if !ok {
+				if e := flush(); e != nil {
+					return e
+				}
+				return ctx.Err()
+			}
+			if item.end != nil {
+				if e := flush(); e != nil {
+					return e
+				}
+				if item.end.body != nil {
+					if retained := s.RetainResponse(ctx, "SATELIT", cfg.Namespace, "stream:"+strconv.FormatInt(received+1, 10), item.end.body, item.end.reason); retained != nil {
+						return retained
+					}
+				}
+				return item.end.err
+			}
+			if len(batch) == 0 {
+				timer.Reset(limits.Wait)
+			}
+			batch = append(batch, item.input)
+			enqueued = append(enqueued, item.enqueued)
+			size += len(item.input.Payload)
+			if len(batch) >= limits.Records || size >= limits.Bytes {
+				if e := flush(); e != nil {
+					return e
+				}
+			}
+		case <-due:
+			if e := flush(); e != nil {
+				return e
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 type streamActivity struct {

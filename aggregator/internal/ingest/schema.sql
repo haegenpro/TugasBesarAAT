@@ -38,3 +38,24 @@ ALTER TABLE raw_inputs ADD COLUMN IF NOT EXISTS attempts bigint NOT NULL DEFAULT
 CREATE TABLE IF NOT EXISTS blocked_entities(source text NOT NULL,namespace text NOT NULL,entity_key text NOT NULL,message_id uuid NOT NULL,PRIMARY KEY(source,namespace,entity_key));
 CREATE TABLE IF NOT EXISTS response_failures(message_id uuid PRIMARY KEY,source text NOT NULL,namespace text NOT NULL,entity text NOT NULL,received_at timestamptz NOT NULL DEFAULT clock_timestamp(),reason text NOT NULL,size bigint NOT NULL DEFAULT 0,sha256 text NOT NULL DEFAULT '',resolved boolean NOT NULL DEFAULT false);
 CREATE TABLE IF NOT EXISTS response_failure_chunks(message_id uuid NOT NULL REFERENCES response_failures(message_id) ON DELETE CASCADE,ordinal integer NOT NULL,data bytea NOT NULL,PRIMARY KEY(message_id,ordinal));
+-- Raw publication claims: short, expiring, owner-stamped. Order and priority are stored in the
+-- row (filled by trigger from the immutable raw input) so a claim is one indexed read.
+ALTER TABLE raw_outbox ADD COLUMN IF NOT EXISTS priority smallint NOT NULL DEFAULT 3;
+ALTER TABLE raw_outbox ADD COLUMN IF NOT EXISTS received_at timestamptz;
+ALTER TABLE raw_outbox ADD COLUMN IF NOT EXISTS position bigint NOT NULL DEFAULT 0;
+ALTER TABLE raw_outbox ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0;
+ALTER TABLE raw_outbox ADD COLUMN IF NOT EXISTS available_at timestamptz NOT NULL DEFAULT '-infinity';
+ALTER TABLE raw_outbox ADD COLUMN IF NOT EXISTS claim_holder text;
+ALTER TABLE raw_outbox ADD COLUMN IF NOT EXISTS claim_epoch bigint;
+CREATE OR REPLACE FUNCTION raw_outbox_fill() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+ SELECT i.received_at,i.position,coalesce((i.metadata->>'_replay_generation')::bigint,0) INTO NEW.received_at,NEW.position,NEW.generation FROM raw_inputs i WHERE i.message_id=NEW.message_id;
+ NEW.priority:=CASE NEW.subject WHEN 'raw.coastal.critical' THEN 0 WHEN 'raw.field' THEN 1 WHEN 'raw.coastal.normal' THEN 2 ELSE 3 END;
+ RETURN NEW;END $$;
+DROP TRIGGER IF EXISTS raw_outbox_fill ON raw_outbox;
+CREATE TRIGGER raw_outbox_fill BEFORE INSERT ON raw_outbox FOR EACH ROW EXECUTE FUNCTION raw_outbox_fill();
+UPDATE raw_outbox o SET received_at=i.received_at,position=i.position,generation=coalesce((i.metadata->>'_replay_generation')::bigint,0),priority=CASE o.subject WHEN 'raw.coastal.critical' THEN 0 WHEN 'raw.field' THEN 1 WHEN 'raw.coastal.normal' THEN 2 ELSE 3 END FROM raw_inputs i WHERE i.message_id=o.message_id AND o.received_at IS NULL;
+CREATE INDEX IF NOT EXISTS raw_outbox_claim ON raw_outbox(priority,received_at,position,message_id);
+-- Canonical delivery claims (same pattern as the raw outbox).
+ALTER TABLE canonical_outbox ADD COLUMN IF NOT EXISTS available_at timestamptz NOT NULL DEFAULT '-infinity';
+ALTER TABLE canonical_outbox ADD COLUMN IF NOT EXISTS claim_holder text;
+ALTER TABLE canonical_outbox ADD COLUMN IF NOT EXISTS claim_epoch bigint;

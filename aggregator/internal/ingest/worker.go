@@ -8,19 +8,15 @@ import (
 	"aggregator/internal/platform"
 	"aggregator/internal/store"
 	"aggregator/internal/timeutil"
-	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 )
@@ -63,16 +59,31 @@ func (s *Store) RunWorker(ctx context.Context, cfg WorkerConfig, registry *avrow
 					if e != nil {
 						return e
 					}
-					consumer, e := js.CreateOrUpdateConsumer(owned, l.stream, jetstream.ConsumerConfig{Durable: l.durable, FilterSubject: l.subject, AckPolicy: jetstream.AckExplicitPolicy, AckWait: 30 * time.Second, MaxAckPending: 1, Replicas: 3})
+					// Order is kept by the position checks, not by one-at-a-time delivery; only the
+					// wildfire lane fetches several inputs at once.
+					pending := 1
+					var fire *fireBatcher
+					if cfg.Kind == "wildfire" {
+						fire = newFireBatcher(s)
+						pending = fire.max
+					}
+					consumer, e := js.CreateOrUpdateConsumer(owned, l.stream, jetstream.ConsumerConfig{Durable: l.durable, FilterSubject: l.subject, AckPolicy: jetstream.AckExplicitPolicy, AckWait: 30 * time.Second, MaxAckPending: pending, Replicas: 3})
 					if e != nil {
 						return e
 					}
 					for owned.Err() == nil {
+						if fire != nil {
+							if e := fire.step(owned, consumer, registry, cfg.Lateness); e != nil {
+								return e
+							}
+							continue
+						}
 						batch, e := consumer.Fetch(1, jetstream.FetchMaxWait(time.Second))
 						if e != nil {
 							return e
 						}
 						for msg := range batch.Messages() {
+							processed := time.Now()
 							call, cancel := context.WithTimeout(owned, 10*time.Second)
 							call, span := platform.Start(platform.Extract(call, http.Header(msg.Headers())), "process raw input")
 							i, e := decodeInput(call, registry, msg.Data())
@@ -93,13 +104,20 @@ func (s *Store) RunWorker(ctx context.Context, cfg WorkerConfig, registry *avrow
 								}
 							}
 							if e == nil {
+								acked := time.Now()
 								e = msg.DoubleAck(call)
+								platform.Observe("ingest_ack_seconds", time.Since(acked).Seconds())
+								if e != nil {
+									platform.Add("ingest_ack_failures_total", 1)
+								}
 							}
 							if e == nil {
 								inputLog(call, i, "raw input processed")
 							}
 							span.End()
 							cancel()
+							platform.Observe("ingest_stage_seconds_process_"+cfg.Kind, time.Since(processed).Seconds())
+							batchStats("process_"+cfg.Kind, 1, len(msg.Data()))
 							if e != nil {
 								platform.Add(cfg.Kind+"_worker_retries_total", 1)
 								_ = msg.NakWithDelay(time.Second)
@@ -124,10 +142,11 @@ func (s *Store) RunWorker(ctx context.Context, cfg WorkerConfig, registry *avrow
 }
 
 func (s *Store) prepareCoastal(ctx context.Context, i Input, js jetstream.JetStream, registry *avrowire.Client) error {
+	defer stage("prepare_coastal")()
 	// Endpoint lanes are independent, but entity writes and warning identities
 	// serialize through PostgreSQL, so a late ordinary record cannot undo a newer
 	// critical correction of the same observation.
-	tx, e := s.Pool.Begin(ctx)
+	tx, e := s.begin(ctx)
 	if e != nil {
 		return e
 	}
@@ -135,7 +154,10 @@ func (s *Store) prepareCoastal(ctx context.Context, i Input, js jetstream.JetStr
 	if e = ownership.Guard(ctx, tx); e != nil {
 		return e
 	}
-	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,6))`, i.Namespace+":"+i.Entity); e != nil {
+	locked := time.Now()
+	_, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,6))`, i.Namespace+":"+i.Entity)
+	lockWait("entity_advisory", locked)
+	if e != nil {
 		return e
 	}
 	var state string
@@ -143,7 +165,7 @@ func (s *Store) prepareCoastal(ctx context.Context, i Input, js jetstream.JetStr
 		return e
 	}
 	if state != "pending" {
-		return tx.Commit(ctx)
+		return commit(ctx, tx, "prepare_coastal")
 	}
 	if waiting, e := blocked(ctx, tx, i); e != nil {
 		return e
@@ -191,7 +213,10 @@ func (s *Store) prepareCoastal(ctx context.Context, i Input, js jetstream.JetStr
 		msg.Header.Set("Nats-Msg-Id", WarningID(i))
 		msg.Header.Set("X-Correlation-ID", i.CorrelationID)
 		platform.Inject(ctx, http.Header(msg.Header))
-		if _, e = js.PublishMsg(ctx, msg); e != nil {
+		published := time.Now()
+		_, e = js.PublishMsg(ctx, msg)
+		platform.Observe("ingest_publish_seconds_warning", time.Since(published).Seconds())
+		if e != nil {
 			return e
 		}
 	}
@@ -212,7 +237,7 @@ func (s *Store) prepareCoastal(ctx context.Context, i Input, js jetstream.JetStr
 		if e = releaseEntity(ctx, tx, i); e != nil {
 			return e
 		}
-		return tx.Commit(ctx)
+		return commit(ctx, tx, "prepare_coastal")
 	}
 	severity := domain.SeverityNormal
 	if obs.Critical {
@@ -233,7 +258,7 @@ func (s *Store) prepareCoastal(ctx context.Context, i Input, js jetstream.JetStr
 	if e = frontiers(ctx, tx, i.Source, i.Namespace); e != nil {
 		return e
 	}
-	return tx.Commit(ctx)
+	return commit(ctx, tx, "prepare_coastal")
 }
 func parkInput(ctx context.Context, tx pgx.Tx, i Input, reason string) error {
 	if len(reason) > 1024 {
@@ -253,7 +278,7 @@ func parkInput(ctx context.Context, tx pgx.Tx, i Input, reason string) error {
 	if e := frontiers(ctx, tx, i.Source, i.Namespace); e != nil {
 		return e
 	}
-	return tx.Commit(ctx)
+	return commit(ctx, tx, "park")
 }
 func queueCanonical(ctx context.Context, tx pgx.Tx, i Input, b store.CanonicalBatch) error {
 	metadata, e := json.Marshal(traceMetadata(ctx, i.Metadata))
@@ -289,89 +314,4 @@ func queueCanonical(ctx context.Context, tx pgx.Tx, i Input, b store.CanonicalBa
 func frontiers(ctx context.Context, tx pgx.Tx, source, ns string) error {
 	_, e := tx.Exec(ctx, `UPDATE source_progress p SET prepared=GREATEST(prepared,coalesce((SELECT min(position)-1 FROM raw_inputs i WHERE i.source=p.source AND i.namespace=p.namespace AND i.state='pending'),received)),applied=GREATEST(applied,coalesce((SELECT min(position)-1 FROM raw_inputs i WHERE i.source=p.source AND i.namespace=p.namespace AND i.state IN ('pending','prepared')),received)) WHERE source=$1 AND namespace=$2`, source, ns)
 	return e
-}
-func (s *Store) RunCanonicalDelivery(ctx context.Context, cfg WorkerConfig) {
-	client := platform.Client(3 * time.Second)
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	for ctx.Err() == nil {
-		_ = s.Leases.Run(ctx, "canonical-delivery:"+cfg.Kind, func(owned context.Context) error {
-			for owned.Err() == nil {
-				found, e := s.deliverCanonical(owned, client, cfg)
-				if e != nil {
-					return e
-				}
-				if !found {
-					Sleep(owned, 100*time.Millisecond)
-				}
-			}
-			return owned.Err()
-		})
-		Sleep(ctx, time.Second)
-	}
-}
-func (s *Store) deliverCanonical(ctx context.Context, client *http.Client, cfg WorkerConfig) (bool, error) {
-	tx, e := s.Pool.Begin(ctx)
-	if e != nil {
-		return false, e
-	}
-	defer tx.Rollback(ctx)
-	if e = ownership.Guard(ctx, tx); e != nil {
-		return false, e
-	}
-	source := "SATELIT"
-	if cfg.Kind == "coastal" {
-		source = "SENSOR_PANTAI"
-	}
-	var operation, message string
-	var raw []byte
-	e = tx.QueryRow(ctx, `SELECT operation_id,message_id::text,payload FROM canonical_outbox WHERE source=$1 ORDER BY namespace,position LIMIT 1 FOR UPDATE`, source).Scan(&operation, &message, &raw)
-	if errors.Is(e, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if e != nil {
-		return false, e
-	}
-	i, e := s.Input(ctx, message)
-	if e != nil {
-		return false, e
-	}
-	ctx, span := inputSpan(ctx, i, "canonical batch delivery")
-	defer span.End()
-	req, e := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(cfg.CanonicalURL, "/")+"/internal/canonical/batches", bytes.NewReader(raw))
-	if e != nil {
-		return false, e
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.CanonicalToken)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Correlation-ID", i.CorrelationID)
-	platform.Inject(ctx, req.Header)
-	response, e := client.Do(req)
-	if e != nil {
-		return false, e
-	}
-	_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
-	response.Body.Close()
-	if readErr != nil {
-		return false, readErr
-	}
-	if response.StatusCode != 200 {
-		return false, fmt.Errorf("canonical owner returned %d", response.StatusCode)
-	}
-	var ns string
-	var received time.Time
-	if e = tx.QueryRow(ctx, `UPDATE raw_inputs SET state='applied' WHERE message_id=$1 RETURNING namespace,received_at`, message).Scan(&ns, &received); e != nil {
-		return false, e
-	}
-	if _, e = tx.Exec(ctx, `DELETE FROM canonical_outbox WHERE operation_id=$1`, operation); e != nil {
-		return false, e
-	}
-	if e = frontiers(ctx, tx, source, ns); e != nil {
-		return false, e
-	}
-	if e = tx.Commit(ctx); e != nil {
-		return false, e
-	}
-	platform.Observe("canonical_apply_seconds", time.Since(received).Seconds())
-	inputLog(ctx, i, "canonical batch applied")
-	return true, nil
 }

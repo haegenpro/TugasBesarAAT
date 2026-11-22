@@ -3,6 +3,7 @@
 package ownership
 
 import (
+	"aggregator/internal/platform"
 	"context"
 	"errors"
 	"fmt"
@@ -22,6 +23,9 @@ type Token struct {
 	Scope, Holder string
 	Epoch         int64
 }
+
+// Current returns the ownership token carried by ctx inside Authority.Run.
+func Current(ctx context.Context) (Token, bool) { token, ok := ctx.Value(tokenKey{}).(Token); return token, ok }
 
 func Scope(ctx context.Context) string { token, _ := ctx.Value(tokenKey{}).(Token); return token.Scope }
 
@@ -49,6 +53,7 @@ func (a *Authority) Run(ctx context.Context, scope string, fn func(context.Conte
  THEN source_leases.epoch ELSE source_leases.epoch+1 END,expires_at=excluded.expires_at
  WHERE source_leases.holder=$2 OR source_leases.expires_at<=clock_timestamp() RETURNING epoch`, scope, a.Holder, fmt.Sprintf("%f seconds", a.TTL.Seconds())).Scan(&t.Epoch)
 	if errors.Is(err, pgx.ErrNoRows) {
+		platform.Add("ingest_ownership_failures_total_busy", 1)
 		return ErrBusy
 	}
 	if err != nil {
@@ -69,6 +74,7 @@ func (a *Authority) Run(ctx context.Context, scope string, fn func(context.Conte
 			case <-tick.C:
 				r, e := a.Pool.Exec(c, `UPDATE source_leases SET expires_at=clock_timestamp()+$4::interval WHERE scope=$1 AND holder=$2 AND epoch=$3 AND expires_at>clock_timestamp()`, scope, t.Holder, t.Epoch, fmt.Sprintf("%f seconds", a.TTL.Seconds()))
 				if e != nil || r.RowsAffected() != 1 {
+					platform.Add("ingest_ownership_failures_total_lease_lost", 1)
 					lost.Store(true)
 					cancel()
 					return
@@ -93,8 +99,11 @@ func Guard(ctx context.Context, tx pgx.Tx) error {
 		return ErrFenced
 	}
 	var epoch int64
+	locked := time.Now()
 	err := tx.QueryRow(ctx, `SELECT epoch FROM source_leases WHERE scope=$1 AND holder=$2 AND epoch=$3 AND expires_at>clock_timestamp() FOR UPDATE`, t.Scope, t.Holder, t.Epoch).Scan(&epoch)
+	platform.Observe("ingest_lock_wait_seconds_lease_guard", time.Since(locked).Seconds())
 	if errors.Is(err, pgx.ErrNoRows) {
+		platform.Add("ingest_ownership_failures_total_fenced", 1)
 		return ErrFenced
 	}
 	if err != nil {

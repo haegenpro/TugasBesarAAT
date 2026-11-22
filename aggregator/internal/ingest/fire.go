@@ -44,11 +44,12 @@ func finishSupersededFire(ctx context.Context, tx pgx.Tx, i Input) error {
 	if err := frontiers(ctx, tx, i.Source, i.Namespace); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return commit(ctx, tx, "prepare_fire")
 }
 
 func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration) error {
-	tx, e := s.Pool.Begin(ctx)
+	defer stage("prepare_fire")()
+	tx, e := s.begin(ctx)
 	if e != nil {
 		return e
 	}
@@ -56,15 +57,27 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 	if e = ownership.Guard(ctx, tx); e != nil {
 		return e
 	}
+	return s.prepareFireIn(ctx, tx, i, lateness)
+}
+
+// prepareFireIn prepares one input inside tx and finishes with tx.Commit. When tx is a
+// savepoint of a larger transaction, that commit releases the savepoint, so several inputs
+// can be prepared in source order within one real commit while an input that fails rolls
+// back only its own mutations. The state transitions are identical in both modes.
+func (s *Store) prepareFireIn(ctx context.Context, tx pgx.Tx, i Input, lateness time.Duration) error {
+	var e error
 	var state string
 	if e = tx.QueryRow(ctx, `SELECT state FROM raw_inputs WHERE message_id=$1 FOR UPDATE`, i.ID).Scan(&state); e != nil {
 		return e
 	}
 	if state != "pending" {
-		return tx.Commit(ctx)
+		return commit(ctx, tx, "prepare_fire")
 	}
 	var prepared int64
-	if e = tx.QueryRow(ctx, `SELECT prepared FROM source_progress WHERE source=$1 AND namespace=$2 FOR UPDATE`, i.Source, i.Namespace).Scan(&prepared); e != nil {
+	locked := time.Now()
+	e = tx.QueryRow(ctx, `SELECT prepared FROM source_progress WHERE source=$1 AND namespace=$2 FOR UPDATE`, i.Source, i.Namespace).Scan(&prepared)
+	lockWait("source_progress", locked)
+	if e != nil {
 		return e
 	}
 	if i.Position != prepared+1 && !(replayGeneration(i) > 0 && i.Position <= prepared) {
@@ -359,13 +372,20 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 			return e
 		}
 		if f.Active {
+			// One statement per fire instead of one round trip per member.
+			memberKeys := make([]string, 0, len(f.Members))
+			previousIDs := make([]*string, 0, len(f.Members))
 			for _, key := range f.Members {
 				r := oldRows[key]
 				prev := r.Previous
 				if r.Fire != nil && *r.Fire != id {
 					prev = r.Fire
 				}
-				if _, e = tx.Exec(ctx, `UPDATE wildfire_observations SET fire_id=$3,previous_fire_id=$4 WHERE namespace=$1 AND key=$2`, i.Namespace, key, id, prev); e != nil {
+				memberKeys = append(memberKeys, key)
+				previousIDs = append(previousIDs, prev)
+			}
+			if len(memberKeys) > 0 {
+				if _, e = tx.Exec(ctx, `UPDATE wildfire_observations o SET fire_id=$3,previous_fire_id=v.previous FROM unnest($2::text[],$4::text[]) AS v(key,previous) WHERE o.namespace=$1 AND o.key=v.key`, i.Namespace, memberKeys, id, previousIDs); e != nil {
 					return e
 				}
 			}
@@ -397,7 +417,7 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 	if e = frontiers(ctx, tx, i.Source, i.Namespace); e != nil {
 		return e
 	}
-	return tx.Commit(ctx)
+	return commit(ctx, tx, "prepare_fire")
 }
 
 func regionCounts(rows map[string]observationRow, membership map[string]bool) (singletons, excluded int) {

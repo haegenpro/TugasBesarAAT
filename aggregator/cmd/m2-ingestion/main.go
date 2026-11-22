@@ -34,6 +34,7 @@ func main() {
 	registry.SetCache(s)
 	var wg sync.WaitGroup
 	launch := func(fn func()) { wg.Add(1); go func() { defer wg.Done(); fn() }() }
+	launch(func() { s.RunMetrics(ctx) })
 	launch(func() { s.RunPublisher(ctx, os.Getenv("NATS_URL"), registry) })
 	if token := os.Getenv("SATELLITE_TOKEN"); token != "" {
 		launch(func() {

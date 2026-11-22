@@ -49,7 +49,7 @@ func ValidKey(key string) bool {
 	return true
 }
 func (s *Store) AcceptReport(ctx context.Context, submitter, key string, body []byte, cid string) (map[string]any, error) {
-	tx, e := s.Pool.Begin(ctx)
+	tx, e := s.begin(ctx)
 	if e != nil {
 		return nil, e
 	}
@@ -66,7 +66,7 @@ func (s *Store) AcceptReport(ctx context.Context, submitter, key string, body []
 		if digest != Hash(body) {
 			return nil, ErrConflict
 		}
-		return receipt(id, status, at), tx.Commit(ctx)
+		return receipt(id, status, at), commit(ctx, tx, "field")
 	}
 	if !errors.Is(e, pgx.ErrNoRows) {
 		return nil, e
@@ -88,7 +88,7 @@ func (s *Store) AcceptReport(ctx context.Context, submitter, key string, body []
 	if _, e = tx.Exec(ctx, `INSERT INTO raw_outbox(message_id,subject) VALUES($1,'raw.field')`, id); e != nil {
 		return nil, e
 	}
-	return receipt(id, "accepted", at), tx.Commit(ctx)
+	return receipt(id, "accepted", at), commit(ctx, tx, "field")
 }
 func receipt(id, status string, at time.Time) map[string]any {
 	return map[string]any{"receipt_id": id, "report_id": id, "status": status, "received_at": at}
@@ -103,7 +103,7 @@ func (s *Store) Report(ctx context.Context, id, submitter, role string) (map[str
 	return receipt(id, status, at), nil
 }
 func (s *Store) ProcessReport(ctx context.Context, i Input) error {
-	tx, e := s.Pool.Begin(ctx)
+	tx, e := s.begin(ctx)
 	if e != nil {
 		return e
 	}
@@ -119,5 +119,5 @@ func (s *Store) ProcessReport(ctx context.Context, i Input) error {
 	if _, e = tx.Exec(ctx, `UPDATE raw_inputs SET state='applied' WHERE message_id=$1`, i.ID); e != nil {
 		return e
 	}
-	return tx.Commit(ctx)
+	return commit(ctx, tx, "field")
 }
