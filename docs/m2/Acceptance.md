@@ -492,8 +492,10 @@ and is outside the accepted two-node availability promise.
   scope, pod/process incarnation and epoch. Unfreeze it and check stale commits
   are rejected. Database-expiry integration tests alone do not prove SIGSTOP or
   physical clock-skew behavior.
-- Compare 1 versus 3 Aggregators on the same warmed dataset and generator; require
-  at least 2x throughput, preserving the same operation mix and latency boundary.
+- Use the [fixed-dataset throughput comparison](Load-Testing.md#fixed-dataset-throughput-comparison-p2-7)
+  to measure complete pages per second with 1 and 3 Aggregators at the same
+  offered rate. Require at least 2× throughput with valid samples and review
+  the per-run latency summaries.
 - Run 10,000 VUs for >=120 seconds from the separate PC. Report both offered and
   achieved rates, timeouts, 429s and 5xxs. Keep unexpected errors below 1% according
   to the evaluator's boundary; never exclude overload responses to manufacture a pass.
@@ -522,10 +524,11 @@ and is outside the accepted two-node availability promise.
 - Exercise low-confidence exclusion, singleton counts, transitive bridges,
   1 km/360-minute boundaries, late corrections, split/merge and immediate
   predecessor restoration. Inspect stable hazard UUIDs and retraction output.
-- Run at 60x and demonstrate catch-up <=60 seconds against the declared source
-  clock. Record received/prepared/applied original offsets separately, oldest
-  pending age and durable-receipt-to-canonical p95. Never relabel output ordinals
-  as original feed offsets.
+- Run the [controlled 60× burst](Ingestion-Performance.md#p4-4-burst-test-on-the-cluster)
+  sized from the live feed. Check that received and applied lag return to the
+  steady baseline within 60 seconds of the burst ending and verify the fixture
+  event pairs. Record received, prepared and applied original offsets, oldest
+  pending age and availability-to-canonical p95.
 - Kill/restart the processor during a correction and compare final state with an
   uninterrupted run. Check bounded working memory/backpressure under a dense region.
 

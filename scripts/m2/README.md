@@ -5,7 +5,7 @@ specification it serves:
 
 | Prefix | Meaning |
 | --- | --- |
-| `p1_` … `p4_` | belongs to one problem (no `p5_` yet; Problem 5 is evidenced with the `evidence_` tools) |
+| `p1_` … `p5_` | belongs to one problem |
 | `evidence_` | reads the running system and produces evidence for several criteria |
 | *(none)* | platform: deploy, lifecycle, images, observability, reset (Platform and Observability requirements) |
 
@@ -36,7 +36,7 @@ Pick the cluster once with `manage.py init --profile minikube|k3s`; all tools fo
 | `p4_ingestion_progress.py` | P4-2, P4-4, P4-7 (helps P4-8) | received/prepared/applied offsets, lag, watermark, late-data counters over time; no verdict |
 | `p4_feed_rate.py` | P4-4 sizing (helps P4-7) | polls the live feed's `/v1/session` (read-only) and reports offsets per second at the running speed (60x) and at 1x, average and busiest windows; writes the burst-test input; no verdict |
 | `p4_fixture_feed.py` | P4-4 | controlled SSE feed in our event format (steady rate, then a burst of factor x that rate); started in the cluster by `p4_burst_cluster.py` |
-| `p4_burst_cluster.py` | P4-4 | installs the fixture, points ingestion at it, bursts 60x for 10 s, PASS/FAIL for received and applied back within 60 s, end-to-end p50/p95/p99, pair oracle (no loss, duplicate or merge); undoes every change, `--restore` after a crash |
+| `p4_burst_cluster.py` | P4-4 | runs a 60× fixture burst for 10 s and reports recovery, end-to-end p50/p95/p99 and pair integrity. Removes fixture resources and ingestion overrides (`--restore` after a crash). Test rows remain in the stores |
 | `baseline_capture.py` | performance baselines | records revision, images, limits, redacted config, dataset digest and generator CPU; scrapes pipeline metrics around a run; judges final progress against an expected file; `compare` prints two runs |
 | `p5_warning_slo_snapshot.py` | P5-1, P5-2, P5-8 | delivery measurements over the whole coverage period plus reconciliation (expected = delivered + rejected + pending, rejected ids listed); PASS/FAIL only when measurable |
 | `p5_sensor_fault_probe.py` | P5-3, P5-4 | with `--break-at/--restore-at` scales the sensor down and up itself and judges latency, errors, stale status, breaker opening, request surge and recovery; scrapes every ingestion pod |
@@ -61,7 +61,7 @@ are never written. `evidence_report.py` and `evidence_metrics.py` are their shar
 
 ## Platform (no single criterion)
 
-`manage.py` (init, deploy, up, ready, scale, stop/start), `render.py` and `apps.py`
+`manage.py` (init, deploy, up, ready, scale, stop/start, satellite on/off/status), `render.py` and `apps.py`
 (manifests), `monitoring.py` (Prometheus, Grafana, Jaeger, Loki, Fluent Bit), `lifecycle.py`,
 `images.py`, `minikube.py` and `install_tools.py` (Minikube only), `reset.py`, `access.py`
 (browser port-forwards), `tuning.py`, `common.py`, `acceptance_support.py`.

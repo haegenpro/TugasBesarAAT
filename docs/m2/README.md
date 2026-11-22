@@ -46,6 +46,10 @@ leaves data in place and stops at the failed phase. Correct that failure and rer
 `up`. This operation interrupts application traffic; use it for installation or
 offline schema upgrades, not the P2 rolling-update demonstration.
 
+When upgrading an existing M2 deployment to the batched ingestion release, use
+`up` to apply the Auth refresh and ingestion outbox schema changes before the
+new workloads start. `deploy` applies manifests only.
+
 Images use `IfNotPresent`. Give each changed build a new `image_tag` before
 building/loading, so `up` deploys that exact version on every node. Reusing a tag
 can leave already-running pods on the previous image. A successful image build is
@@ -117,12 +121,22 @@ for a demo; this is not long-term production telemetry storage.
 ## Source credentials and province reference
 
 Satellite acquisition stays disabled while `external.satellite_token` is empty.
-Toggle it with `manage.py satellite on|off|status`. `on` takes `--token-file`
-(owner-only, one token) or prompts once, then keeps the token in
-`.m2-local/satellite-token` so later `on` needs no re-entry. Each change
-redeploys, which restarts only ingestion; acquisition resumes from its stored
-position. While the application is stopped or reset, only the configuration
-changes and the next `up` applies it.
+
+```bash
+python3 scripts/m2/manage.py satellite status
+python3 scripts/m2/manage.py satellite on
+python3 scripts/m2/manage.py satellite off
+```
+
+`on` prompts if no token is available. Pass `on --token-file PATH` to supply a
+single token from an owner-only file (`chmod 600` on Linux). The command caches the token in
+`.m2-local/satellite-token` for the next `on`. With the application running,
+a token change rolls the ingestion deployment and acquisition resumes from the
+durable offset for the same namespace. `status` reports configured and deployed
+token presence and ready ingestion replicas without showing the token.
+Use `--no-deploy` to save a change for the next `deploy` or `up`. If the
+application is stopped or reset, use `up` to apply the saved configuration.
+
 Use a namespace that identifies the actual source session/history. Do not reuse
 an old namespace after a feed reset or change initial offsets against retained
 state. The example 1800-second lateness remains a development assumption until
@@ -258,6 +272,9 @@ port-forwards. They are not destructive node-failure tests. See
 [Acceptance.md](Acceptance.md) for the evidence that must be collected separately:
 physical-host recovery, actual source/reference agreement, clock/freeze behavior,
 60x catch-up, five-second warnings, sustained load/scaling and resource fit.
+[Ingestion-Performance.md](Ingestion-Performance.md) covers the batched pipeline,
+baseline capture and controlled P4-4 burst test. [Load-Testing.md](Load-Testing.md)
+covers the fixed-dataset, capped-rate P2-7 comparison.
 [Field-Priority.md](Field-Priority.md) records how Field is prioritized under overload (P5-5),
 the measured Field/Media outcomes and the known limits.
 

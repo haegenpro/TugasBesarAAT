@@ -798,7 +798,9 @@ $hid = (Hz $Media.access_token '/hazards').data[0].hazard_id
 
 > Capture: run `step 3.4` first. Output is saved to `evidence/3.4.txt`.
 
-This step takes about 65 seconds on purpose (configured TTL 60 s). Run it as one block.
+This step takes about 75 seconds with a 60 s access TTL and the default 10 s
+refresh retry window. Adjust the second wait if `AUTH_REFRESH_GRACE` is overridden.
+Run it as one block.
 
 ```bash
 L=$(login "$FIELD_ID" "$FIELD_SECRET")
@@ -807,10 +809,19 @@ echo "t=0   read with fresh token : $(code -H "Authorization: Bearer $AT" $API/h
 sleep $((TTL+1))
 echo "t=TTL read with expired tok : $(code -H "Authorization: Bearer $AT" $API/hazards)"            # 401
 R=$(curl -s -X POST $API/auth/refresh -H 'Content-Type: application/json' -d "{\"refresh_token\":\"$RT\"}")
+RETRY=$(curl -fsS -X POST $API/auth/refresh -H 'Content-Type: application/json' -d "{\"refresh_token\":\"$RT\"}")
 AT2=$(echo "$R" | jget access_token); RT2=$(echo "$R" | jget refresh_token)
 echo "new access token          : $(code -H "Authorization: Bearer $AT2" $API/hazards)"            # 200
 echo "old access after refresh  : $(code -H "Authorization: Bearer $AT"  $API/hazards)"            # 401
-echo "old refresh token reuse   : $(code -X POST $API/auth/refresh -H 'Content-Type: application/json' -d "{\"refresh_token\":\"$RT\"}")"   # 401/403
+if [ -n "$AT2" ] && [ -n "$RT2" ] &&
+   [ "$(echo "$RETRY" | jget access_token)" = "$AT2" ] &&
+   [ "$(echo "$RETRY" | jget refresh_token)" = "$RT2" ]; then
+  echo "refresh retry within grace: same token pair"
+else
+  echo "refresh retry within grace: FAIL"
+fi
+sleep 11
+echo "refresh retry after grace : $(code -X POST $API/auth/refresh -H 'Content-Type: application/json' -d "{\"refresh_token\":\"$RT\"}")"   # 401
 # Old token rejected immediately after refresh, even before natural expiry:
 L=$(login "$FIELD_ID" "$FIELD_SECRET"); A=$(echo "$L" | jget access_token); B=$(echo "$L" | jget refresh_token)
 curl -s -o /dev/null -X POST $API/auth/refresh -H 'Content-Type: application/json' -d "{\"refresh_token\":\"$B\"}"
@@ -822,18 +833,30 @@ $h  = { param($t) @{Authorization="Bearer $t"} }
 "t=0   read with fresh token : $(Code "$API/hazards" 'GET' (& $h $L.access_token))"               # 200
 Start-Sleep ([int]$L.expires_in + 1)
 "t=TTL read with expired tok : $(Code "$API/hazards" 'GET' (& $h $L.access_token))"               # 401
-$R = Invoke-RestMethod -Method Post -Uri "$API/auth/refresh" -ContentType 'application/json' -Body (@{refresh_token=$L.refresh_token}|ConvertTo-Json -Compress)
+$RetryBody = @{refresh_token=$L.refresh_token} | ConvertTo-Json -Compress
+$R = Invoke-RestMethod -Method Post -Uri "$API/auth/refresh" -ContentType 'application/json' -Body $RetryBody
+$Retry = Invoke-RestMethod -Method Post -Uri "$API/auth/refresh" -ContentType 'application/json' -Body $RetryBody
 "new access token          : $(Code "$API/hazards" 'GET' (& $h $R.access_token))"                 # 200
 "old access after refresh  : $(Code "$API/hazards" 'GET' (& $h $L.access_token))"                 # 401
-"old refresh token reuse   : $(Code "$API/auth/refresh" 'POST' @{} (@{refresh_token=$L.refresh_token}|ConvertTo-Json -Compress))"   # 401/403
+if ($R.access_token -and $R.refresh_token -and
+    $Retry.access_token -ceq $R.access_token -and $Retry.refresh_token -ceq $R.refresh_token) {
+    'refresh retry within grace: same token pair'
+} else {
+    'refresh retry within grace: FAIL'
+}
+Start-Sleep 11
+"refresh retry after grace : $(Code "$API/auth/refresh" 'POST' @{} $RetryBody)"   # 401
 $L2 = Login $Creds.FIELD.id $Creds.FIELD.secret
 $null = Invoke-RestMethod -Method Post -Uri "$API/auth/refresh" -ContentType 'application/json' -Body (@{refresh_token=$L2.refresh_token}|ConvertTo-Json -Compress)
 "old access, no waiting    : $(Code "$API/hazards" 'GET' (& $h $L2.access_token))"                # 401
 ```
 
-**Desired state:** the exact sequence `200 -> 401 -> (refresh) 200 -> old 401`,
-the reused refresh token is rejected (rotation), and an old access token is
-dead right after a refresh without waiting for TTL. **Criterion:** P3.3.
+**Desired state**
+
+The access checks show `200 -> 401 -> (refresh) 200 -> old 401`. The previous
+refresh token returns the same pair during the retry window and `401` after it.
+A refresh also revokes an old access token before its natural expiry.
+This verifies P3.3.
 
 Visual alternative for the demo: `docker compose run --rm --build client-tui`,
 log in as Field, wait over 60 s, list hazards. The TUI refreshes by itself and
@@ -1668,7 +1691,7 @@ Tick each file off before the demo. "Must show" is what a reviewer will look for
 | 3.1 | `3.1.txt` | `RESULT: PASS` |
 | 3.2 | `3.2.txt` **(missing)** | roles `media`/`field`/`internal`; mixed id+secret -> `401`. Do not print the login JSON (tokens). |
 | 3.3 | `3.3.txt` **(missing)** | Media key list = 7 summary fields; Field/Internal also have `source_ref_id, latitude, longitude, attributes`; `?view=raw` -> `403`; no token -> `401` |
-| 3.4 | `3.4.txt` **(missing)** | `200 -> 401 -> refresh 200 -> old 401`, reused refresh token rejected |
+| 3.4 | `3.4.txt` **(missing)** | `200 -> 401 -> refresh 200 -> old 401`, same token pair within the refresh retry window, `401` after it |
 | 3.5 | `3.5.txt` **(missing)** | no tracked `.env`; `.env.example` present; no `HARDCODED:` / `IN HISTORY:` lines |
 | 4.1 | `4.1.txt`, `4.1-consumers.txt` | two durables, unprocessed 0 (or briefly 1); **plain-ASCII `consreport` lines, no `Γöé`** |
 | 4.2 | `4.2.txt` **(missing)** | `new` differs from `previous`; both consumers print `has <hazard_id>` for the same ID; its `correlation_id` is in the aggregator log |

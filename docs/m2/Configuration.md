@@ -196,6 +196,28 @@ procedure. Do not regenerate it just to fix a startup problem. Keep a secure cop
 with the corresponding cluster identity. Use separate working directories/private
 state when two independent clusters need different credentials.
 
+### Application environment overrides
+
+These settings are read at process startup. For a diagnostic rollout, set them
+on the named Deployment as container environment variables. The operator JSON
+has no corresponding keys. Defaults apply to manifests rendered from the
+repository without these overrides.
+
+| Deployment | Environment variable | Default and purpose |
+| --- | --- | --- |
+| `ingestion` | `SATELLITE_BATCH_RECORDS`, `SATELLITE_BATCH_BYTES`, `SATELLITE_BATCH_WAIT_MS` | `100` records, `2097152` bytes, `100` ms before flushing a batch |
+| `ingestion` | `RAW_PUBLISH_BATCH`, `RAW_PUBLISH_RESERVED_BATCH` | `100` and `50` entries, respectively |
+| `ingestion` | `RAW_PUBLISH_LANES` | `1` ordered publisher. Use `2` for a separate critical coastal and Field publisher |
+| `ingestion` | `RAW_PUBLISH_CLAIM_LEASE`, `RAW_PUBLISH_ACK_TIMEOUT` | `30s` and `10s` |
+| `wildfire-processor` | `WILDFIRE_BATCH_RECORDS`, `WILDFIRE_ACK_CONCURRENCY` | `25` records and acknowledgement concurrency equal to the configured batch size |
+| `wildfire-processor`, `coastal-processor` | `CANONICAL_DELIVERY_BATCH`, `CANONICAL_DELIVERY_CLAIM_LEASE` | `50` entries and `60s` per claim |
+| `wildfire-processor`, `coastal-processor` | `CANONICAL_SEQUENCE_MAX` | `50` ordered operations per owner call, up to `200`. `1` uses one operation per call |
+| `aggregator` | `AGGREGATOR_WARMUP_TIMEOUT`, `AGGREGATOR_WARMUP_CONNS` | `10s` and half the general pool size rounded down, minimum `1` |
+| `auth-service` | `AUTH_STORAGE_TIMEOUT`, `AUTH_REFRESH_GRACE` | `1.5s` storage deadline and `10s` to retry a refresh with the immediately previous token |
+
+See [Ingestion-Performance.md](Ingestion-Performance.md) for batching and
+measurement details.
+
 ## Owner boundaries and runtime limits
 
 Numeric tuning values below describe the defaults unless explicitly fixed by M2.

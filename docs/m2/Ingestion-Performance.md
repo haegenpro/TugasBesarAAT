@@ -1,15 +1,15 @@
 # Ingestion performance work: measurements and results
 
-Work is done in small steps. After each step the same fixed input is measured again and the
-result is added here. PostgreSQL replication, JetStream persistence, the guardian policy and the
-visibility barrier are unchanged.
+The pipeline batches satellite acquisition, ordered wildfire preparation, raw publication
+and canonical delivery. The measurements below identify the stage, input and environment
+for each recorded run.
 
 ## How it is measured
 
 - Local, no cluster: `aggregator/internal/ingest/baseline_test.go` feeds a seeded satellite stream
   (detections, partial updates, retractions of earlier detections, malformed records, twenty
   separated clusters) through the real store and checks the durable fires against the reference
-  model. Run it against a throwaway PostgreSQL:
+  model. Run these commands from `aggregator/` against a throwaway PostgreSQL:
 
       M2_BASELINE_EVENTS=1000 M2_BASELINE_OUT=out.json go test ./internal/ingest -run IngestionBaseline -v
       M2_BASELINE_EVENTS=5000 M2_BASELINE_BATCH=100 M2_BASELINE_ACQUIRE_ONLY=1 go test ./internal/ingest -run IngestionBaseline -v
@@ -22,6 +22,7 @@ visibility barrier are unchanged.
 - New metrics (all prefixed `app_ingest_`): `stage_seconds_*`, `commit_seconds[_stage]`,
   `pool_acquire_seconds` and cumulative pool counters, `lock_wait_seconds_*` (source progress, lease
   guard, entity advisory), `publish_seconds_*`, `ack_seconds`, `canonical_owner_call_seconds`,
+  `canonical_sequence_calls_total`, `canonical_sequence_operations_total`,
   `acquire_to_commit_seconds`, `batches_total_*` / `batch_records_total_*` / `batch_bytes_total_*`,
   `backlog_*` and `backlog_oldest_age_seconds_*` for the raw outbox, unprepared inputs and canonical
   outbox, `ownership_failures_total_*` and `pg_sessions_waiting_syncrep`, `pg_replication_replay_lag_seconds`.
@@ -71,7 +72,8 @@ Not yet measured on the cluster (replication wait is part of commit time there).
 `fireBatcher` (wildfire lane) fetches up to `WILDFIRE_BATCH_RECORDS` (25) consecutive inputs, loads them with one
 query, records their attempts, prepares them in source order inside one transaction with one savepoint per
 input, commits once, and confirms only after the commit. The per-input state transitions are the same code
-(`prepareFireIn`); a fire's member rows are now updated with one statement.
+(`prepareFireIn`). The batch accumulates source progress in memory and flushes it before commit,
+shortening the time it holds the progress-row lock. A fire's member rows are updated with one statement.
 
 - Attempts: `NoteAttempts` is the batched form of `NoteAttempt` and keeps its meaning. It commits in its own
   short transaction before processing, so the count survives a rollback or crash and a recorded attempt does
@@ -108,41 +110,42 @@ prefix completes, the rest is released); a repeat beyond the broker duplicate wi
 
 ## Step 5: claimed canonical delivery
 
-`deliver.go` uses the same pattern. A short transaction claims the next entries in namespace and position
-order; each is POSTed to the owner with its original operation identity and content, one after the other (the
-existing owner API is unchanged); one fenced transaction then marks the confirmed inputs applied, deletes
-their outbox entries and advances each source frontier once. The unconfirmed tail is released at once, and all
-claims are released when a delivery loop starts. `CANONICAL_DELIVERY_BATCH` (50; 1 = comparison mode) and
-`CANONICAL_DELIVERY_CLAIM_LEASE` (60s).
+`deliver.go` claims entries in namespace and position order. It sends consecutive operations from one
+namespace to Aggregator's authenticated `POST /internal/canonical/sequences`. The owner applies the
+sequence in one transaction and checks predecessor order, operation identity and payload digest.
+After a lost response or an unavailable owner, the processor retries with the same operation IDs and
+payloads. It falls back to ordered `POST /internal/canonical/batches` calls on `409` to identify the
+rejected operation, or on `404` for compatibility with an older owner.
 
-Tests (fake owner with predecessor checks and idempotency): ordered batches and a contiguous applied frontier;
-owner commit followed by a lost response (re-sent unchanged, applied once); predecessor rejection completes
-nothing; crash after the owner confirmed; stale claim fenced at completion; exclusive and expiring claims.
+After confirmation, one fenced transaction marks the confirmed inputs applied, deletes their outbox
+entries and advances each affected source frontier. The worker releases unconfirmed claims for retry
+and clears old claims when it takes ownership of the delivery loop. `CANONICAL_DELIVERY_BATCH` defaults
+to 50, `CANONICAL_DELIVERY_CLAIM_LEASE` to 60s and `CANONICAL_SEQUENCE_MAX` to 50 (maximum 200).
+Set `CANONICAL_SEQUENCE_MAX=1` to compare single-operation owner calls with the same claim batch size.
 
-A multi-operation owner API is deliberately not added yet. Add it only if the cluster metrics show the owner
-call (`ingest_canonical_owner_call_seconds`) dominating after local completion is batched.
+Tests cover ordered commits and contiguous applied progress, lost responses and idempotent retries,
+single-operation fallback to isolate a rejected entry, older owners, and stale or expiring claims.
+The sequence counters and `app_ingest_canonical_owner_call_seconds` show the number of operations
+delivered together and the cost of each owner call.
 
 ## Step 6: confirmation and contention
 
-Confirmations after the commit run with bounded concurrency (`WILDFIRE_ACK_CONCURRENCY`, default 1 = the previous
-behavior). A confirmation that fails only causes redelivery; the idempotent state check makes it a no-op
-(tested: lost confirmations give the same durable result and no extra canonical output). Lock contention is
-visible as `ingest_lock_wait_seconds_*` and `ingest_pg_sessions_waiting_*`; source-progress and lease-guard
-critical sections already hold only the statements that need them. No coordination split is made without
-measurements. Critical coastal processing keeps its own lane and path.
+Confirmations run after commit with bounded concurrency. `WILDFIRE_ACK_CONCURRENCY` defaults to the
+configured `WILDFIRE_BATCH_RECORDS` (25 by default). Set it to `1` for serial acknowledgements. A failed
+acknowledgement causes redelivery, which the idempotent state check handles without extra canonical
+output. Use `app_ingest_lock_wait_seconds_*` and `app_ingest_pg_sessions_waiting_*` to inspect contention.
 
 ## Still to do
 
-Cluster measurements for steps 2 to 6 against the step 1 baseline, then the integrated acceptance run
-(processor crashes, lease takeover, suspension and resumption, partitions, ambiguous acknowledgements, node
-and disk loss) and the assignment gates. Defaults are chosen from those runs. Visibility-barrier redesign and
-storage-durability tuning stay deferred.
+Collect comparable cluster measurements with replication enabled, then evaluate the failure and
+recovery cases in the [acceptance checklist](Acceptance.md). The local baseline reports
+single-process rates and the acquisition benchmark measures the raw append stage.
 
 ## P4-4 burst test on the cluster
 
-The earlier P4-4 run watched the practice feed, which runs at 60x all the time, while starting
-millions of offsets behind. That measures how fast the pipeline reads history, not recovery after a
-burst. The burst test below starts from an up-to-date pipeline instead.
+The earlier practice run measured backlog from a feed that was already running at 60× with millions
+of historical offsets. The controlled test below records a steady baseline before triggering the burst
+and measures recovery from the time the burst ends.
 
 1. Measure the live feed (read-only, about 30 minutes; the group token comes from the private
    configuration and is never printed):
@@ -150,8 +153,10 @@ burst. The burst test below starts from an up-to-date pipeline instead.
        python3 scripts/m2/p4_feed_rate.py --minutes 30
 
    It reports offsets per second at the running speed and at 1x (average and the busiest 60, 300 and
-   600 virtual seconds) and writes `recommendation` (normal = busiest 1x over 60 virtual seconds,
-   burst = 60 x normal) into its `result.json`.
+   600 virtual seconds) and writes `recommendation` into its `result.json`.
+   The normal rate is the busiest 1× rate over 60 virtual seconds, or the 1× average
+   when the sample has no full 60-second window. Offsets include any heartbeats with
+   an offset, so the recommendation is an upper bound on the detection rate.
 2. Small rehearsal, then the real run:
 
        python3 scripts/m2/p4_burst_cluster.py --normal-rate 2 --seconds 3
@@ -162,8 +167,10 @@ burst. The burst test below starts from an up-to-date pipeline instead.
    backlog, warms up at the normal rate, bursts for 10 s at 60x, and judges received and applied back
    within the baseline lag no later than 60 s after the burst ends. It then reports per-event latency
    (fixture availability to raw_inputs.received_at to canonical_batches.applied_at) and checks that every
-   pair became exactly one wildfire. Every change is undone at the end; if the tool was killed, run
-   `python3 scripts/m2/p4_burst_cluster.py --restore`.
+   pair became exactly one wildfire. The report and offset samples are stored in the run's evidence
+   directory. The tool removes the temporary fixture resources and ingestion overrides. Fixture data
+   stays in the stores under the test namespace. If the tool was killed, run
+   `python3 scripts/m2/p4_burst_cluster.py --restore` with the same cluster configuration.
 
 While it runs, the live feed acquisition is paused (ingestion reads the fixture) and resumes from its
 stored progress afterwards. A live backlog that does not drain within `--idle-wait` makes the run

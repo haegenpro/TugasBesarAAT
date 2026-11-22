@@ -1,7 +1,12 @@
 # TugasBesarAAT, IF4031
 
-Milestone 2 implementation and two-node deployment instructions are maintained
-in [the M2 guide](docs/m2/README.md). The M1 workflow below remains available.
+Use the [M2 deployment guide](docs/m2/README.md) to run the Kubernetes stack on
+Minikube or two K3s hosts. M2 batches satellite ingestion and canonical delivery,
+and supports pausing and resuming acquisition from durable progress. See the
+[ingestion performance notes](docs/m2/Ingestion-Performance.md) for batching,
+metrics and the controlled 60× burst test, and the
+[evidence runbook](docs/m2/Evidence-Runbook.md) for criterion-by-criterion checks.
+The Docker Compose workflow below covers M1.
 
 The M1 workflow includes the BMKG and PVMBG mocks,
 the BNPB Aggregator and its Canonical Store, the Client API, the Auth Service,
@@ -165,11 +170,18 @@ No transfer from the former Auth/consumer SQLite databases or upgrade of old
 canonical schemas is included. All application schemas initialize only on empty
 volumes.
 
+If you retain an existing Compose `auth-data` volume, apply the trailing
+`ALTER TABLE` and `CREATE INDEX IF NOT EXISTS` statements in the
+[Auth schema](auth-service/schema.sql) as the Auth database owner before starting
+the new Auth image. These statements add the refresh retry fields to existing
+sessions.
+
 `config --quiet` must exit successfully; it validates configuration without
 printing secrets. `up --wait` must finish successfully with the fourteen application
-containers running. Then load the host URLs below and check Client API `/ready`
-(HTTP 200); consumer `/ready` and record checks in the test runbook establish
-that subscriptions are processing. On failure, inspect `docker compose logs
+containers running. Check Client API `/ready` (HTTP 200), then run the smoke test
+below to verify login and hazard reads through the upstream services. Consumer
+`/ready` and record checks in the test runbook establish that subscriptions are
+processing. On failure, inspect `docker compose logs
 --tail 100 <service>`, correct the reported configuration/dependency error, and
 repeat startup. Use `docker compose down` to stop the system while keeping data.
 For a fresh test database, `docker compose --profile monitoring --profile
@@ -272,7 +284,7 @@ Once everything is healthy, these should all respond:
 curl "${BMKG_URL}/health"   # {"status":"ok","service":"bmkg-mock"}
 curl "${PVMBG_URL}/health"   # {"status":"ok","service":"pvmbg-mock"}
 curl "${API_URL}/health"   # client-api
-curl "${API_URL}/ready"    # auth and aggregator readiness
+curl "${API_URL}/ready"    # Client API process readiness
 ```
 
 ### Per-service environment files
@@ -521,6 +533,8 @@ are single instances without replication or failover in this preparation setup.
 | `AUTH_INTERNAL_KEY` | Auth-to-Client-API trust key | Required |
 | `ACCESS_TOKEN_TTL_SEC` | Access token lifetime | `60` |
 | `REFRESH_TOKEN_TTL_SEC` | Refresh token lifetime, must exceed the access TTL | `86400` |
+| `AUTH_REFRESH_GRACE` | Retry window for the immediately previous refresh token | `10s` |
+| `AUTH_STORAGE_TIMEOUT` | Deadline for Auth storage work, including pool acquisition | `1.5s` |
 | `DATABASE_URL` | Auth runtime PostgreSQL URL using `auth-db/.env` runtime credentials | Required |
 | `AUTH_PORT` | Auth container HTTP port | `8083` |
 
@@ -589,7 +603,7 @@ Shutdown stops worker admission/cancels pending operations, drains HTTP requests
 | POST | `/auth/logout` | JSON `refresh_token`. Revokes the session |
 | GET | `/hazards` | Bearer token, optional `since`, `hazard_type`, `severity`, `area_name`, `view=summary\|raw`, `limit`, `cursor` |
 | GET | `/hazards/{id}` | Bearer token, optional `view=summary\|raw` |
-| GET | `/health`, `/ready` | Process health and dependency readiness |
+| GET | `/health`, `/ready` | Client API process liveness and readiness |
 
 #### Pagination, completeness and errors
 
@@ -600,7 +614,10 @@ TUI list/raw views offer a next-page action. Operator and evidence snapshots tra
 
 Completeness describes storage coverage; source freshness remains separate in `source_status` and record metadata. The current single-store implementation returns `partial=false` when reads succeed and 503 when its store is unavailable. Future shard-aware storage can provide partial results through the repository boundary.
 
-Errors use `{"error":{"code":"...","message":"..."}}`. `/health` is process liveness; `/ready` reports whether the relevant dependencies can serve work. A slow source never sits on the client read path.
+Errors use `{"error":{"code":"...","message":"..."}}`. Client API `/ready` stays
+available during upstream slowdowns. Authenticated requests surface upstream
+failures and overload through `503` or controlled `429` responses. A slow source
+never sits on the client read path.
 
 What each client sees:
 
@@ -611,10 +628,12 @@ What each client sees:
 - `source_status` is response metadata that sits outside the hazard objects,
   so even Media can tell when PVMBG data is stale.
 
-Auth stores SHA-256 hashes of opaque access/refresh tokens. Refresh rotates both
-tokens atomically: competing requests using one refresh token cannot both
-succeed, including across independent Auth connection pools. Logout invalidates
-the session. The three downstream roles retain read-only data scopes.
+Auth stores SHA-256 hashes of opaque access/refresh tokens. The first refresh
+rotates both tokens atomically and revokes the old access token immediately.
+Retrying with the immediately previous refresh token within `AUTH_REFRESH_GRACE`
+returns the same pair. Once the window expires, that refresh token returns `401`.
+Logout invalidates the session. The three downstream roles retain read-only data
+scopes.
 
 To try it out, start the stack and open the TUI:
 
@@ -1312,7 +1331,7 @@ publish the same event twice, which is why consumers deduplicate by
 | GET | `/internal/hazards` | `since`, `hazard_type`, `severity`, `area_name`, `limit`, `cursor`; filters applied in SQL | `data`, page `count`, `next_cursor`, `partial`, `unavailable_units`, `as_of`, `source_status`, `metadata` |
 | GET | `/internal/hazards/{id}` | none | `data`/`metadata`/`source_status`/`as_of` envelope, or `404` |
 | GET | `/health` | none | `{"status":"ok","service":"aggregator"}` |
-| GET | `/ready` | none | Store and broker availability, `503` when the store is unavailable |
+| GET | `/ready` | none | `503` during bounded startup warm-up or when the store is unavailable. Broker degradation is reported in the response body |
 
 ```bash
 docker compose exec -T aggregator sh -c 'wget -qO- "http://localhost:${AGGREGATOR_PORT:?}/internal/hazards"' | jq '.count'
