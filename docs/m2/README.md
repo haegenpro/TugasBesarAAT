@@ -117,6 +117,12 @@ for a demo; this is not long-term production telemetry storage.
 ## Source credentials and province reference
 
 Satellite acquisition stays disabled while `external.satellite_token` is empty.
+Toggle it with `manage.py satellite on|off|status`. `on` takes `--token-file`
+(owner-only, one token) or prompts once, then keeps the token in
+`.m2-local/satellite-token` so later `on` needs no re-entry. Each change
+redeploys, which restarts only ingestion; acquisition resumes from its stored
+position. While the application is stopped or reset, only the configuration
+changes and the next `up` applies it.
 Use a namespace that identifies the actual source session/history. Do not reuse
 an old namespace after a feed reset or change initial offsets against retained
 state. The example 1800-second lateness remains a development assumption until
@@ -252,6 +258,8 @@ port-forwards. They are not destructive node-failure tests. See
 [Acceptance.md](Acceptance.md) for the evidence that must be collected separately:
 physical-host recovery, actual source/reference agreement, clock/freeze behavior,
 60x catch-up, five-second warnings, sustained load/scaling and resource fit.
+[Field-Priority.md](Field-Priority.md) records how Field is prioritized under overload (P5-5),
+the measured Field/Media outcomes and the known limits.
 
 [Evidence-Runbook.md](Evidence-Runbook.md) maps every criterion to the command that
 produces its evidence and says which verdicts are scripted (`evidence_audit.py`, `p1_placement_load.py`,

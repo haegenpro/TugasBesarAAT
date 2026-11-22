@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -370,4 +371,95 @@ func TestM2CoastalRejectedPageRetainsTailAndResolvesOnReacquisition(t *testing.T
 	var unresolved int
 	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM response_failures WHERE NOT resolved`).Scan(&unresolved))
 	require.Zero(t, unresolved)
+}
+
+// When acceptance cannot complete within its own deadline (storage stalled, the ledger row busy),
+// the answer is a controlled 429 with Retry-After, not a request held until the client times out;
+// the same key then succeeds once storage recovers.
+func TestM2FieldAcceptanceThatCannotCompleteInTimeIsAControlledRejection(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	t.Setenv("FIELD_ACCEPT_TIMEOUT_MS", "300")
+	handler := s.Handler("svc-token", "")
+	body := `{"report_type":"flood","occurred_at":"2026-11-21T00:00:00Z","latitude":-6.2,"longitude":106.8,"description":"water rising","attributes":{}}`
+	submitter, key := "field-demo", "busy-"+uuid.NewString()
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/internal/field-reports", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer svc-token")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", key)
+		req.Header.Set("X-Submitter-ID", submitter)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+	// Another transaction holds this submitter/key's acceptance lock, as a stalled commit would.
+	holder, e := s.Pool.Begin(ctx)
+	require.NoError(t, e)
+	_, e = holder.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,5))`, fmt.Sprintf("%d:%s%s", len(submitter), submitter, key))
+	require.NoError(t, e)
+	started := time.Now()
+	w := post()
+	require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	require.Equal(t, "1", w.Header().Get("Retry-After"))
+	require.Less(t, time.Since(started), 2*time.Second, "answered within the acceptance deadline")
+	require.NoError(t, holder.Rollback(ctx))
+
+	first := post()
+	require.Equal(t, http.StatusAccepted, first.Code, first.Body.String())
+	again := post()
+	require.Equal(t, http.StatusAccepted, again.Code)
+	require.JSONEq(t, first.Body.String(), again.Body.String(), "the retried key returns the same receipt")
+}
+
+// Reports of one submitter do not queue on a shared row: acceptance completes while another
+// transaction holds the submitter's progress row, and concurrent reports all get distinct
+// positions and receipts.
+func TestM2FieldAcceptanceDoesNotSerializePerSubmitter(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	submitter := "field-" + uuid.NewString()[:8]
+	body := []byte(`{"report_type":"flood","occurred_at":"2026-11-21T00:00:00Z","latitude":-6.2,"longitude":106.8,"description":"water rising","attributes":{}}`)
+	_, e := s.Pool.Exec(ctx, `INSERT INTO source_progress(source,namespace,received,prepared,applied) VALUES('FIELD_REPORT',$1,0,-1,-1) ON CONFLICT DO NOTHING`, submitter)
+	require.NoError(t, e)
+	holder, e := s.Pool.Begin(ctx)
+	require.NoError(t, e)
+	defer holder.Rollback(ctx)
+	_, e = holder.Exec(ctx, `SELECT 1 FROM source_progress WHERE source='FIELD_REPORT' AND namespace=$1 FOR UPDATE`, submitter)
+	require.NoError(t, e)
+
+	const count = 20
+	var wg sync.WaitGroup
+	receipts := make(chan string, count)
+	errs := make(chan error, count)
+	accept, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	for k := range count {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r, e := s.AcceptReport(accept, submitter, fmt.Sprintf("key-%d", k), body, "cid")
+			if e != nil {
+				errs <- e
+				return
+			}
+			receipts <- r["receipt_id"].(string)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	close(receipts)
+	for e := range errs {
+		require.NoError(t, e, "acceptance waited on the submitter's progress row")
+	}
+	seen := map[string]bool{}
+	for id := range receipts {
+		require.False(t, seen[id])
+		seen[id] = true
+	}
+	require.Len(t, seen, count)
+	var positions, distinct int
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*),count(DISTINCT position) FROM raw_inputs WHERE source='FIELD_REPORT' AND namespace=$1`, submitter).Scan(&positions, &distinct))
+	require.Equal(t, count, positions)
+	require.Equal(t, count, distinct, "positions are unique")
 }

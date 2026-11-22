@@ -111,7 +111,7 @@ func (s *Store) RecordSourceHealth(ctx context.Context, endpoint string, success
 	if success {
 		state = "fresh"
 	}
-	tx, e := s.Pool.Begin(ctx)
+	tx, e := s.begin(ctx)
 	if e != nil {
 		return
 	}
@@ -120,7 +120,7 @@ func (s *Store) RecordSourceHealth(ctx context.Context, endpoint string, success
 		return
 	}
 	if _, e = tx.Exec(ctx, `INSERT INTO source_health(endpoint,state,last_success,reason) VALUES($1,$2,CASE WHEN $3 THEN clock_timestamp() ELSE NULL END,$4) ON CONFLICT(endpoint) DO UPDATE SET state=excluded.state,last_success=coalesce(excluded.last_success,source_health.last_success),last_attempt=clock_timestamp(),reason=excluded.reason`, endpoint, state, success, reason); e == nil {
-		_ = tx.Commit(ctx)
+		_ = commit(ctx, tx, "coastal_acquire")
 	}
 }
 func (s *Store) RunCoastal(ctx context.Context, cfg CoastalConfig) {
@@ -168,7 +168,7 @@ func (c *coastalClient) refreshStations(ctx context.Context) {
 	if err != nil || page.Items == nil {
 		return
 	}
-	tx, e := c.s.Pool.Begin(ctx)
+	tx, e := c.s.begin(ctx)
 	if e != nil {
 		return
 	}
@@ -191,7 +191,7 @@ func (c *coastalClient) refreshStations(ctx context.Context) {
 	if e = resolveResponse(ctx, tx, "SENSOR_PANTAI", c.cfg.Namespace, "/v1/stations"); e != nil {
 		return
 	}
-	_ = tx.Commit(ctx)
+	_ = commit(ctx, tx, "coastal_acquire")
 }
 func (c *coastalClient) acquire(ctx context.Context) error {
 	var cursor *string
@@ -261,7 +261,7 @@ func (c *coastalClient) acquire(ctx context.Context) error {
 	if page.Next != nil {
 		cursor = page.Next
 	}
-	tx, e := c.s.Pool.Begin(ctx)
+	tx, e := c.s.begin(ctx)
 	if e != nil {
 		return e
 	}
@@ -278,7 +278,7 @@ func (c *coastalClient) acquire(ctx context.Context) error {
 	if e = resolveResponse(ctx, tx, "SENSOR_PANTAI", c.cfg.Namespace, path); e != nil {
 		return e
 	}
-	return tx.Commit(ctx)
+	return commit(ctx, tx, "coastal_acquire")
 }
 
 func nullableTimestamp(value string) any {

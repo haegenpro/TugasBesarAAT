@@ -1,7 +1,6 @@
 package ingest
 
 import (
-	"aggregator/internal/ownership"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -75,7 +74,7 @@ func (s *Store) RequestReplay(ctx context.Context, ids []string) (int64, error) 
 	if len(ids) < 1 || len(ids) > 1000 {
 		return 0, ErrConflict
 	}
-	tx, e := s.Pool.Begin(ctx)
+	tx, e := s.begin(ctx)
 	if e != nil {
 		return 0, e
 	}
@@ -92,7 +91,7 @@ func (s *Store) RequestReplay(ctx context.Context, ids []string) (int64, error) 
 			return 0, e
 		}
 	}
-	return count, tx.Commit(ctx)
+	return count, commit(ctx, tx, "replay")
 }
 func enqueueReplay(ctx context.Context, tx pgx.Tx, id string) error {
 	var source string
@@ -108,19 +107,22 @@ func enqueueReplay(ctx context.Context, tx pgx.Tx, id string) error {
 			subject = "raw.coastal.critical"
 		}
 	}
-	_, e = tx.Exec(ctx, `INSERT INTO raw_outbox(message_id,subject) VALUES($1,$2) ON CONFLICT DO NOTHING`, id, subject)
+	_, e = tx.Exec(ctx, `INSERT INTO raw_outbox(message_id,subject) VALUES($1,$2) ON CONFLICT(message_id) DO UPDATE SET generation=excluded.generation,subject=excluded.subject,priority=excluded.priority,available_at='-infinity',claim_holder=NULL,claim_epoch=NULL`, id, subject)
 	return e
 }
 func blocked(ctx context.Context, tx pgx.Tx, i Input) (bool, error) {
+	id, e := blockHolder(ctx, tx, i)
+	return id != "" && id != i.ID, e
+}
+
+// blockHolder returns the input that blocks i's entity, or "" when the entity is not blocked.
+func blockHolder(ctx context.Context, tx pgx.Tx, i Input) (string, error) {
 	var id string
 	e := tx.QueryRow(ctx, `SELECT message_id::text FROM blocked_entities WHERE source=$1 AND namespace=$2 AND entity_key=$3`, i.Source, i.Namespace, i.Entity).Scan(&id)
 	if errors.Is(e, pgx.ErrNoRows) {
-		return false, nil
+		return "", nil
 	}
-	if e != nil {
-		return false, e
-	}
-	return id != i.ID, nil
+	return id, e
 }
 func releaseEntity(ctx context.Context, tx pgx.Tx, i Input) error {
 	result, e := tx.Exec(ctx, `DELETE FROM blocked_entities WHERE source=$1 AND namespace=$2 AND entity_key=$3 AND message_id=$4`, i.Source, i.Namespace, i.Entity, i.ID)
@@ -141,16 +143,5 @@ func releaseEntity(ctx context.Context, tx pgx.Tx, i Input) error {
 	return enqueueReplay(ctx, tx, next)
 }
 func (s *Store) NoteAttempt(ctx context.Context, id string) error {
-	tx, e := s.Pool.Begin(ctx)
-	if e != nil {
-		return e
-	}
-	defer tx.Rollback(ctx)
-	if e = ownership.Guard(ctx, tx); e != nil {
-		return e
-	}
-	if _, e = tx.Exec(ctx, `UPDATE raw_inputs SET attempts=attempts+1 WHERE message_id=$1`, id); e != nil {
-		return e
-	}
-	return tx.Commit(ctx)
+	return s.NoteAttempts(ctx, []string{id})
 }

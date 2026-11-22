@@ -91,6 +91,10 @@ func (s *Store) saveHazardTx(ctx context.Context, tx pgx.Tx, e domain.HazardEven
 	if live {
 		seen = domain.Now()
 	}
+	// ingested_at is stored at the millisecond precision the API returns, so the stored order
+	// (ingested_at, then hazard_id) is exactly the order a client can verify from the response:
+	// two events in the same millisecond are ordered by hazard_id, not by unseen microseconds.
+	e.IngestedAt = timeutil.New(e.IngestedAt.Time.Truncate(time.Millisecond))
 	_, err = tx.Exec(ctx, `INSERT INTO hazard_events(hazard_id,source,source_ref_id,hazard_type,severity,area_name,latitude,longitude,occurred_at,ingested_at,attributes,revision,last_seen_at)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
  ON CONFLICT(source,source_ref_id) DO UPDATE SET severity=excluded.severity,area_name=excluded.area_name,latitude=excluded.latitude,longitude=excluded.longitude,occurred_at=excluded.occurred_at,attributes=excluded.attributes,revision=excluded.revision,last_seen_at=COALESCE(excluded.last_seen_at,hazard_events.last_seen_at)`, e.HazardID, e.Source, e.SourceRefID, e.HazardType, e.Severity, e.AreaName, e.Latitude, e.Longitude, e.OccurredAt.Time, e.IngestedAt.Time, attrs, revision, seen)

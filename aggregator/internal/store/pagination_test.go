@@ -61,3 +61,45 @@ func TestKeysetPaginationWithEqualTimestampsAndChangedFilters(t *testing.T) {
 	_, err = s.QueryPage(ctx, store.Filters{AreaName: "different"}, store.PageRequest{Limit: 2, Cursor: cursor})
 	require.ErrorIs(t, err, store.ErrCursor)
 }
+
+// ingested_at is stored at the millisecond precision the API returns, so events saved within one
+// millisecond are ordered by hazard_id, which is what a client verifying (ingested_at, hazard_id)
+// order from the response expects.
+func TestIngestedAtIsStoredAtResponsePrecision(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	refs := []string{}
+	for _, micros := range []int{900, 100, 500} {
+		e := sampleEvent(domain.SourceBMKG, "precision-"+uuid.NewString())
+		e.IngestedAt = timeutil.New(base.Add(time.Duration(micros) * time.Microsecond))
+		_, err := s.SaveDedup(ctx, e, "precision")
+		require.NoError(t, err)
+		refs = append(refs, e.SourceRefID)
+	}
+	rows, err := s.Pool.Query(ctx, `SELECT hazard_id::text,ingested_at FROM hazard_events WHERE source='BMKG' AND source_ref_id=ANY($1) ORDER BY ingested_at,hazard_id`, refs)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var id string
+		var at time.Time
+		require.NoError(t, rows.Scan(&id, &at))
+		require.True(t, at.Equal(base), "stored %s, want %s", at.Format(time.RFC3339Nano), base.Format(time.RFC3339Nano))
+		got = append(got, id)
+	}
+	require.NoError(t, rows.Err())
+	require.Len(t, got, 3)
+	require.IsIncreasing(t, got, "events within one millisecond are ordered by hazard_id")
+}
+
+// Warm opens the requested number of distinct connections, not one connection reused.
+func TestWarmOpensDistinctConnections(t *testing.T) {
+	s := testStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	before := s.Pool.Stat().TotalConns()
+	require.NoError(t, s.Warm(ctx, 4))
+	require.GreaterOrEqual(t, s.Pool.Stat().TotalConns()-before, int32(3), "warm-up opened distinct connections")
+	require.GreaterOrEqual(t, s.Pool.Stat().TotalConns(), int32(4))
+}

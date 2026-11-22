@@ -8,7 +8,11 @@ import (
 	"time"
 )
 
-func TestSessionSurvivesRestartAndRotationRevokesOldToken(t *testing.T) {
+// Rotation revokes the old access token at once. The old refresh token is honoured only inside the
+// refresh grace window, and then only by returning the same pair (no second session); after the
+// window it is rejected.
+func TestSessionSurvivesRestartAndRotationRevokesOldTokenAfterGrace(t *testing.T) {
+	t.Setenv("AUTH_REFRESH_GRACE", "1s")
 	path := testDSN(t)
 	store, err := openStore(path, time.Minute, time.Hour)
 	if err != nil {
@@ -38,8 +42,13 @@ func TestSessionSurvivesRestartAndRotationRevokesOldToken(t *testing.T) {
 	if _, err := store.verify(ctx, first.AccessToken); !errors.Is(err, errInvalidToken) {
 		t.Fatalf("old access token accepted: %v", err)
 	}
+	retried, err := store.rotate(ctx, first.RefreshToken)
+	if err != nil || retried.AccessToken != second.AccessToken || retried.RefreshToken != second.RefreshToken {
+		t.Fatalf("old refresh token inside the grace window must return the same pair: %v", err)
+	}
+	time.Sleep(2100 * time.Millisecond)
 	if _, err := store.rotate(ctx, first.RefreshToken); !errors.Is(err, errInvalidToken) {
-		t.Fatalf("old refresh token accepted: %v", err)
+		t.Fatalf("old refresh token accepted after the grace window: %v", err)
 	}
 	if _, err := store.verify(ctx, second.AccessToken); err != nil {
 		t.Fatal(err)
@@ -52,7 +61,9 @@ func TestSessionSurvivesRestartAndRotationRevokesOldToken(t *testing.T) {
 	}
 }
 
-func TestConcurrentRefreshOnlyOneSucceeds(t *testing.T) {
+// Two requests presenting the same refresh token at once produce one rotation: both receive the
+// identical pair, and that pair is the session's current one.
+func TestConcurrentRefreshProducesOneRotation(t *testing.T) {
 	store, err := openStore(testDSN(t), time.Minute, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -62,31 +73,32 @@ func TestConcurrentRefreshOnlyOneSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	results := make(chan error, 2)
+	pairs := make(chan tokenPair, 2)
 	var wait sync.WaitGroup
 	for range 2 {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			_, err := store.rotate(context.Background(), first.RefreshToken)
-			results <- err
+			pair, err := store.rotate(context.Background(), first.RefreshToken)
+			if err != nil {
+				t.Errorf("concurrent refresh failed: %v", err)
+			}
+			pairs <- pair
 		}()
 	}
 	wait.Wait()
-	close(results)
-	success, rejected := 0, 0
-	for err := range results {
-		switch {
-		case err == nil:
-			success++
-		case errors.Is(err, errInvalidToken):
-			rejected++
-		default:
-			t.Fatalf("unexpected refresh error: %v", err)
-		}
+	close(pairs)
+	distinct := map[string]bool{}
+	var pair tokenPair
+	for p := range pairs {
+		distinct[p.RefreshToken] = true
+		pair = p
 	}
-	if success != 1 || rejected != 1 {
-		t.Fatalf("success=%d rejected=%d", success, rejected)
+	if len(distinct) != 1 {
+		t.Fatalf("concurrent refreshes produced %d different pairs", len(distinct))
+	}
+	if _, err := store.rotate(context.Background(), pair.RefreshToken); err != nil {
+		t.Fatalf("the shared pair is not the session's current one: %v", err)
 	}
 }
 

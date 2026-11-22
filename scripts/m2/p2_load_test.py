@@ -19,6 +19,9 @@ from common import (LOCAL, NAMESPACE, ROOT, is_minikube, kubectl, node_usage, pr
 from tuning import application_env, settings
 
 K6_IMAGE = 'grafana/k6@sha256:3d8e5c7f1d53ec59408c2ffbd9943602a0985ffcbd4a2430ec00f3ffca89796e'
+# A paced run that delivers less than this share of the offered rate was limited by the system
+# under test (or the generator), not by the offered load.
+PACED_SATURATION = 0.95
 
 
 def available_memory():
@@ -31,15 +34,32 @@ def metric_value(summary, name, field='count'):
 
 
 def throughput(summary):
-    """Complete hazard pages per second over the whole measured run, plus validity counters."""
-    seconds = summary.get('state', {}).get('testRunDurationMs', 0)/1000
-    complete = metric_value(summary, 'm2_complete_hazard_reads') or 0
-    return {'complete_pages': complete, 'seconds': seconds,
-            'pages_per_second': complete/seconds if seconds else 0.0,
-            'partial_pages': metric_value(summary, 'm2_partial_hazard_reads') or 0,
-            'invalid_responses': metric_value(summary, 'm2_invalid_hazard_responses') or 0,
-            'unexpected_rate': metric_value(summary, 'm2_unexpected_errors', 'rate'),
-            'transport_failures': metric_value(summary, 'm2_transport_failures') or 0}
+    """Complete hazard pages per second plus validity counters.
+
+    A paced run (`target_rps` in the summary configuration) counts only the hold window, so the
+    login ramp and the ramp-down never enter the figure; an unpaced run counts the whole run.
+    """
+    configuration = summary.get('configuration', {})
+    target = configuration.get('target_rps') or 0
+    if target > 0:
+        seconds = configuration.get('hold_seconds') or 0
+        complete = metric_value(summary, 'm2_paced_complete_hazard_reads') or 0
+    else:
+        seconds = summary.get('state', {}).get('testRunDurationMs', 0)/1000
+        complete = metric_value(summary, 'm2_complete_hazard_reads') or 0
+    rate = complete/seconds if seconds else 0.0
+    result = {'complete_pages': complete, 'seconds': seconds, 'pages_per_second': rate,
+              'partial_pages': metric_value(summary, 'm2_partial_hazard_reads') or 0,
+              'invalid_responses': metric_value(summary, 'm2_invalid_hazard_responses') or 0,
+              'unexpected_rate': metric_value(summary, 'm2_unexpected_errors', 'rate'),
+              'transport_failures': metric_value(summary, 'm2_transport_failures') or 0,
+              'target_rps': target or None}
+    if target > 0:
+        result.update({'paced_requests': metric_value(summary, 'm2_paced_requests') or 0,
+                       'vus_exercised': metric_value(summary, 'm2_paced_vus_exercised') or 0,
+                       'configured_vus': configuration.get('vus'),
+                       'saturated': rate < PACED_SATURATION*target})
+    return result
 
 
 def evaluate(summary, report, args, duplicates=None):
@@ -57,6 +77,10 @@ def evaluate(summary, report, args, duplicates=None):
               f"{held:.1f}s continuous, {report.get('target_vu_first_to_last_seconds', 0):.1f}s first-to-last")
     invalid = metric_value(summary, 'm2_invalid_hazard_responses')
     check('hazard responses are complete or explicitly partial', invalid == 0, f'{invalid} invalid')
+    if getattr(args, 'target_rps', 0) > 0:
+        exercised = metric_value(summary, 'm2_paced_vus_exercised') or 0
+        check('paced run: every VU sent a measured request', exercised >= args.vus,
+              f'{exercised} of {args.vus} VUs')
     actions = {a['name'] for a in report.get('actions', [])}
     if args.scale:
         check('P2-6 scaled 3 -> 5 -> 2 during the hold', {'scale-5', 'scale-2'} <= actions, ', '.join(sorted(actions)) or 'none')
@@ -134,6 +158,7 @@ def run(args):
                 '-e', 'M2_VUS='+str(args.vus), '-e', 'M2_RAMP='+str(args.ramp_seconds)+'s',
                 '-e', 'M2_HOLD='+str(args.hold_seconds)+'s', '-e', 'M2_THINK_SECONDS='+str(args.think_seconds),
                 '-e', 'M2_REPORT_EVERY='+str(args.report_every), '-e', 'M2_RUN_ID='+name,
+                '-e', 'M2_TARGET_RPS='+str(getattr(args, 'target_rps', 0)),
                 '-e', 'GOMEMLIMIT='+str(max(128, args.memory_mib-512))+'MiB', '-e', 'GOGC=50',
                 '-e', 'K6_NO_USAGE_REPORT=true', K6_IMAGE, 'run', '--address', f'127.0.0.1:{api_port}',
                 '--no-color', '/test/load.js']
@@ -142,6 +167,7 @@ def run(args):
               'colocated_generator': True, 'base_url': base, 'image_tag': cfg['image_tag'],
               'k6_image': K6_IMAGE, 'requested_vus': args.vus, 'ramp_seconds': args.ramp_seconds,
               'hold_seconds': args.hold_seconds, 'think_seconds': args.think_seconds,
+              'target_rps': getattr(args, 'target_rps', 0),
               'generator_memory_mib': args.memory_mib, 'generator_cpus': args.cpus,
               'generator_container_name': name,
               'report_every': args.report_every, 'samples': [], 'actions': [], 'host_memory_guard': False}
@@ -180,7 +206,8 @@ def run(args):
             for item in container.get('env', [])
             if item['name'] in safe_keys and 'value' in item
         }
-    if args.vus>=10000:
+    # The P2-7 comparison pauses acquisition and processors on purpose (fixed dataset), so it opts out.
+    if args.vus>=10000 and not getattr(args,'fixed_dataset',False):
         for processor in ('wildfire-processor','coastal-processor','field-report-processor'):
             if report['controllers_before'][processor]['replicas']<1:
                 raise ValueError('restore processors before the 10,000-VU acceptance run')
@@ -327,6 +354,9 @@ def main():
     parser.add_argument('--memory-mib',type=int,default=4096)
     parser.add_argument('--cpus',type=float,default=2)
     parser.add_argument('--report-every',type=int,default=10)
+    parser.add_argument('--target-rps',type=float,default=0,
+                        help='offer this many requests per second in total during the hold, spread evenly over all VUs '
+                             '(0 keeps every VU looping with --think-seconds)')
     parser.add_argument('--scale',action='store_true')
     parser.add_argument('--roll-from',help='actual previous Aggregator image to roll forward from')
     parser.add_argument('--strict-zero-failures',action='store_true',
@@ -338,6 +368,8 @@ def main():
         parser.error('invalid workload or generator bounds')
     if args.scale and args.hold_seconds<120:
         parser.error('scaling rehearsal requires at least a 120-second hold')
+    if args.target_rps<0 or (args.target_rps>0 and args.hold_seconds<args.vus/args.target_rps+10):
+        parser.error('a paced hold must let every VU send a measured request: hold >= vus/target-rps + 10 seconds')
     return run(args)
 
 

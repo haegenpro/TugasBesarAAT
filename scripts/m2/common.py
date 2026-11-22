@@ -65,10 +65,12 @@ def read_config(path: str | Path) -> dict:
 
 def private_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    # Refuse symlinks and set permissions at creation, before writing secrets.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    # Refuse symlinks and set permissions at creation, before writing secrets. Windows has
+    # neither O_NOFOLLOW nor fchmod; there the file inherits the folder's ACL instead.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     with os.fdopen(fd, 'w') as out:
-        os.fchmod(out.fileno(), 0o600)
+        if hasattr(os, 'fchmod'):
+            os.fchmod(out.fileno(), 0o600)
         json.dump(value, out, indent=2)
         out.write('\n')
 

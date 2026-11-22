@@ -94,9 +94,11 @@ func (a *authServer) login(c *gin.Context) {
 		return
 	}
 	defer release()
-	pair, err := a.store.issue(c.Request.Context(), identity)
+	storage, cancel := a.storageContext(c)
+	defer cancel()
+	pair, err := a.store.issue(storage, identity)
 	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "auth storage unavailable")})
+		a.storageFailure(c, storage, err)
 		return
 	}
 	c.JSON(http.StatusOK, pair)
@@ -113,13 +115,15 @@ func (a *authServer) refresh(c *gin.Context) {
 		return
 	}
 	defer release()
-	pair, err := a.store.rotate(c.Request.Context(), req.RefreshToken)
+	storage, cancel := a.storageContext(c)
+	defer cancel()
+	pair, err := a.store.rotate(storage, req.RefreshToken)
 	if errors.Is(err, errInvalidToken) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": platform.ProblemStatus(http.StatusUnauthorized, "invalid refresh token")})
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "auth storage unavailable")})
+		a.storageFailure(c, storage, err)
 		return
 	}
 	c.JSON(http.StatusOK, pair)
@@ -136,13 +140,15 @@ func (a *authServer) logout(c *gin.Context) {
 		return
 	}
 	defer release()
-	err := a.store.logout(c.Request.Context(), req.RefreshToken)
+	storage, cancel := a.storageContext(c)
+	defer cancel()
+	err := a.store.logout(storage, req.RefreshToken)
 	if errors.Is(err, errInvalidToken) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": platform.ProblemStatus(http.StatusUnauthorized, "invalid refresh token")})
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "auth storage unavailable")})
+		a.storageFailure(c, storage, err)
 		return
 	}
 	c.Status(http.StatusNoContent)
@@ -159,13 +165,15 @@ func (a *authServer) introspect(c *gin.Context) {
 		return
 	}
 	defer release()
-	principal, err := a.store.verify(c.Request.Context(), req.AccessToken)
+	storage, cancel := a.storageContext(c)
+	defer cancel()
+	principal, err := a.store.verify(storage, req.AccessToken)
 	if errors.Is(err, errInvalidToken) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": platform.ProblemStatus(http.StatusUnauthorized, "invalid access token")})
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": platform.ProblemStatus(http.StatusServiceUnavailable, "auth storage unavailable")})
+		a.storageFailure(c, storage, err)
 		return
 	}
 	c.JSON(http.StatusOK, principal)

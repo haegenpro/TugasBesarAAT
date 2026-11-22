@@ -37,6 +37,8 @@ func main() {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() { defer wg.Done(); s.RunWorker(ctx, cfg, registry) }()
+	wg.Add(1)
+	go func() { defer wg.Done(); s.RunMetrics(ctx, false) }()
 	if kind != "field" {
 		wg.Add(1)
 		go func() { defer wg.Done(); s.RunCanonicalDelivery(ctx, cfg) }()

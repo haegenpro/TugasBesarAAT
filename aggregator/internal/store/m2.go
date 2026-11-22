@@ -33,16 +33,37 @@ type CanonicalBatch struct {
 	Changes   []CanonicalChange `json:"changes"`
 }
 
+// MaxCanonicalSequence bounds how many original operations one owner call may apply.
+const MaxCanonicalSequence = 200
+
 func (s *Store) ApplyCanonical(ctx context.Context, b CanonicalBatch, cid string) error {
-	if b.ID == "" || b.Namespace == "" || len(b.Namespace) > 256 || b.Position <= b.Previous || len(b.Changes) > 1000 || (b.Source != "SATELIT" && b.Source != "SENSOR_PANTAI") {
+	return s.ApplyCanonicalSequence(ctx, []CanonicalBatch{b}, cid)
+}
+
+// ApplyCanonicalSequence applies consecutive original operations of one namespace, in predecessor
+// order, in one owner transaction. Each operation keeps its own identity, digest, predecessor check
+// and idempotency record exactly as if it had been sent alone; only the locks, the visibility mark
+// and the commit are shared. An operation already applied with the same digest is skipped (a retry
+// after a lost response); any rejected operation rejects the whole call, and nothing is committed.
+func (s *Store) ApplyCanonicalSequence(ctx context.Context, batches []CanonicalBatch, cid string) error {
+	if len(batches) == 0 || len(batches) > MaxCanonicalSequence {
 		return ErrOrder
 	}
-	raw, e := json.Marshal(b)
-	if e != nil {
-		return e
+	hashes := make([]string, len(batches))
+	for k, b := range batches {
+		if b.ID == "" || b.Namespace == "" || len(b.Namespace) > 256 || b.Position <= b.Previous || len(b.Changes) > 1000 || (b.Source != "SATELIT" && b.Source != "SENSOR_PANTAI") {
+			return ErrOrder
+		}
+		if b.Source != batches[0].Source || b.Namespace != batches[0].Namespace {
+			return ErrOrder
+		}
+		raw, e := json.Marshal(b)
+		if e != nil {
+			return e
+		}
+		digest := sha256.Sum256(raw)
+		hashes[k] = hex.EncodeToString(digest[:])
 	}
-	digest := sha256.Sum256(raw)
-	hash := hex.EncodeToString(digest[:])
 	tx, e := s.beginCanonicalTx(ctx)
 	if e != nil {
 		return e
@@ -51,16 +72,26 @@ func (s *Store) ApplyCanonical(ctx context.Context, b CanonicalBatch, cid string
 	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, visibilityLock); e != nil {
 		return e
 	}
-	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,7))`, b.Source+":"+b.Namespace); e != nil {
+	if _, e = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,7))`, batches[0].Source+":"+batches[0].Namespace); e != nil {
 		return e
 	}
+	for k, b := range batches {
+		if e = s.applyCanonicalLocked(ctx, tx, b, hashes[k], cid); e != nil {
+			return e
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// applyCanonicalLocked is one operation's state transition; the caller holds the locks.
+func (s *Store) applyCanonicalLocked(ctx context.Context, tx pgx.Tx, b CanonicalBatch, hash, cid string) error {
 	var old string
-	e = tx.QueryRow(ctx, `SELECT digest FROM canonical_batches WHERE operation_id=$1`, b.ID).Scan(&old)
+	e := tx.QueryRow(ctx, `SELECT digest FROM canonical_batches WHERE operation_id=$1`, b.ID).Scan(&old)
 	if e == nil {
 		if old != hash {
 			return ErrOrder
 		}
-		return tx.Commit(ctx)
+		return nil
 	}
 	if !errors.Is(e, pgx.ErrNoRows) {
 		return e
@@ -126,10 +157,8 @@ func (s *Store) ApplyCanonical(ctx context.Context, b CanonicalBatch, cid string
 	if _, e = tx.Exec(ctx, `INSERT INTO canonical_batches(operation_id,digest,source,namespace,position) VALUES($1,$2,$3,$4,$5)`, b.ID, hash, b.Source, b.Namespace, b.Position); e != nil {
 		return e
 	}
-	if _, e = tx.Exec(ctx, `UPDATE canonical_progress SET position=$3 WHERE source=$1 AND namespace=$2`, b.Source, b.Namespace, b.Position); e != nil {
-		return e
-	}
-	return tx.Commit(ctx)
+	_, e = tx.Exec(ctx, `UPDATE canonical_progress SET position=$3 WHERE source=$1 AND namespace=$2`, b.Source, b.Namespace, b.Position)
+	return e
 }
 
 type AuditPage struct {

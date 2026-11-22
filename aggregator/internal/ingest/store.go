@@ -9,13 +9,12 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +26,9 @@ var ErrGap = errors.New("noncontiguous source position")
 type Store struct {
 	Pool   *pgxpool.Pool
 	Leases *ownership.Authority
+	// noSequence is set once the owner answers 404 to the multi-operation call (an older owner
+	// during a rolling update); delivery then sends operations one at a time.
+	noSequence atomic.Bool
 }
 
 func New(ctx context.Context, url string) (*Store, error) {
@@ -43,7 +45,7 @@ func New(ctx context.Context, url string) (*Store, error) {
 	if e != nil {
 		return nil, e
 	}
-	return &Store{p, ownership.New(p)}, nil
+	return &Store{Pool: p, Leases: ownership.New(p)}, nil
 }
 func (s *Store) Get(ctx context.Context, id int) (string, error) {
 	var text string
@@ -83,71 +85,5 @@ func (s *Store) Progress(ctx context.Context, source, ns string, initial int64) 
 		return initial - 1, initial - 1, initial - 1, nil
 	}
 	return
-}
-func (s *Store) Append(ctx context.Context, i Input, initial int64, subject string) error {
-	ctx, span := platform.Start(ctx, "durable source capture")
-	defer span.End()
-	tx, e := s.Pool.Begin(ctx)
-	if e != nil {
-		return e
-	}
-	defer tx.Rollback(ctx)
-	if e = ownership.Guard(ctx, tx); e != nil {
-		return e
-	}
-	if _, e = tx.Exec(ctx, `INSERT INTO source_progress(source,namespace,received,prepared,applied) VALUES($1,$2,$3,$3,$3) ON CONFLICT DO NOTHING`, i.Source, i.Namespace, initial-1); e != nil {
-		return e
-	}
-	var pos int64
-	if e = tx.QueryRow(ctx, `SELECT received FROM source_progress WHERE source=$1 AND namespace=$2 FOR UPDATE`, i.Source, i.Namespace).Scan(&pos); e != nil {
-		return e
-	}
-	metadata, e := json.Marshal(i.Metadata)
-	if e != nil {
-		return e
-	}
-	digest := Hash(append(append([]byte{}, i.Payload...), metadata...))
-	if i.Position <= pos {
-		var old string
-		if e = tx.QueryRow(ctx, `SELECT digest FROM raw_inputs WHERE source=$1 AND namespace=$2 AND position=$3`, i.Source, i.Namespace, i.Position).Scan(&old); e != nil {
-			return e
-		}
-		if old != digest {
-			return ErrConflict
-		}
-		return tx.Commit(ctx)
-	}
-	if i.Position != pos+1 {
-		return ErrGap
-	}
-	if i.ID == "" {
-		i.ID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(i.Source+"\x00"+i.Namespace+"\x00"+stringPosition(i.Position))).String()
-	}
-	// Operational trace context must survive a crash/outbox retry, but must not
-	// change the source identity/content digest on a new acquisition attempt.
-	metadata, e = json.Marshal(traceMetadata(ctx, i.Metadata))
-	if e != nil {
-		return e
-	}
-	if e = tx.QueryRow(ctx, `INSERT INTO raw_inputs(message_id,source,namespace,position,entity_key,payload,metadata,digest,correlation_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING received_at`, i.ID, i.Source, i.Namespace, i.Position, i.Entity, i.Payload, metadata, digest, i.CorrelationID).Scan(&i.ReceivedAt); e != nil {
-		return e
-	}
-	if critical, _ := i.Metadata["critical"].(bool); critical {
-		if _, e = tx.Exec(ctx, `INSERT INTO warning_expectations(notification_id,message_id,first_received_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, WarningID(i), i.ID, i.ReceivedAt); e != nil {
-			return e
-		}
-	}
-	if _, e = tx.Exec(ctx, `INSERT INTO raw_outbox(message_id,subject) VALUES($1,$2)`, i.ID, subject); e != nil {
-		return e
-	}
-	if _, e = tx.Exec(ctx, `UPDATE source_progress SET received=$3 WHERE source=$1 AND namespace=$2`, i.Source, i.Namespace, i.Position); e != nil {
-		return e
-	}
-	if i.Source == "SATELIT" {
-		if e = resolveResponse(ctx, tx, i.Source, i.Namespace, "stream:"+stringPosition(i.Position)); e != nil {
-			return e
-		}
-	}
-	return tx.Commit(ctx)
 }
 func stringPosition(pos int64) string { return fmt.Sprintf("%d", pos) }

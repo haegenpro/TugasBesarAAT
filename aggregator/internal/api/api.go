@@ -195,6 +195,9 @@ func (a *API) Ready(c *gin.Context) {
 	if !storeReady {
 		status = "unavailable"
 		code = http.StatusServiceUnavailable
+	} else if a.Deps.Warming() {
+		status = "warming"
+		code = http.StatusServiceUnavailable
 	} else if !brokerReady {
 		status = "degraded"
 	}

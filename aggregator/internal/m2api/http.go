@@ -175,6 +175,29 @@ func Register(r *gin.Engine, s *store.Store, cfg Config) {
 		}
 		c.JSON(200, gin.H{"operation_id": b.ID, "position": b.Position})
 	})
+	// Several original operations of one namespace in predecessor order, applied in one owner
+	// transaction. Same per-operation identity, digest and idempotency rules as /batches.
+	r.POST("/internal/canonical/sequences", auth(cfg.CanonicalToken), func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 32<<20)
+		var body struct {
+			Batches []store.CanonicalBatch `json:"batches"`
+		}
+		if c.ShouldBindJSON(&body) != nil || len(body.Batches) == 0 || len(body.Batches) > store.MaxCanonicalSequence {
+			problem(c, 400, "invalid canonical sequence")
+			return
+		}
+		e := s.ApplyCanonicalSequence(c.Request.Context(), body.Batches, c.GetString("correlation_id"))
+		if errors.Is(e, store.ErrOrder) {
+			problem(c, 409, e.Error())
+			return
+		}
+		if e != nil {
+			problem(c, 503, "canonical commit unavailable; retry the same sequence")
+			return
+		}
+		last := body.Batches[len(body.Batches)-1]
+		c.JSON(200, gin.H{"applied": len(body.Batches), "position": last.Position})
+	})
 	r.GET("/internal/analytics/summary", auth(cfg.AnalyticsToken), func(c *gin.Context) {
 		if !parameters(c, "from", "to", "interval", "source") {
 			return

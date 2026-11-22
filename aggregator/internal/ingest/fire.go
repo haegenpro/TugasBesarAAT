@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/jackc/pgx/v5"
 	"sort"
 	"time"
@@ -34,21 +33,9 @@ func readObservation(row pgx.Row) (observationRow, error) {
 	return out, e
 }
 
-func finishSupersededFire(ctx context.Context, tx pgx.Tx, i Input) error {
-	if _, err := tx.Exec(ctx, `UPDATE raw_inputs SET state='applied',reason='superseded by a newer source offset' WHERE message_id=$1`, i.ID); err != nil {
-		return err
-	}
-	if err := releaseEntity(ctx, tx, i); err != nil {
-		return err
-	}
-	if err := frontiers(ctx, tx, i.Source, i.Namespace); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
 func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration) error {
-	tx, e := s.Pool.Begin(ctx)
+	defer stage("prepare_fire")()
+	tx, e := s.begin(ctx)
 	if e != nil {
 		return e
 	}
@@ -56,19 +43,37 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 	if e = ownership.Guard(ctx, tx); e != nil {
 		return e
 	}
+	return s.prepareFireIn(ctx, tx, i, lateness, &fireProgress{single: true})
+}
+
+// prepareFireIn prepares one input inside tx and finishes with tx.Commit. When tx is a
+// savepoint of a larger transaction, that commit releases the savepoint, so several inputs
+// can be prepared in source order within one real commit while an input that fails rolls
+// back only its own mutations. The state transitions are identical in both modes. p carries the
+// source progress for the transaction (see fireProgress); inside a batch the caller writes it.
+func (s *Store) prepareFireIn(ctx context.Context, tx pgx.Tx, i Input, lateness time.Duration, p *fireProgress) error {
+	var e error
 	var state string
 	if e = tx.QueryRow(ctx, `SELECT state FROM raw_inputs WHERE message_id=$1 FOR UPDATE`, i.ID).Scan(&state); e != nil {
 		return e
 	}
 	if state != "pending" {
-		return tx.Commit(ctx)
+		return p.finish(ctx, tx)
 	}
-	var prepared int64
-	if e = tx.QueryRow(ctx, `SELECT prepared FROM source_progress WHERE source=$1 AND namespace=$2 FOR UPDATE`, i.Source, i.Namespace).Scan(&prepared); e != nil {
+	if e = p.load(ctx, tx, i); e != nil {
 		return e
 	}
-	if i.Position != prepared+1 && !(replayGeneration(i) > 0 && i.Position <= prepared) {
-		return ErrGap
+	inOrder := func() bool {
+		return i.Position == p.prepared+1 || (replayGeneration(i) > 0 && i.Position <= p.prepared)
+	}
+	if !inOrder() {
+		// Confirm against the inputs' states before calling it a gap.
+		if e = p.refreshPrepared(ctx, tx); e != nil {
+			return e
+		}
+		if !inOrder() {
+			return ErrGap
+		}
 	}
 	raw, e := json.Marshal(i.Metadata["operation"])
 	if e != nil {
@@ -79,17 +84,17 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		eventID, _ := i.Metadata["event_id"].(string)
 		normalized, err := satellite.Normalize(i.Namespace, satellite.Event{ID: eventID, Type: typ, Data: i.Payload})
 		if err != nil {
-			return parkInput(ctx, tx, i, err.Error())
+			return p.park(ctx, tx, i, err.Error())
 		}
 		raw = normalized.Operation
 	} else if reason, _ := i.Metadata["rejection"].(string); reason != "" {
-		return parkInput(ctx, tx, i, reason)
+		return p.park(ctx, tx, i, reason)
 	}
 	if e = wildfire.Decode(raw, &op); e != nil {
-		return parkInput(ctx, tx, i, e.Error())
+		return p.park(ctx, tx, i, e.Error())
 	}
 	if op.Namespace != i.Namespace || op.Offset != i.Position || op.Version != 1 {
-		return parkInput(ctx, tx, i, "source envelope and operation identity disagree")
+		return p.park(ctx, tx, i, "source envelope and operation identity disagree")
 	}
 	if i.Entity == "" {
 		i.Entity = op.TargetKey
@@ -102,13 +107,15 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 			}
 		}
 	}
-	if waiting, e := blocked(ctx, tx, i); e != nil {
+	holder, e := blockHolder(ctx, tx, i)
+	if e != nil {
 		return e
-	} else if waiting {
-		return parkInput(ctx, tx, i, "blocked by an earlier unprocessed change of this entity")
+	}
+	if holder != "" && holder != i.ID {
+		return p.park(ctx, tx, i, "blocked by an earlier unprocessed change of this entity")
 	}
 	if op.Kind != "heartbeat" && op.Kind != "detection" && op.Kind != "update" && op.Kind != "retract" {
-		return parkInput(ctx, tx, i, "unsupported wildfire operation")
+		return p.park(ctx, tx, i, "unsupported wildfire operation")
 	}
 	groups := map[string]bool{}
 	oldRows := map[string]observationRow{}
@@ -133,26 +140,26 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 	var old observationRow
 	if op.Kind == "update" || op.Kind == "retract" {
 		if op.TargetKey == "" {
-			return parkInput(ctx, tx, i, "target_key required")
+			return p.park(ctx, tx, i, "target_key required")
 		}
 		old, e = load(op.TargetKey)
 		if errors.Is(e, pgx.ErrNoRows) {
-			return parkInput(ctx, tx, i, "target_key is unknown")
+			return p.park(ctx, tx, i, "target_key is unknown")
 		}
 		if e != nil {
 			return e
 		}
 		if op.Offset < old.Observation.LastOffset {
-			return finishSupersededFire(ctx, tx, i)
+			return p.superseded(ctx, tx, i, holder)
 		}
 		oldRows[op.TargetKey] = old
 		if op.Kind == "update" && old.Observation.Detection == nil {
-			return parkInput(ctx, tx, i, "update target has no retained detection")
+			return p.park(ctx, tx, i, "update target has no retained detection")
 		}
 		if op.Kind == "update" && len(op.Changes) != 0 {
 			merged, err := wildfire.MergeDetection(*old.Observation.Detection, op.Changes)
 			if err != nil {
-				return parkInput(ctx, tx, i, err.Error())
+				return p.park(ctx, tx, i, err.Error())
 			}
 			op.Detection = &merged
 		}
@@ -163,11 +170,11 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 	var incoming *wildfire.Observation
 	if op.Kind == "detection" || op.Kind == "update" {
 		if op.Detection == nil {
-			return parkInput(ctx, tx, i, "complete detection required")
+			return p.park(ctx, tx, i, "complete detection required")
 		}
 		ob, e := wildfire.ParseDetection(*op.Detection, op.Offset, nil)
 		if e != nil {
-			return parkInput(ctx, tx, i, e.Error())
+			return p.park(ctx, tx, i, e.Error())
 		}
 		// A valid detection or update asserts active state at its source
 		// offset. Acquisition time remains the grouping clock.
@@ -178,10 +185,10 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		existing, e := load(ob.Key)
 		if e == nil {
 			if op.Offset < existing.Observation.LastOffset {
-				return finishSupersededFire(ctx, tx, i)
+				return p.superseded(ctx, tx, i, holder)
 			}
 			if op.Kind == "update" && ob.Key != op.TargetKey && existing.Observation.Active {
-				return parkInput(ctx, tx, i, "replacement key is already active")
+				return p.park(ctx, tx, i, "replacement key is already active")
 			}
 			oldRows[ob.Key] = existing
 			if existing.Fire != nil {
@@ -256,10 +263,7 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		}
 	}
 	oldSingletons, oldExcluded := regionCounts(oldRows, nil)
-	var priorWatermark *time.Time
-	if e = tx.QueryRow(ctx, `SELECT watermark FROM source_progress WHERE source=$1 AND namespace=$2`, i.Source, i.Namespace).Scan(&priorWatermark); e != nil {
-		return e
-	}
+	priorWatermark := p.watermark
 	late := incoming != nil && priorWatermark != nil && incoming.EventTime.Before(*priorWatermark)
 	if incoming == nil && old.Observation.EventTime != nil && priorWatermark != nil {
 		late = old.Observation.EventTime.Before(*priorWatermark)
@@ -327,7 +331,7 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		predecessors[id] = f
 	}
 	components := fireComponents(observations)
-	provinces, e := readProvinces(ctx, tx, i.Namespace)
+	provinces, e := p.regionProvinces(ctx, tx)
 	if e != nil {
 		return e
 	}
@@ -344,14 +348,18 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		}
 		changes = append(changes, change)
 	}
-	keys := make([]string, 0, len(oldRows))
-	for k := range oldRows {
-		keys = append(keys, k)
-	}
-	if len(keys) > 0 {
-		if _, e = tx.Exec(ctx, `UPDATE wildfire_observations SET previous_fire_id=COALESCE(fire_id,previous_fire_id),fire_id=NULL WHERE namespace=$1 AND key=ANY($2)`, i.Namespace, keys); e != nil {
-			return e
+	// Membership: every loaded row first leaves its fire (remembering it as the previous fire),
+	// then each member of an active fire joins it. Only the end state is written, and only for rows
+	// whose fire_id or previous_fire_id actually changes, so an unchanged member of a large fire is
+	// not rewritten for every detection that touches the fire.
+	type memberState struct{ fire, previous *string }
+	final := make(map[string]memberState, len(oldRows))
+	for key, r := range oldRows {
+		prev := r.Previous
+		if r.Fire != nil {
+			prev = r.Fire
 		}
+		final[key] = memberState{nil, prev}
 	}
 	for id, f := range fires {
 		body, _ := json.Marshal(f)
@@ -359,16 +367,31 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 			return e
 		}
 		if f.Active {
+			fireID := id
 			for _, key := range f.Members {
 				r := oldRows[key]
 				prev := r.Previous
 				if r.Fire != nil && *r.Fire != id {
 					prev = r.Fire
 				}
-				if _, e = tx.Exec(ctx, `UPDATE wildfire_observations SET fire_id=$3,previous_fire_id=$4 WHERE namespace=$1 AND key=$2`, i.Namespace, key, id, prev); e != nil {
-					return e
-				}
+				final[key] = memberState{&fireID, prev}
 			}
+		}
+	}
+	same := func(a, b *string) bool { return a == nil && b == nil || a != nil && b != nil && *a == *b }
+	var changedKeys []string
+	var changedFires, changedPrevious []*string
+	for key, m := range final {
+		if r, loaded := oldRows[key]; loaded && same(r.Fire, m.fire) && same(r.Previous, m.previous) {
+			continue
+		}
+		changedKeys = append(changedKeys, key)
+		changedFires = append(changedFires, m.fire)
+		changedPrevious = append(changedPrevious, m.previous)
+	}
+	if len(changedKeys) > 0 {
+		if _, e = tx.Exec(ctx, `UPDATE wildfire_observations o SET fire_id=v.fire,previous_fire_id=v.previous FROM unnest($2::text[],$3::text[],$4::text[]) AS v(key,fire,previous) WHERE o.namespace=$1 AND o.key=v.key`, i.Namespace, changedKeys, changedFires, changedPrevious); e != nil {
+			return e
 		}
 	}
 	membership := map[string]bool{}
@@ -378,26 +401,26 @@ func (s *Store) prepareFire(ctx context.Context, i Input, lateness time.Duration
 		}
 	}
 	singletons, excluded := regionCounts(oldRows, membership)
-	if _, e = tx.Exec(ctx, `UPDATE source_progress SET singletons=singletons+$3,excluded=excluded+$4,late_mutations=late_mutations+CASE WHEN $5 THEN 1 ELSE 0 END WHERE source=$1 AND namespace=$2`, i.Source, i.Namespace, singletons-oldSingletons, excluded-oldExcluded, late); e != nil {
-		return e
+	p.singletons += int64(singletons - oldSingletons)
+	p.excluded += int64(excluded - oldExcluded)
+	if late {
+		p.late++
 	}
 	// Original source positions remain distinct from prepared/applied frontiers.
 	batch := store.CanonicalBatch{ID: wildfire.BatchIdentity(i.Namespace, i.Position), Source: i.Source, Namespace: i.Namespace, Previous: i.Position - 1, Position: i.Position, Changes: changes}
-	if e = queueCanonical(ctx, tx, i, batch); e != nil {
+	if e = p.queue(ctx, tx, i, batch); e != nil {
 		return e
 	}
 	if op.VirtualNow != nil {
-		if _, e = tx.Exec(ctx, `UPDATE source_progress SET virtual_now=GREATEST(virtual_now,$3),watermark=GREATEST(watermark,$3::timestamptz-$4::interval) WHERE source=$1 AND namespace=$2`, i.Source, i.Namespace, *op.VirtualNow, fmt.Sprintf("%f seconds", lateness.Seconds())); e != nil {
+		p.clock(*op.VirtualNow, lateness)
+	}
+	if holder == i.ID {
+		if e = releaseEntity(ctx, tx, i); e != nil {
 			return e
 		}
 	}
-	if e = releaseEntity(ctx, tx, i); e != nil {
-		return e
-	}
-	if e = frontiers(ctx, tx, i.Source, i.Namespace); e != nil {
-		return e
-	}
-	return tx.Commit(ctx)
+	p.done(i.Position)
+	return p.finish(ctx, tx)
 }
 
 func regionCounts(rows map[string]observationRow, membership map[string]bool) (singletons, excluded int) {

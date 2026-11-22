@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -160,6 +161,13 @@ func (s *sessionStore) verify(ctx context.Context, access string) (principal, er
 	return p, err
 }
 
+// rotate exchanges a refresh token for a new pair. The new tokens are derived from the presented
+// token and a random per-rotation salt kept with the session (HMAC), never stored themselves.
+// Re-presenting the just-rotated token within AUTH_REFRESH_GRACE (10 s) returns the same pair:
+// a rotation can commit while its response is lost (a deadline at the commit, a dropped
+// connection), and the client's retry with the token it still holds must not become a 401.
+// Only the immediately previous token is honoured, and only inside the window; the salt never
+// leaves the database, so an old refresh token alone cannot reproduce the current pair.
 func (s *sessionStore) rotate(ctx context.Context, oldRefresh string) (tokenPair, error) {
 	if oldRefresh == "" {
 		return tokenPair{}, errInvalidToken
@@ -170,23 +178,21 @@ func (s *sessionStore) rotate(ctx context.Context, oldRefresh string) (tokenPair
 	db := s.tokenDB(oldRefresh, "refresh")
 	err := db.QueryRowContext(ctx, `SELECT client_id, role FROM sessions WHERE refresh_hash = $1 AND refresh_expires_at > $2`, oldHash, now.Unix()).Scan(&p.ClientID, &p.Role)
 	if errors.Is(err, sql.ErrNoRows) {
-		return tokenPair{}, errInvalidToken
+		return s.rotatedWithinGrace(ctx, db, oldRefresh, oldHash, now)
 	}
 	if err != nil {
 		return tokenPair{}, err
 	}
-	access, err := newToken()
+	salt, err := newToken()
 	if err != nil {
 		return tokenPair{}, err
 	}
-	refresh, err := newToken()
-	if err != nil {
-		return tokenPair{}, err
-	}
-	access = s.signed(access, "access", p.Role, now.Add(s.accessTTL).Unix())
-	refresh = s.signed(refresh, "refresh", p.Role, now.Add(s.refreshTTL).Unix())
-	result, err := db.ExecContext(ctx, `UPDATE sessions SET access_hash = $1, access_expires_at = $2, refresh_hash = $3, refresh_expires_at = $4 WHERE refresh_hash = $5 AND refresh_expires_at > $6`,
-		tokenHash(access), now.Add(s.accessTTL).Unix(), tokenHash(refresh), now.Add(s.refreshTTL).Unix(), oldHash, now.Unix())
+	accessExpiry, refreshExpiry := now.Add(s.accessTTL).Unix(), now.Add(s.refreshTTL).Unix()
+	access := s.signed(derivedToken(salt, "access", oldRefresh), "access", p.Role, accessExpiry)
+	refresh := s.signed(derivedToken(salt, "refresh", oldRefresh), "refresh", p.Role, refreshExpiry)
+	result, err := db.ExecContext(ctx, `UPDATE sessions SET access_hash = $1, access_expires_at = $2, refresh_hash = $3, refresh_expires_at = $4,
+ previous_refresh_hash = $5, rotated_at = $7, rotation_salt = $8 WHERE refresh_hash = $5 AND refresh_expires_at > $6`,
+		tokenHash(access), accessExpiry, tokenHash(refresh), refreshExpiry, oldHash, now.Unix(), now.Unix(), salt)
 	if err != nil {
 		return tokenPair{}, err
 	}
@@ -195,9 +201,38 @@ func (s *sessionStore) rotate(ctx context.Context, oldRefresh string) (tokenPair
 		return tokenPair{}, err
 	}
 	if count != 1 {
-		return tokenPair{}, errInvalidToken
+		// A concurrent request with the same token rotated it first: answer with its pair.
+		return s.rotatedWithinGrace(ctx, db, oldRefresh, oldHash, now)
 	}
 	return s.pair(p.ClientID, p.Role, access, refresh), nil
+}
+
+// rotatedWithinGrace returns the pair a just-completed rotation of oldRefresh produced, if that
+// rotation happened within the grace window; otherwise the token is invalid.
+func (s *sessionStore) rotatedWithinGrace(ctx context.Context, db *sql.DB, oldRefresh, oldHash string, now time.Time) (tokenPair, error) {
+	grace := platform.Duration("AUTH_REFRESH_GRACE", 10*time.Second)
+	var p principal
+	var salt string
+	var accessExpiry, refreshExpiry int64
+	err := db.QueryRowContext(ctx, `SELECT client_id, role, rotation_salt, access_expires_at, refresh_expires_at FROM sessions
+ WHERE previous_refresh_hash = $1 AND rotated_at >= $2 AND refresh_expires_at > $3`, oldHash, now.Add(-grace).Unix(), now.Unix()).Scan(&p.ClientID, &p.Role, &salt, &accessExpiry, &refreshExpiry)
+	if errors.Is(err, sql.ErrNoRows) {
+		return tokenPair{}, errInvalidToken
+	}
+	if err != nil {
+		return tokenPair{}, err
+	}
+	access := s.signed(derivedToken(salt, "access", oldRefresh), "access", p.Role, accessExpiry)
+	refresh := s.signed(derivedToken(salt, "refresh", oldRefresh), "refresh", p.Role, refreshExpiry)
+	return s.pair(p.ClientID, p.Role, access, refresh), nil
+}
+
+// derivedToken is the token of the given kind for one rotation: HMAC-SHA256 keyed by the
+// rotation's random salt over the presented refresh token.
+func derivedToken(salt, kind, oldRefresh string) string {
+	mac := hmac.New(sha256.New, []byte(salt))
+	mac.Write([]byte("aat-auth-rotation-v1\x00" + kind + "\x00" + oldRefresh))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func (s *sessionStore) logout(ctx context.Context, refresh string) error {

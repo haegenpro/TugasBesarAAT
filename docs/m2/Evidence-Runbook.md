@@ -23,7 +23,7 @@ python3 scripts/m2/manage.py init --profile k3s --context CTX --node-a NODE_A --
 | kubeconfig | private `.m2-local/kubeconfig` | the host's own kubeconfig |
 | image delivery | `images.py load-minikube` | `images.py export`, then `images.py import-k3s` on **each** node |
 | node resources in load runs | Docker container stats/limits | kubelet stats (`node_usage`) |
-| node rebuild (P1-5) | not available | `deployment/m2/rebuild-b.py` |
+| node rebuild (P1-5) | `deployment/m2/rebuild-b-minikube.py` | `deployment/m2/rebuild-b.py` |
 
 ## Common setup (once per rehearsal)
 
@@ -64,7 +64,7 @@ TOKEN=$(curl -s -X POST $BASE/auth/login -H 'Content-Type: application/json' \
 | 2 | In terminal 1 `p1_placement_load.py nodeload --duration 300 --output .m2-local/nodeload.json`; in terminal 2 the catalog import, then `p1_placement_load.py spike --count 5000 --execute`; finish with `p1_placement_load.py distribution` | Per-node CPU/memory timeline and per-unit event counts. The report must discuss the skew shown; no script judges "good enough". The spike adds synthetic events to the dataset. |
 | 3 | `curl -s -w '\n%{time_total}s\n' -H "Authorization: Bearer $TOKEN" "$BASE/hazards?limit=50"`, then repeat with `&cursor=<next_cursor>`; then `evidence_audit.py scan` | `scan` verifies ordering (`ingested_at`, `hazard_id`), no duplicates and recomputes the checksum. |
 | 4 | `evidence_audit.py snapshot --ids --output .m2-local/before.json`; run `evidence_outage_probe.py --watch --duration 300 --output .m2-local/outage-4.json` in one terminal; in another `evidence_tester_agent.py practice <node-loss scenario>` (see `evidence_tester_agent.py list`); afterwards `evidence_audit.py snapshot --ids --output .m2-local/after.json`; `evidence_audit.py compare .m2-local/before.json .m2-local/after.json` | `CONTINUITY OK` (no 5xx, no hang, answers complete or explicitly partial) and `ZERO LOSS: yes`. Writes acknowledged during the outage are not in `before.json`; capture the acknowledged identities separately if the report claims them. |
-| 5 | k3s only: `sudo python3 deployment/m2/rebuild-b.py --hostname HOST --execute` while `evidence_outage_probe.py --duration 300` runs; then `p1_placement_load.py distribution` | `CONTINUITY OK` plus placement showing node B holds data again. Not reproducible on Minikube. |
+| 5 | K3s: `sudo python3 deployment/m2/rebuild-b.py --hostname HOST --execute`; Minikube: `python3 deployment/m2/rebuild-b-minikube.py --execute` (same six B replicas, same wipe). Either while `evidence_outage_probe.py --duration 300` runs; then `p1_placement_load.py distribution` | `CONTINUITY OK` plus placement showing node B holds data again. |
 | 6 | After 4 and 5: `p1_placement_load.py distribution`, then repeat the single-node loss | `PLACEMENT OK` (replica on a different node for every sampled event) before the repeat. |
 | 7 | `p1_analytics_compare.py`; then in the browser `access.py client-api` and open `/analytics`; repeat both with node B stopped | Script: dashboard-versus-Audit table per type, severity and area with `NUMBERS MATCH` or `DIFFERENCES FOUND`, plus `partial`/`unavailable_units`. **manual**: the charts and the "incomplete" banner on the page. Result files are attached (`result.txt`, `result.json`). |
 
@@ -78,7 +78,7 @@ TOKEN=$(curl -s -X POST $BASE/auth/login -H 'Content-Type: application/json' \
 | 4 | `evidence_tester_agent.py practice <clock scenario>`; then `evidence_audit.py scan` | Duplicates absent. "Never two successful commits" is also covered by integration tests (`evidence_integration_tests.py --suite canonical`). |
 | 5 | Freeze/suspend the owner's VM yourself (not possible from the cluster), unfreeze, then `evidence_audit.py scan` and `evidence_audit.py gaps` | Same checks; the freeze itself is **manual**. |
 | 6 | `p2_load_test.py --output .m2-local/load-RUN --scale --audit-check` from the separate generator PC (`--base-url http://NODE_A_IP:NODEPORT`) | PASS/FAIL lines: error rate under 1%, at least 120 s continuously at 10,000 VUs, 3 → 5 → 2 applied, no duplicate HazardEvent. |
-| 7 | `p2_throughput_compare.py --output .m2-local/throughput-RUN` | `P2-7 MET` / `NOT MET` with the measured ratio and whether the dataset stayed fixed. The best measured ratio so far is below 2.0; report it as measured. |
+| 7 | `p2_throughput_compare.py --output .m2-local/throughput-RUN` (default: 10,000 VUs as in P2-6, `--target-rps auto`) | `P2-7 MET` / `NOT MET` with the measured ratio and whether the dataset stayed fixed, or `P2-7 INVALID` when the one-instance sample reached the cap. Both samples offer the same total requests per second, spread evenly over all VUs. `auto` first measures the saturated one-instance rate in a 30 s pilot and uses 3 x that as the cap for both samples; give `--target-rps N` to fix the cap. The cap must be above what one Aggregator serves, so a ratio of 3 x with the high sample at the cap is printed as a lower bound. The best measured ratio with the earlier 200-VU closed loop was below 2.0; report results as measured. |
 | 8 | `p2_load_test.py --output .m2-local/roll-RUN --roll-from <previous image> --strict-zero-failures` | `P2-8` PASS only with zero 5xx, zero transport failures and zero unexpected failures (controlled 429 with Retry-After excluded). |
 
 ## Problem 3

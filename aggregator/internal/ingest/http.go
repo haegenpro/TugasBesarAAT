@@ -60,13 +60,24 @@ func (s *Store) Handler(token, sloToken string) *gin.Engine {
 			c.JSON(400, gin.H{"error": platform.ProblemStatus(400, e.Error())})
 			return
 		}
-		result, e := s.AcceptReport(c.Request.Context(), submitter, key, body, c.GetHeader("X-Correlation-ID"))
+		// Acceptance has its own deadline inside the caller's budget. When storage is too slow to
+		// accept in time, the answer is a controlled 429 instead of a request held until the client
+		// gives up. Retrying the same key is safe even if the commit did complete: the ledger
+		// returns the existing receipt.
+		accept, cancel := context.WithTimeout(c.Request.Context(), platform.Milliseconds("FIELD_ACCEPT_TIMEOUT_MS", 2000))
+		defer cancel()
+		result, e := s.AcceptReport(accept, submitter, key, body, c.GetHeader("X-Correlation-ID"))
 		if errors.Is(e, ErrConflict) {
 			c.JSON(409, gin.H{"error": platform.ProblemStatus(409, e.Error())})
 			return
 		}
 		if e != nil {
 			c.Header("Retry-After", "1")
+			if accept.Err() != nil && c.Request.Context().Err() == nil {
+				platform.Add("field_accept_busy_total", 1)
+				c.JSON(429, gin.H{"error": platform.ProblemStatus(429, "acceptance busy; retry the same key")})
+				return
+			}
 			c.JSON(503, gin.H{"error": platform.ProblemStatus(503, "acceptance unavailable; retry the same key")})
 			return
 		}

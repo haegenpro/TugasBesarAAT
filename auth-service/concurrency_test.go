@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -24,28 +23,34 @@ func TestRefreshAcrossIndependentInstances(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Sixteen concurrent refreshes with one token, spread over two instances, perform exactly one
+	// rotation: every request receives the same pair, and that pair is the session's current one.
 	stores := []*sessionStore{a, b}
 	var wg sync.WaitGroup
-	results := make(chan error, 16)
+	results := make(chan tokenPair, 16)
 	for n := range 16 {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			_, e := stores[n%2].rotate(context.Background(), pair.RefreshToken)
-			results <- e
+			p, e := stores[n%2].rotate(context.Background(), pair.RefreshToken)
+			if e != nil {
+				t.Errorf("refresh %d failed: %v", n, e)
+			}
+			results <- p
 		}(n)
 	}
 	wg.Wait()
 	close(results)
-	success := 0
-	for e := range results {
-		if e == nil {
-			success++
-		} else if !errors.Is(e, errInvalidToken) {
-			t.Fatal(e)
-		}
+	distinct := map[string]bool{}
+	var current tokenPair
+	for p := range results {
+		distinct[p.RefreshToken] = true
+		current = p
 	}
-	if success != 1 {
-		t.Fatalf("refresh succeeded %d times", success)
+	if len(distinct) != 1 {
+		t.Fatalf("one token produced %d different rotations", len(distinct))
+	}
+	if _, err := a.rotate(context.Background(), current.RefreshToken); err != nil {
+		t.Fatalf("the shared pair is not the session's current one: %v", err)
 	}
 }

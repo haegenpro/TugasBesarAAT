@@ -137,14 +137,13 @@ func requestLog(log logger) gin.HandlerFunc {
 	}
 }
 
+// ready reports whether this Client API process can take requests. It deliberately does not
+// depend on auth-service or the Aggregator: when a dependency is slow or saturated, every Client
+// API replica would fail readiness at the same moment, Kubernetes would remove all of them from
+// the Service, and the entry point would refuse connections. A request whose dependency is
+// unavailable is already answered per request (503/429), which keeps the failure explicit.
 func (a *api) ready(c *gin.Context) {
-	authCode, authErr := a.call(c, "auth-service", http.MethodGet, joinURL(a.cfg.AuthURL, "/ready"), nil, false, nil)
-	aggCode, aggErr := a.call(c, "aggregator", http.MethodGet, joinURL(a.cfg.AggregatorURL, "/ready"), nil, false, nil)
-	if authErr != nil || aggErr != nil || authCode != http.StatusOK || aggCode != http.StatusOK {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "unavailable", "auth": authErr == nil && authCode == http.StatusOK, "aggregator": aggErr == nil && aggCode == http.StatusOK})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ready", "auth": true, "aggregator": true})
+	c.JSON(http.StatusOK, gin.H{"status": "ready"})
 }
 
 func (a *api) login(c *gin.Context) {
