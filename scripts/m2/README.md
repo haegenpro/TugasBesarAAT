@@ -21,7 +21,7 @@ Pick the cluster once with `manage.py init --profile minikube|k3s`; all tools fo
 | `p1_placement_load.py` | P1-1, P1-2, P1-5, P1-6 | `distribution` (primary/replica per node and unit), `nodeload` (CPU/memory per node), `spike` (one-region write burst) |
 | `p2_load_test.py` + `p2_load_test.js` | P2-6, P2-8 (P5-5 from the summary) | 10,000-VU k6 run, 3 → 5 → 2 scaling, rolling image replacement, PASS/FAIL verdicts |
 | `p2_load_credentials.py` | P2-6 | writes only the demo client credentials for the separate generator PC |
-| `p2_throughput_compare.py` | P2-7 | one-versus-three Aggregator throughput on the same dataset |
+| `p2_throughput_compare.py` | P2-7 | one-versus-three Aggregator throughput on the same dataset, 10,000 VUs and one capped total request rate for both samples (`--target-rps N` or `auto` pilot); INVALID if one instance already meets the cap |
 | `p1_analytics_compare.py` | P1-7 | dashboard numbers versus a direct Audit API count per type, severity and area; verdict on the numbers only (the page itself is manual) |
 | `p3_schema_mode.py` | P3-1 | switches the PVMBG mock between `v1`, `compatible` and `breaking` contracts |
 | `p3_schema_behavior.py` | P3-1 | `--execute` runs reader v1 with mock v1, compatible and breaking, then activates reader v2, replays and runs breaking again; PASS/FAIL per scenario against the declared design |

@@ -2,6 +2,7 @@
 // Run against Client API's private NodePort; record any generator/cluster colocation.
 // Secrets are read from a private JSON file, never printed or sent as tags.
 import http from 'k6/http';
+import exec from 'k6/execution';
 import { sleep } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 
@@ -12,8 +13,17 @@ const total = Number(__ENV.M2_VUS || 10000);
 const fieldVUs = Math.max(1, Math.floor(total * Number(__ENV.M2_FIELD_FRACTION || 0.1)));
 const think = Number(__ENV.M2_THINK_SECONDS || 1);
 const reportEvery = Number(__ENV.M2_REPORT_EVERY || 0);
+// Paced mode (P2-7): the whole test offers M2_TARGET_RPS requests per second, spread evenly over all VUs
+// during the hold. 0 keeps the closed-loop behaviour (every VU sleeps `think` seconds between requests).
+const targetRPS = Number(__ENV.M2_TARGET_RPS || 0);
+const seconds = value => Number(String(value).replace(/s$/, ''));
+const rampSeconds = seconds(__ENV.M2_RAMP || '60s');
+const holdSeconds = seconds(__ENV.M2_HOLD || '120s');
 if (!Number.isInteger(total) || total < 2 || fieldVUs >= total || think < 0 || (reportEvery > 0 && !__ENV.M2_RUN_ID))
   throw new Error('invalid load settings');
+if (!Number.isFinite(targetRPS) || targetRPS < 0 || !(rampSeconds > 0) || !(holdSeconds > 0) ||
+    (targetRPS > 0 && holdSeconds < total / targetRPS + 10))
+  throw new Error('paced hold must let every VU send a measured request, with 10 s margin');
 
 const unsuccessful = new Rate('m2_unsuccessful');
 const unexpected = new Rate('m2_unexpected_errors');
@@ -28,6 +38,10 @@ const successfulReads = new Counter('m2_successful_hazard_reads');
 const completeReads = new Counter('m2_complete_hazard_reads');
 const partialReads = new Counter('m2_partial_hazard_reads');
 const invalidReads = new Counter('m2_invalid_hazard_responses');
+// Counted only inside the hold window of a paced run, so the ramp and ramp-down never enter the ratio.
+const pacedRequests = new Counter('m2_paced_requests');
+const pacedComplete = new Counter('m2_paced_complete_hazard_reads');
+const pacedExercised = new Counter('m2_paced_vus_exercised');
 const phases = [
   { duration: __ENV.M2_RAMP || '60s', target: 1 },
   { duration: __ENV.M2_HOLD || '120s', target: 1 },
@@ -44,6 +58,8 @@ export const options = {
     m2_successful_hazard_reads: ['count>0'],
     m2_complete_hazard_reads: ['count>=0'], m2_partial_hazard_reads: ['count>=0'],
     m2_invalid_hazard_responses: ['count==0'],
+    ...(targetRPS > 0 ? { m2_paced_requests: ['count>=0'], m2_paced_complete_hazard_reads: ['count>=0'],
+      m2_paced_vus_exercised: ['count>=0'] } : {}),
     m2_admission_rejections: ['count>=0'], m2_transport_failures: ['count>=0'],
     'm2_unsuccessful{role:field}': ['rate>=0'], 'm2_unsuccessful{role:media}': ['rate>=0'],
     ...Object.fromEntries(['field','media'].flatMap(role => ['login','refresh','hazards','field-report'].map(operation =>
@@ -61,10 +77,14 @@ export const options = {
 };
 let session = null;
 let retryReport = null;
+let lastComplete = false;
+let pacedIteration = 0;
+let pacedSeen = false;
 function measure(response, role, operation, expected) {
   const tags = { role, operation };
   let success = response.status === expected;
   let partial;
+  lastComplete = false;
   if (success && operation === 'hazards') {
     try {
       partial = response.json('partial');
@@ -93,6 +113,7 @@ function measure(response, role, operation, expected) {
     if (operation === 'hazards') {
       successfulReads.add(1, tags);
       (partial ? partialReads : completeReads).add(1, tags);
+      lastComplete = !partial;
     }
   }
   latency.add(response.timings.duration, tags);
@@ -115,9 +136,33 @@ function token(role) {
   session.until = Date.now() + Math.max(1, Number(session.expires_in) - 5) * 1000;
   return session.access_token;
 }
+// Evenly staggered slots, as in the platform's own P2 generator: VU i sends its k-th request at
+// offset_i + k * VUs / RPS after the hold starts, so every VU takes part and the offered rate is constant.
+// A VU that falls behind (the system cannot keep up) sends immediately instead of skipping a slot.
+function waitForSlot() {
+  const holdStart = exec.scenario.startTime + rampSeconds * 1000;
+  const slot = holdStart + ((exec.vu.idInTest - 1) / targetRPS + pacedIteration * total / targetRPS) * 1000;
+  pacedIteration++;
+  const wait = (slot - Date.now()) / 1000;
+  if (wait > 0) sleep(wait);
+  return { start: holdStart, end: holdStart + holdSeconds * 1000 };
+}
+function recordPaced(window, role, operation) {
+  const now = Date.now();
+  if (operation !== 'hazards' || now < window.start || now >= window.end) return;
+  pacedRequests.add(1, { role });
+  if (!pacedSeen) { pacedExercised.add(1, { role }); pacedSeen = true; }
+  if (lastComplete) pacedComplete.add(1, { role });
+}
 function run(role) {
-  const access = token(role);
+  let access = token(role);
   if (!access) { sleep(1); return; }
+  let window = null;
+  if (targetRPS > 0) {
+    window = waitForSlot();
+    access = token(role);
+    if (!access) { sleep(1); return; }
+  }
   const headers = { Authorization: 'Bearer ' + access, 'X-Correlation-ID': `load-${role}-${__VU}-${__ITER}` };
   if (role === 'field' && reportEvery > 0 && (__ITER % reportEvery === 0 || retryReport)) {
     // Preserve the exact key and bytes after an ambiguous/lost response.
@@ -130,16 +175,24 @@ function run(role) {
     if (measure(response, role, 'field-report', 202)) retryReport = null;
   } else {
     const response = http.get(base + '/hazards?limit=50', { headers, timeout: '5s', responseType: 'text', tags: { name: 'hazards', role } });
-    measure(response, role, 'hazards', 200);
+    const ok = measure(response, role, 'hazards', 200);
+    if (window) recordPaced(window, role, 'hazards');
     if (response.status === 401) session = null;
+    if (window) {
+      // Paced: no think time. Wait only after a rejection or failure so refusals never spin.
+      if (response.status === 429) sleep(Math.min(Number(response.headers['Retry-After']) || 1, 5));
+      else if (!ok) sleep(1);
+      return;
+    }
   }
-  sleep(think);
+  if (!window) sleep(think);
 }
 export function media() { run('media'); }
 export function field() { run('field'); }
 export function handleSummary(data) {
   return { [__ENV.M2_SUMMARY_FILE || 'load-summary.json']: JSON.stringify({
     configuration: { vus: total, field_vus: fieldVUs, think_seconds: think, report_every: reportEvery,
+      target_rps: targetRPS, ramp_seconds: rampSeconds, hold_seconds: holdSeconds,
       ramp: __ENV.M2_RAMP || '60s', hold: __ENV.M2_HOLD || '120s',
       unexpected_error_denominator: 'successful and unexpected operations; controlled rejections excluded',
       all_outcome_metric: 'm2_unsuccessful' }, ...data }, null, 2) };
