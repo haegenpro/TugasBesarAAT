@@ -79,7 +79,7 @@ type fireBatcher struct {
 
 func newFireBatcher(s *Store) *fireBatcher {
 	limit := max(1, platform.Int("WILDFIRE_BATCH_RECORDS", 25))
-	return &fireBatcher{s: s, max: limit, size: limit, ackWorkers: max(1, platform.Int("WILDFIRE_ACK_CONCURRENCY", 1))}
+	return &fireBatcher{s: s, max: limit, size: limit, ackWorkers: max(1, platform.Int("WILDFIRE_ACK_CONCURRENCY", limit))}
 }
 
 func (b *fireBatcher) fail(msgs []jetstream.Msg, reason error, id, correlation string) {
@@ -204,7 +204,7 @@ func (b *fireBatcher) step(owned context.Context, consumer jetstream.Consumer, r
 	for index, w := range work {
 		items[index] = chunkItem{input: w.input, ctx: w.ctx}
 	}
-	done, failed, e := b.s.prepareChunk(call, items, lateness)
+	done, failed, e := b.s.prepareChunkFilled(call, items, lateness)
 	endSpans()
 	if e != nil {
 		return whole(e)
@@ -236,6 +236,73 @@ type chunkItem struct {
 type chunkFailure struct {
 	err             error
 	id, correlation string
+}
+
+// gapInputs returns the durable inputs between the prepared frontier and next, in position order,
+// when next arrived ahead of them. The broker only notifies; the inputs themselves are already
+// committed in raw_inputs, so waiting for their (possibly delayed or still-pending) redelivery is
+// unnecessary. Nothing is returned unless the whole gap is present and pending, so the existing
+// contiguity check and ordering barrier still decide; replays keep their own path.
+func (s *Store) gapInputs(ctx context.Context, next Input) ([]Input, error) {
+	if next.Source != "SATELIT" || replayGeneration(next) > 0 {
+		return nil, nil
+	}
+	var prepared int64
+	if e := s.Pool.QueryRow(ctx, `SELECT prepared FROM source_progress WHERE source=$1 AND namespace=$2`, next.Source, next.Namespace).Scan(&prepared); e != nil {
+		return nil, e
+	}
+	gap := next.Position - prepared - 1
+	if gap <= 0 || gap > int64(max(0, platform.Int("WILDFIRE_GAP_FILL_MAX", 500))) {
+		return nil, nil
+	}
+	rows, e := s.Pool.Query(ctx, `SELECT `+inputColumns+` FROM raw_inputs i WHERE source=$1 AND namespace=$2 AND position>$3 AND position<$4 AND state='pending' ORDER BY position`, next.Source, next.Namespace, prepared, next.Position)
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	var out []Input
+	for rows.Next() {
+		i, e := scanInput(rows)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, i)
+	}
+	if e = rows.Err(); e != nil {
+		return nil, e
+	}
+	if int64(len(out)) != gap {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// prepareChunkFilled is prepareChunk preceded, when the first input is ahead of the prepared
+// frontier, by the missing inputs read from raw_inputs. They go through the same attempt
+// accounting, savepoints and ordering barrier. done counts only the given items; a failure among
+// the filled inputs leaves done at zero, so every given item is retried in order.
+func (s *Store) prepareChunkFilled(call context.Context, items []chunkItem, lateness time.Duration) (int, *chunkFailure, error) {
+	if len(items) == 0 {
+		return 0, nil, nil
+	}
+	fill, e := s.gapInputs(call, items[0].input)
+	if e != nil {
+		return 0, nil, e
+	}
+	all := items
+	if len(fill) > 0 {
+		all = make([]chunkItem, 0, len(fill)+len(items))
+		for _, i := range fill {
+			all = append(all, chunkItem{input: i, ctx: items[0].ctx})
+		}
+		all = append(all, items...)
+	}
+	done, failed, e := s.prepareChunk(call, all, lateness)
+	if e != nil {
+		return 0, nil, e
+	}
+	platform.Add("wildfire_gap_fill_records_total", float64(min(done, len(fill))))
+	return max(0, done-len(fill)), failed, nil
 }
 
 // prepareChunk prepares consecutive inputs in order. It returns how many inputs are committed;

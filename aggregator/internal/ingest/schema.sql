@@ -59,3 +59,6 @@ CREATE INDEX IF NOT EXISTS raw_outbox_claim ON raw_outbox(priority,received_at,p
 ALTER TABLE canonical_outbox ADD COLUMN IF NOT EXISTS available_at timestamptz NOT NULL DEFAULT '-infinity';
 ALTER TABLE canonical_outbox ADD COLUMN IF NOT EXISTS claim_holder text;
 ALTER TABLE canonical_outbox ADD COLUMN IF NOT EXISTS claim_epoch bigint;
+-- frontiers() asks for the first input that is not yet applied once per prepared input; without this
+-- index that question walks every applied input from the oldest, so its cost grows with history.
+CREATE INDEX IF NOT EXISTS raw_unapplied ON raw_inputs(source,namespace,position) WHERE state IN ('pending','prepared');

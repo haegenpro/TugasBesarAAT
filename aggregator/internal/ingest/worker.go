@@ -27,6 +27,9 @@ var WarningSchema string
 type WorkerConfig struct {
 	Kind, NATSURL, CanonicalURL, CanonicalToken string
 	Lateness                                    time.Duration
+	// CanonicalSequence is how many consecutive operations of one namespace one owner call may
+	// carry; 0 reads CANONICAL_SEQUENCE_MAX, 1 sends every operation alone (comparison mode).
+	CanonicalSequence int
 }
 
 func (s *Store) RunWorker(ctx context.Context, cfg WorkerConfig, registry *avrowire.Client) {

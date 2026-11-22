@@ -311,3 +311,59 @@ func requireSameOutcome(t *testing.T, want, got map[string]any, message string) 
 		}
 	}
 }
+
+func TestM2GapAheadOfTheFrontierIsFilledFromDurableInputsInOrder(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	for _, file := range []string{"bridge.jsonl", "mixed-merge-split.jsonl"} {
+		refNS, refInputs := fireFixture(t, s, file)
+		runChunks(t, s, refNS, refInputs, 0)
+		reference := outcome(t, s, refNS)
+
+		ns, inputs := fireFixture(t, s, file)
+		require.GreaterOrEqual(t, len(inputs), 6, file)
+		attempts := func() int64 {
+			var n int64
+			require.NoError(t, s.Pool.QueryRow(ctx, `SELECT sum(attempts) FROM raw_inputs WHERE namespace=$1`, ns).Scan(&n))
+			return n
+		}
+		require.NoError(t, s.Leases.Run(ctx, "worker:"+ns, func(c context.Context) error {
+			// The first two arrive, then the broker hands out a later run first (the ones in between
+			// are delayed or still pending to an earlier subscription).
+			done, failed, e := s.prepareChunkFilled(c, chunkItems(inputs[:2]), 30*time.Minute)
+			require.NoError(t, e)
+			require.Nil(t, failed)
+			require.Equal(t, 2, done)
+			done, failed, e = s.prepareChunkFilled(c, chunkItems(inputs[4:]), 30*time.Minute)
+			require.NoError(t, e)
+			require.Nil(t, failed)
+			require.Equal(t, len(inputs)-4, done, "the fetched inputs are prepared right away")
+			require.EqualValues(t, len(inputs), attempts(), "filled inputs record their attempt like any other")
+			// Their own late deliveries are no-ops.
+			done, failed, e = s.prepareChunkFilled(c, chunkItems(inputs[2:4]), 30*time.Minute)
+			require.NoError(t, e)
+			require.Nil(t, failed)
+			require.Equal(t, 2, done)
+			return nil
+		}))
+		requireSameOutcome(t, reference, outcome(t, s, ns), file+": filling a gap from raw_inputs gives exactly the in-order result")
+	}
+}
+
+func TestM2GapLargerThanTheFillBoundKeepsTheOrderingBarrier(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	t.Setenv("WILDFIRE_GAP_FILL_MAX", "2")
+	ns, inputs := fireFixture(t, s, "mixed-merge-split.jsonl")
+	require.NoError(t, s.Leases.Run(ctx, "worker:"+ns, func(c context.Context) error {
+		done, failed, e := s.prepareChunkFilled(c, chunkItems(inputs[5:7]), 30*time.Minute)
+		require.NoError(t, e)
+		require.Zero(t, done)
+		require.NotNil(t, failed)
+		require.ErrorIs(t, failed.err, ErrGap)
+		return nil
+	}))
+	var pending int
+	require.NoError(t, s.Pool.QueryRow(ctx, `SELECT count(*) FROM raw_inputs WHERE namespace=$1 AND state='pending'`, ns).Scan(&pending))
+	require.Equal(t, len(inputs), pending, "nothing was prepared out of order")
+}

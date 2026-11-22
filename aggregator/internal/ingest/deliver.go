@@ -3,6 +3,7 @@ package ingest
 import (
 	"aggregator/internal/ownership"
 	"aggregator/internal/platform"
+	"aggregator/internal/store"
 	"bytes"
 	"context"
 	"fmt"
@@ -140,41 +141,83 @@ func (s *Store) deliverClaims(ctx context.Context, client *http.Client, cfg Work
 	if loaded, e := s.Inputs(ctx, ids); e == nil {
 		inputs = loaded
 	}
-	for k, c := range claims {
-		i := inputs[c.Message]
-		cctx, span := inputSpan(ctx, i, "canonical batch delivery")
-		e := func() error {
-			req, e := http.NewRequestWithContext(cctx, "POST", strings.TrimRight(cfg.CanonicalURL, "/")+"/internal/canonical/batches", bytes.NewReader(c.Payload))
-			if e != nil {
-				return e
-			}
-			req.Header.Set("Authorization", "Bearer "+cfg.CanonicalToken)
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("X-Correlation-ID", i.CorrelationID)
-			platform.Inject(cctx, req.Header)
-			sent := time.Now()
-			response, e := client.Do(req)
-			platform.Observe("ingest_canonical_owner_call_seconds", time.Since(sent).Seconds())
-			if e != nil {
-				return e
-			}
-			_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
-			response.Body.Close()
-			if readErr != nil {
-				return readErr
-			}
-			if response.StatusCode != 200 {
-				platform.Add(fmt.Sprintf("ingest_canonical_owner_rejections_total_%dxx", response.StatusCode/100), 1)
-				return fmt.Errorf("canonical owner returned %d", response.StatusCode)
-			}
-			return nil
-		}()
-		span.End()
-		if e != nil {
-			return k, e
+	limit := cfg.CanonicalSequence
+	if limit == 0 {
+		limit = platform.Int("CANONICAL_SEQUENCE_MAX", 50)
+	}
+	limit = min(max(1, limit), store.MaxCanonicalSequence)
+	done := 0
+	for done < len(claims) {
+		// A run is consecutive claims of one namespace; claims are already in namespace and
+		// position order, so each run is in predecessor order.
+		end := done + 1
+		for end < len(claims) && end-done < limit && claims[end].Namespace == claims[done].Namespace {
+			end++
 		}
+		if end-done > 1 && !s.noSequence.Load() {
+			run := claims[done:end]
+			body := bytes.NewBufferString(`{"batches":[`)
+			for k, c := range run {
+				if k > 0 {
+					body.WriteByte(',')
+				}
+				body.Write(c.Payload)
+			}
+			body.WriteString(`]}`)
+			status, e := s.postOwner(ctx, client, cfg, "/internal/canonical/sequences", body.Bytes(), inputs[run[0].Message], "canonical sequence delivery")
+			if e == nil {
+				platform.Add("ingest_canonical_sequence_calls_total", 1)
+				platform.Add("ingest_canonical_sequence_operations_total", float64(len(run)))
+				done = end
+				continue
+			}
+			if status == http.StatusNotFound {
+				s.noSequence.Store(true)
+			} else if status != http.StatusConflict {
+				// Ambiguous or unavailable: the whole run is retried unchanged next cycle.
+				return done, e
+			}
+			// A rejection (or an owner without the sequence API) is resolved one operation at a
+			// time, so the exact rejected operation is found and everything before it completes.
+		}
+		for k := done; k < end; k++ {
+			if _, e := s.postOwner(ctx, client, cfg, "/internal/canonical/batches", claims[k].Payload, inputs[claims[k].Message], "canonical batch delivery"); e != nil {
+				return k, e
+			}
+		}
+		done = end
 	}
 	return len(claims), nil
+}
+
+// postOwner sends one owner call and returns its HTTP status (0 when there was no response).
+func (s *Store) postOwner(ctx context.Context, client *http.Client, cfg WorkerConfig, path string, payload []byte, i Input, name string) (int, error) {
+	cctx, span := inputSpan(ctx, i, name)
+	defer span.End()
+	req, e := http.NewRequestWithContext(cctx, "POST", strings.TrimRight(cfg.CanonicalURL, "/")+path, bytes.NewReader(payload))
+	if e != nil {
+		return 0, e
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.CanonicalToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Correlation-ID", i.CorrelationID)
+	platform.Inject(cctx, req.Header)
+	sent := time.Now()
+	response, e := client.Do(req)
+	platform.Observe("ingest_canonical_owner_call_seconds", time.Since(sent).Seconds())
+	if e != nil {
+		return 0, e
+	}
+	_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+	response.Body.Close()
+	if readErr != nil {
+		return response.StatusCode, readErr
+	}
+	if response.StatusCode != 200 {
+		platform.Add(fmt.Sprintf("ingest_canonical_owner_rejections_total_%dxx", response.StatusCode/100), 1)
+		return response.StatusCode, fmt.Errorf("canonical owner returned %d", response.StatusCode)
+	}
+	return 200, nil
 }
 
 // completeCanonical records owner-confirmed entries in one transaction. Claims that are no longer ours

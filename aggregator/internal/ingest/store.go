@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +26,9 @@ var ErrGap = errors.New("noncontiguous source position")
 type Store struct {
 	Pool   *pgxpool.Pool
 	Leases *ownership.Authority
+	// noSequence is set once the owner answers 404 to the multi-operation call (an older owner
+	// during a rolling update); delivery then sends operations one at a time.
+	noSequence atomic.Bool
 }
 
 func New(ctx context.Context, url string) (*Store, error) {
@@ -41,7 +45,7 @@ func New(ctx context.Context, url string) (*Store, error) {
 	if e != nil {
 		return nil, e
 	}
-	return &Store{p, ownership.New(p)}, nil
+	return &Store{Pool: p, Leases: ownership.New(p)}, nil
 }
 func (s *Store) Get(ctx context.Context, id int) (string, error) {
 	var text string

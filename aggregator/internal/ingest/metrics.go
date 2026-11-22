@@ -53,11 +53,16 @@ func batchStats(name string, records int, payloadBytes int) {
 	platform.Add("ingest_batch_bytes_total_"+name, float64(payloadBytes))
 }
 
-// RunMetrics samples backlog, pool and PostgreSQL wait state until ctx ends.
-func (s *Store) RunMetrics(ctx context.Context) {
+// RunMetrics samples the pool until ctx ends, and with backlog also the database-wide backlog and
+// PostgreSQL wait state. The database-wide numbers are the same from every process, so only the
+// ingestion processes sample them; every worker querying them as well only loads the database.
+func (s *Store) RunMetrics(ctx context.Context, backlog bool) {
 	interval := platform.Duration("INGEST_METRICS_INTERVAL", 5*time.Second)
 	for {
-		s.sampleMetrics(ctx)
+		s.samplePool()
+		if backlog {
+			s.sampleBacklog(ctx)
+		}
 		if !Sleep(ctx, interval) {
 			return
 		}
@@ -65,8 +70,11 @@ func (s *Store) RunMetrics(ctx context.Context) {
 }
 
 func (s *Store) sampleMetrics(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
+	s.samplePool()
+	s.sampleBacklog(ctx)
+}
+
+func (s *Store) samplePool() {
 	st := s.Pool.Stat()
 	platform.Gauge("ingest_pool_acquire_total", float64(st.AcquireCount()))
 	platform.Gauge("ingest_pool_acquire_wait_seconds_total", st.AcquireDuration().Seconds())
@@ -74,10 +82,17 @@ func (s *Store) sampleMetrics(ctx context.Context) {
 	platform.Gauge("ingest_pool_canceled_acquire_total", float64(st.CanceledAcquireCount()))
 	platform.Gauge("ingest_pool_acquired_conns", float64(st.AcquiredConns()))
 	platform.Gauge("ingest_pool_max_conns", float64(st.MaxConns()))
+}
+
+func (s *Store) sampleBacklog(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
 	// Backlog: how many rows wait at each hand-off and how old the oldest is.
 	for _, q := range []struct{ name, count, oldest string }{
-		{"raw_outbox", `SELECT count(*) FROM raw_outbox`, `SELECT coalesce(extract(epoch FROM now()-min(i.received_at)),0) FROM raw_outbox o JOIN raw_inputs i USING(message_id)`},
-		{"unprepared", `SELECT count(*) FROM raw_inputs WHERE state='pending'`, `SELECT coalesce(extract(epoch FROM now()-min(received_at)),0) FROM raw_inputs WHERE state='pending'`},
+		// The oldest entries are read through the claim and pending indexes (the outbox row carries
+		// its input's received_at; within a source, received_at follows position), not by scanning.
+		{"raw_outbox", `SELECT count(*) FROM raw_outbox`, `SELECT coalesce(extract(epoch FROM now()-min((SELECT o.received_at FROM raw_outbox o WHERE o.priority=p AND o.received_at IS NOT NULL ORDER BY o.received_at LIMIT 1))),0) FROM generate_series(0,3) p`},
+		{"unprepared", `SELECT count(*) FROM raw_inputs WHERE state='pending'`, `SELECT coalesce(extract(epoch FROM now()-min((SELECT i.received_at FROM raw_inputs i WHERE i.source=p.source AND i.namespace=p.namespace AND i.state='pending' ORDER BY i.position LIMIT 1))),0) FROM source_progress p`},
 		{"canonical_outbox", `SELECT count(*) FROM canonical_outbox`, `SELECT coalesce(extract(epoch FROM now()-min(created_at)),0) FROM canonical_outbox`},
 	} {
 		var n int64

@@ -357,14 +357,18 @@ func (s *Store) prepareFireIn(ctx context.Context, tx pgx.Tx, i Input, lateness 
 		}
 		changes = append(changes, change)
 	}
-	keys := make([]string, 0, len(oldRows))
-	for k := range oldRows {
-		keys = append(keys, k)
-	}
-	if len(keys) > 0 {
-		if _, e = tx.Exec(ctx, `UPDATE wildfire_observations SET previous_fire_id=COALESCE(fire_id,previous_fire_id),fire_id=NULL WHERE namespace=$1 AND key=ANY($2)`, i.Namespace, keys); e != nil {
-			return e
+	// Membership: every loaded row first leaves its fire (remembering it as the previous fire),
+	// then each member of an active fire joins it. Only the end state is written, and only for rows
+	// whose fire_id or previous_fire_id actually changes, so an unchanged member of a large fire is
+	// not rewritten for every detection that touches the fire.
+	type memberState struct{ fire, previous *string }
+	final := make(map[string]memberState, len(oldRows))
+	for key, r := range oldRows {
+		prev := r.Previous
+		if r.Fire != nil {
+			prev = r.Fire
 		}
+		final[key] = memberState{nil, prev}
 	}
 	for id, f := range fires {
 		body, _ := json.Marshal(f)
@@ -372,23 +376,31 @@ func (s *Store) prepareFireIn(ctx context.Context, tx pgx.Tx, i Input, lateness 
 			return e
 		}
 		if f.Active {
-			// One statement per fire instead of one round trip per member.
-			memberKeys := make([]string, 0, len(f.Members))
-			previousIDs := make([]*string, 0, len(f.Members))
+			fireID := id
 			for _, key := range f.Members {
 				r := oldRows[key]
 				prev := r.Previous
 				if r.Fire != nil && *r.Fire != id {
 					prev = r.Fire
 				}
-				memberKeys = append(memberKeys, key)
-				previousIDs = append(previousIDs, prev)
+				final[key] = memberState{&fireID, prev}
 			}
-			if len(memberKeys) > 0 {
-				if _, e = tx.Exec(ctx, `UPDATE wildfire_observations o SET fire_id=$3,previous_fire_id=v.previous FROM unnest($2::text[],$4::text[]) AS v(key,previous) WHERE o.namespace=$1 AND o.key=v.key`, i.Namespace, memberKeys, id, previousIDs); e != nil {
-					return e
-				}
-			}
+		}
+	}
+	same := func(a, b *string) bool { return a == nil && b == nil || a != nil && b != nil && *a == *b }
+	var changedKeys []string
+	var changedFires, changedPrevious []*string
+	for key, m := range final {
+		if r, loaded := oldRows[key]; loaded && same(r.Fire, m.fire) && same(r.Previous, m.previous) {
+			continue
+		}
+		changedKeys = append(changedKeys, key)
+		changedFires = append(changedFires, m.fire)
+		changedPrevious = append(changedPrevious, m.previous)
+	}
+	if len(changedKeys) > 0 {
+		if _, e = tx.Exec(ctx, `UPDATE wildfire_observations o SET fire_id=v.fire,previous_fire_id=v.previous FROM unnest($2::text[],$3::text[],$4::text[]) AS v(key,fire,previous) WHERE o.namespace=$1 AND o.key=v.key`, i.Namespace, changedKeys, changedFires, changedPrevious); e != nil {
+			return e
 		}
 	}
 	membership := map[string]bool{}
