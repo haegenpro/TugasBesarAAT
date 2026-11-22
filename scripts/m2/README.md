@@ -34,6 +34,9 @@ Pick the cluster once with `manage.py init --profile minikube|k3s`; all tools fo
 | `p4_processor_kill_check.py` | P4-5 | force-deletes the wildfire processor repeatedly during processing; PASS/FAIL for no regression, resumption, no lost or duplicated identity |
 | `p4_reference_compare.py` | P4-6 | compares Audit WILDFIRE events with a reference file from the assistants (needs the file) |
 | `p4_ingestion_progress.py` | P4-2, P4-4, P4-7 (helps P4-8) | received/prepared/applied offsets, lag, watermark, late-data counters over time; no verdict |
+| `p4_feed_rate.py` | P4-4 sizing (helps P4-7) | polls the live feed's `/v1/session` (read-only) and reports offsets per second at the running speed (60x) and at 1x, average and busiest windows; writes the burst-test input; no verdict |
+| `p4_fixture_feed.py` | P4-4 | controlled SSE feed in our event format (steady rate, then a burst of factor x that rate); started in the cluster by `p4_burst_cluster.py` |
+| `p4_burst_cluster.py` | P4-4 | installs the fixture, points ingestion at it, bursts 60x for 10 s, PASS/FAIL for received and applied back within 60 s, end-to-end p50/p95/p99, pair oracle (no loss, duplicate or merge); undoes every change, `--restore` after a crash |
 | `baseline_capture.py` | performance baselines | records revision, images, limits, redacted config, dataset digest and generator CPU; scrapes pipeline metrics around a run; judges final progress against an expected file; `compare` prints two runs |
 | `p5_warning_slo_snapshot.py` | P5-1, P5-2, P5-8 | delivery measurements over the whole coverage period plus reconciliation (expected = delivered + rejected + pending, rejected ids listed); PASS/FAIL only when measurable |
 | `p5_sensor_fault_probe.py` | P5-3, P5-4 | with `--break-at/--restore-at` scales the sensor down and up itself and judges latency, errors, stale status, breaker opening, request surge and recovery; scrapes every ingestion pod |

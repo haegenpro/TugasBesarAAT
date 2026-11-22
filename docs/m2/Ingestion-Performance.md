@@ -137,3 +137,34 @@ Cluster measurements for steps 2 to 6 against the step 1 baseline, then the inte
 (processor crashes, lease takeover, suspension and resumption, partitions, ambiguous acknowledgements, node
 and disk loss) and the assignment gates. Defaults are chosen from those runs. Visibility-barrier redesign and
 storage-durability tuning stay deferred.
+
+## P4-4 burst test on the cluster
+
+The earlier P4-4 run watched the practice feed, which runs at 60x all the time, while starting
+millions of offsets behind. That measures how fast the pipeline reads history, not recovery after a
+burst. The burst test below starts from an up-to-date pipeline instead.
+
+1. Measure the live feed (read-only, about 30 minutes; the group token comes from the private
+   configuration and is never printed):
+
+       python3 scripts/m2/p4_feed_rate.py --minutes 30
+
+   It reports offsets per second at the running speed and at 1x (average and the busiest 60, 300 and
+   600 virtual seconds) and writes `recommendation` (normal = busiest 1x over 60 virtual seconds,
+   burst = 60 x normal) into its `result.json`.
+2. Small rehearsal, then the real run:
+
+       python3 scripts/m2/p4_burst_cluster.py --normal-rate 2 --seconds 3
+       python3 scripts/m2/p4_burst_cluster.py --rate-from .m2-local/evidence-p4-feed-rate-<stamp>/result.json
+
+   The tool installs `p4-fixture` (scripts/m2/p4_fixture_feed.py), seeds the province reference for a
+   fresh namespace, points ingestion at the fixture, waits until other satellite namespaces have no
+   backlog, warms up at the normal rate, bursts for 10 s at 60x, and judges received and applied back
+   within the baseline lag no later than 60 s after the burst ends. It then reports per-event latency
+   (fixture availability to raw_inputs.received_at to canonical_batches.applied_at) and checks that every
+   pair became exactly one wildfire. Every change is undone at the end; if the tool was killed, run
+   `python3 scripts/m2/p4_burst_cluster.py --restore`.
+
+While it runs, the live feed acquisition is paused (ingestion reads the fixture) and resumes from its
+stored progress afterwards. A live backlog that does not drain within `--idle-wait` makes the run
+INVALID, because the test inputs would queue behind it in the shared stream and worker.
