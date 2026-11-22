@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -148,6 +150,93 @@ c.commit()
             print(f'Initialized {database} schema with its own runtime role.')
 
 
+SATELLITE_TOKEN = LOCAL/'satellite-token'
+
+
+def read_token(path: Path) -> str:
+    """One raw token per owner-only file; refuses links, loose permissions and stray whitespace."""
+    if path.is_symlink():
+        raise ValueError(f'{path} cannot be a symlink')
+    if path.stat().st_mode & 0o077:
+        raise ValueError(f'{path} must be readable only by its owner (chmod 600)')
+    token = path.read_text().strip()
+    if not token or any(c.isspace() for c in token):
+        raise ValueError(f'{path} must contain exactly one token')
+    return token
+
+
+def save_token(path: Path, token: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    with os.fdopen(fd, 'w') as out:
+        if hasattr(os, 'fchmod'):
+            os.fchmod(out.fileno(), 0o600)
+        out.write(token+'\n')
+
+
+def live_satellite(cfg: dict) -> dict:
+    """Whether the deployed ingestion Secret carries a token; never returns the value."""
+    try:
+        data = json.loads(kubectl(cfg, '-n', NAMESPACE, 'get', 'secret', 'ingestion-runtime',
+                                  '-o', 'json')).get('data', {})
+        rollout = json.loads(kubectl(cfg, '-n', NAMESPACE, 'get', 'deployment', 'ingestion', '-o', 'json'))
+        return {'deployed_token': bool(data.get('SATELLITE_TOKEN')),
+                'ingestion_ready': rollout.get('status', {}).get('readyReplicas', 0),
+                'ingestion_replicas': rollout['spec'].get('replicas', 0)}
+    except (RuntimeError, ValueError, subprocess.TimeoutExpired):
+        return {'deployed_token': None, 'note': 'ingestion is not deployed or the cluster is unreachable'}
+
+
+def satellite(args, cfg: dict) -> None:
+    """Toggle satellite acquisition: the ingestion service reads the feed only while it has a token."""
+    current = cfg['external'].get('satellite_token', '')
+    if args.action == 'status':
+        print(json.dumps({'configured': bool(current), 'saved_token': SATELLITE_TOKEN.exists(),
+                          'namespace': cfg['satellite']['namespace'],
+                          'initial_offset': cfg['satellite']['initial_offset'],
+                          **live_satellite(cfg)}, indent=2))
+        return
+    if args.action == 'on':
+        if args.token_file:
+            token = read_token(Path(args.token_file))
+        elif SATELLITE_TOKEN.exists():
+            token = read_token(SATELLITE_TOKEN)
+        elif current:
+            token = current
+        else:
+            token = getpass.getpass('Satellite token (input hidden): ').strip()
+            if not token or any(c.isspace() for c in token):
+                raise ValueError('a single non-empty token is required')
+        # Keep the token outside the configuration so `off` followed by `on` needs no re-entry.
+        save_token(SATELLITE_TOKEN, token)
+    else:
+        if current and not SATELLITE_TOKEN.exists():
+            save_token(SATELLITE_TOKEN, current)
+        token = ''
+    state = 'on' if token else 'off'
+    if token == current:
+        print(f'Satellite acquisition is already {state} in {args.config}; nothing changed. '
+              'Run `satellite status` to compare with the cluster.')
+        return
+    cfg['external']['satellite_token'] = token
+    private_json(Path(args.config), cfg)
+    print(f'Configuration updated: satellite acquisition {state}.')
+    if state == 'on':
+        print(f"Namespace {cfg['satellite']['namespace']!r}: resumes from its stored position, or from "
+              f"initial_offset {cfg['satellite']['initial_offset']} on first use. Install the province "
+              'reference first; the wildfire processor refuses to place fires without it.')
+    if (LOCAL/'stopped.json').exists() or (LOCAL/'reset-pending.json').exists() or args.no_deploy:
+        # `start` only restores replica counts, so it would not carry the new Secret.
+        print('Not deployed now. The change takes effect at the next `up` (or `deploy` while running).')
+        return
+    validate_nodes(cfg)
+    manifest = render(cfg, runtime_secrets(LOCAL/'secrets.json'))
+    kubectl(cfg, 'apply', '-f', '-', input_text=json.dumps(manifest))
+    # The runtime checksum annotation changes with the token, so only ingestion rolls.
+    kubectl(cfg, '-n', NAMESPACE, 'rollout', 'status', 'deployment/ingestion', '--timeout=300s', timeout=320)
+    print(f'Deployed: ingestion restarted with satellite acquisition {state}.')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default=str(LOCAL/'config.json'))
@@ -171,6 +260,10 @@ def main() -> int:
     commands.add_parser('up')
     commands.add_parser('ready').add_argument('--timeout', type=int, default=600)
     commands.add_parser('scale').add_argument('--aggregators',type=int,choices=(1,2,3,5),required=True)
+    toggle = commands.add_parser('satellite', help='turn satellite acquisition on/off or show its state')
+    toggle.add_argument('action', choices=('on', 'off', 'status'))
+    toggle.add_argument('--token-file', help='owner-only file holding the token (saved for later `on`)')
+    toggle.add_argument('--no-deploy', action='store_true', help='only update the configuration')
     args = parser.parse_args()
     try:
         if args.command == 'init':
@@ -211,6 +304,8 @@ def main() -> int:
             validate_nodes(cfg)
             kubectl(cfg,'-n',NAMESPACE,'scale','deployment/aggregator','--replicas='+str(args.aggregators))
             print(f'Aggregator test replica count: {args.aggregators}. Normal deployment count is 3; restore it after the test.')
+        elif args.command == 'satellite':
+            satellite(args, cfg)
         return 0
     except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
         # Do not include remote output or serialized credentials in diagnostics.
